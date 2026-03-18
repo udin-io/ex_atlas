@@ -1,0 +1,4 @@
+# UdinCode planning artifacts
+.artifacts/*
+!.artifacts/adr-*.md
+.claude/
