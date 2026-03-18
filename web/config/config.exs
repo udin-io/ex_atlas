@@ -14,7 +14,13 @@ config :atlas, Oban,
   notifier: Oban.Notifiers.Postgres,
   queues: [default: 10],
   repo: Atlas.Repo,
-  plugins: [{Oban.Plugins.Cron, []}]
+  plugins: [
+    {Oban.Plugins.Cron,
+     crontab: [
+       # Health checks every 5 minutes for each active credential
+       {"*/5 * * * *", Atlas.Monitoring.Workers.HealthCheckCronWorker}
+     ]}
+  ]
 
 config :ash,
   allow_forbidden_field_for_relationships_by_default?: true,
@@ -63,7 +69,7 @@ config :spark,
 config :atlas,
   ecto_repos: [Atlas.Repo],
   generators: [timestamp_type: :utc_datetime],
-  ash_domains: [Atlas.Accounts],
+  ash_domains: [Atlas.Accounts, Atlas.Providers, Atlas.Infrastructure, Atlas.Monitoring],
   ash_authentication: [return_error_on_invalid_magic_link_token?: true]
 
 # Configure the endpoint

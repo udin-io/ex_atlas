@@ -27,6 +27,14 @@ config :atlas, AtlasWeb.Endpoint,
 # In test we don't send emails
 config :atlas, Atlas.Mailer, adapter: Swoosh.Adapters.Test
 
+# Cloak vault key for test
+config :atlas, Atlas.Vault,
+  ciphers: [
+    default:
+      {Cloak.Ciphers.AES.GCM,
+       tag: "AES.GCM.V1", key: Base.decode64!("rKTJ3H+D0WOhW0iB65XrjofO+RBz0HFiXgoWDJwle5g=")}
+  ]
+
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 

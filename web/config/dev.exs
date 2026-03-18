@@ -71,6 +71,14 @@ config :atlas, AtlasWeb.Endpoint,
 # Enable dev routes for dashboard and mailbox
 config :atlas, dev_routes: true, token_signing_secret: "wwCKkTcK0S5qb+TQ2IPqqw7CPnh7LrW5"
 
+# Cloak vault key for development (32 bytes, base64-encoded)
+config :atlas, Atlas.Vault,
+  ciphers: [
+    default:
+      {Cloak.Ciphers.AES.GCM,
+       tag: "AES.GCM.V1", key: Base.decode64!("rKTJ3H+D0WOhW0iB65XrjofO+RBz0HFiXgoWDJwle5g=")}
+  ]
+
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
 

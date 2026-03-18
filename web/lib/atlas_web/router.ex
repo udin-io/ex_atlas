@@ -26,16 +26,15 @@ defmodule AtlasWeb.Router do
     pipe_through :browser
 
     ash_authentication_live_session :authenticated_routes do
-      # in each liveview, add one of the following at the top of the module:
-      #
-      # If an authenticated user must be present:
-      # on_mount {AtlasWeb.LiveUserAuth, :live_user_required}
-      #
-      # If an authenticated user *may* be present:
-      # on_mount {AtlasWeb.LiveUserAuth, :live_user_optional}
-      #
-      # If an authenticated user must *not* be present:
-      # on_mount {AtlasWeb.LiveUserAuth, :live_no_user}
+      live "/dashboard", DashboardLive
+      live "/providers", ProviderLive.Index
+      live "/providers/new", ProviderLive.FormLive, :new
+      live "/providers/:id", ProviderLive.Show
+      live "/providers/:id/edit", ProviderLive.FormLive, :edit
+      live "/infrastructure", InfrastructureLive.Index
+      live "/infrastructure/apps/:id", InfrastructureLive.AppShow
+      live "/infrastructure/machines/:id", InfrastructureLive.MachineShow
+      live "/topology", TopologyLive
     end
   end
 

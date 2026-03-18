@@ -35,40 +35,55 @@ defmodule AtlasWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://hexdocs.pm/phoenix/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-    </header>
+    <div class="min-h-screen flex flex-col">
+      <header class="navbar bg-base-100 border-b border-base-300 px-4 sm:px-6 lg:px-8">
+        <div class="flex-1">
+          <.link href="/" class="flex items-center gap-2 font-bold text-lg">
+            <.icon name="hero-server-stack-solid" class="size-6 text-primary" /> Atlas
+          </.link>
+        </div>
+        <div class="flex-none">
+          <ul class="flex px-1 space-x-1 items-center">
+            <li>
+              <.link navigate="/dashboard" class="btn btn-ghost btn-sm">
+                <.icon name="hero-squares-2x2" class="size-4" /> Dashboard
+              </.link>
+            </li>
+            <li>
+              <.link navigate="/providers" class="btn btn-ghost btn-sm">
+                <.icon name="hero-cloud" class="size-4" /> Providers
+              </.link>
+            </li>
+            <li>
+              <.link navigate="/infrastructure" class="btn btn-ghost btn-sm">
+                <.icon name="hero-server" class="size-4" /> Infrastructure
+              </.link>
+            </li>
+            <li>
+              <.link navigate="/topology" class="btn btn-ghost btn-sm">
+                <.icon name="hero-map" class="size-4" /> Topology
+              </.link>
+            </li>
+            <li class="ml-2">
+              <.theme_toggle />
+            </li>
+            <li :if={@current_scope} class="ml-2">
+              <.link href="/sign-out" method="delete" class="btn btn-ghost btn-sm">
+                Sign out
+              </.link>
+            </li>
+          </ul>
+        </div>
+      </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
-        {render_slot(@inner_block)}
-      </div>
-    </main>
+      <main class="flex-1 px-4 py-8 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-6xl">
+          {render_slot(@inner_block)}
+        </div>
+      </main>
 
-    <.flash_group flash={@flash} />
+      <.flash_group flash={@flash} />
+    </div>
     """
   end
 
