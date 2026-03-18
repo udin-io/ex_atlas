@@ -27,4 +27,7 @@ case Atlas.Accounts.User
 
   {:ok, _user} ->
     IO.puts("Admin user already exists")
+
+  {:error, reason} ->
+    IO.puts("Error checking for admin user: #{inspect(reason)}")
 end
