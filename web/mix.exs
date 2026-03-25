@@ -41,6 +41,7 @@ defmodule Atlas.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
+      {:yaml_elixir, "~> 2.0"},
       {:ash_cloak, "~> 0.2"},
       {:cloak, "~> 1.1"},
       {:bcrypt_elixir, "~> 3.0"},
