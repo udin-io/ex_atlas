@@ -20,6 +20,7 @@ defmodule Atlas.Application do
       {Phoenix.PubSub, name: Atlas.PubSub},
       {Registry, keys: :unique, name: Atlas.Providers.SyncRegistry},
       {DynamicSupervisor, name: Atlas.Providers.SyncSupervisor, strategy: :one_for_one},
+      Atlas.Providers.Adapters.Fly.TokenCache,
       Atlas.Providers.SyncManager,
       AtlasWeb.Endpoint,
       {AshAuthentication.Supervisor, [otp_app: :atlas]}
