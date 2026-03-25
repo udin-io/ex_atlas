@@ -98,7 +98,9 @@ defmodule AtlasWeb.ProviderLiveTest do
       original = System.get_env("FLY_ACCESS_TOKEN")
 
       on_exit(fn ->
-        if original, do: System.put_env("FLY_ACCESS_TOKEN", original), else: System.delete_env("FLY_ACCESS_TOKEN")
+        if original,
+          do: System.put_env("FLY_ACCESS_TOKEN", original),
+          else: System.delete_env("FLY_ACCESS_TOKEN")
       end)
 
       System.put_env("FLY_ACCESS_TOKEN", "fm2_detected_token_abc")
@@ -120,7 +122,9 @@ defmodule AtlasWeb.ProviderLiveTest do
       original = System.get_env("FLY_ACCESS_TOKEN")
 
       on_exit(fn ->
-        if original, do: System.put_env("FLY_ACCESS_TOKEN", original), else: System.delete_env("FLY_ACCESS_TOKEN")
+        if original,
+          do: System.put_env("FLY_ACCESS_TOKEN", original),
+          else: System.delete_env("FLY_ACCESS_TOKEN")
       end)
 
       System.delete_env("FLY_ACCESS_TOKEN")
@@ -148,16 +152,19 @@ defmodule AtlasWeb.ProviderLiveTest do
       Req.Test.stub(:fly_graphql, fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(200, Jason.encode!(%{
-          "data" => %{
-            "organizations" => %{
-              "nodes" => [
-                %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"},
-                %{"slug" => "my-team", "name" => "My Team", "type" => "ORGANIZATION"}
-              ]
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "data" => %{
+              "organizations" => %{
+                "nodes" => [
+                  %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"},
+                  %{"slug" => "my-team", "name" => "My Team", "type" => "ORGANIZATION"}
+                ]
+              }
             }
-          }
-        }))
+          })
+        )
       end)
 
       # Set up form with fly + token and inject test plug
@@ -172,6 +179,10 @@ defmodule AtlasWeb.ProviderLiveTest do
       |> element("button", "Fetch Organizations")
       |> render_click()
 
+      # Wait for async task to complete and deliver result
+      Process.sleep(50)
+      render(view)
+
       assert has_element?(view, "[data-role=org-badge]", "personal")
       assert has_element?(view, "[data-role=org-badge]", "my-team")
     end
@@ -182,15 +193,18 @@ defmodule AtlasWeb.ProviderLiveTest do
       Req.Test.stub(:fly_graphql, fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(200, Jason.encode!(%{
-          "data" => %{
-            "organizations" => %{
-              "nodes" => [
-                %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"}
-              ]
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "data" => %{
+              "organizations" => %{
+                "nodes" => [
+                  %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"}
+                ]
+              }
             }
-          }
-        }))
+          })
+        )
       end)
 
       view
@@ -202,6 +216,10 @@ defmodule AtlasWeb.ProviderLiveTest do
       view
       |> element("button", "Fetch Organizations")
       |> render_click()
+
+      # Wait for async task to complete and deliver result
+      Process.sleep(50)
+      render(view)
 
       view
       |> element("[data-role=org-badge]", "personal")
@@ -217,7 +235,9 @@ defmodule AtlasWeb.ProviderLiveTest do
       original = System.get_env("FLY_ACCESS_TOKEN")
 
       on_exit(fn ->
-        if original, do: System.put_env("FLY_ACCESS_TOKEN", original), else: System.delete_env("FLY_ACCESS_TOKEN")
+        if original,
+          do: System.put_env("FLY_ACCESS_TOKEN", original),
+          else: System.delete_env("FLY_ACCESS_TOKEN")
       end)
 
       System.put_env("FLY_ACCESS_TOKEN", "fm2_detected_token_abc")
@@ -248,6 +268,34 @@ defmodule AtlasWeb.ProviderLiveTest do
       |> render_change()
 
       refute has_element?(view, "[data-role=cli-detect-success]")
+    end
+  end
+
+  describe "Test Connection" do
+    test "test_connection requires provider type and token", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      view
+      |> element("button", "Test Connection")
+      |> render_click()
+
+      assert render(view) =~ "Fill in provider type and API token first"
+    end
+
+    test "test_connection requires valid provider type", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      # Set only token without a valid provider type selected
+      view
+      |> form("form", %{form: %{provider_type: "", api_token: "test-token"}})
+      |> render_change()
+
+      view
+      |> element("button", "Test Connection")
+      |> render_click()
+
+      # Empty string provider_type doesn't match any known provider
+      assert render(view) =~ "Select a provider type first"
     end
   end
 

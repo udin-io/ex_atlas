@@ -8,6 +8,8 @@ defmodule Atlas.Providers.Adapters.Fly.CliDetector do
   3. Returns `:not_found`
   """
 
+  require Logger
+
   @default_config_path Path.expand("~/.fly/config.yml")
 
   @doc """
@@ -55,7 +57,9 @@ defmodule Atlas.Providers.Adapters.Fly.CliDetector do
   defp parse_yaml(content) do
     YamlElixir.read_from_string(content)
   rescue
-    _ -> :error
+    e ->
+      Logger.warning("Failed to parse Fly CLI config: #{inspect(e)}")
+      :error
   end
 
   defp validate_token(value) do

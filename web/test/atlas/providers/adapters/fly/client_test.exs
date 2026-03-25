@@ -84,6 +84,11 @@ defmodule Atlas.Providers.Adapters.Fly.ClientTest do
     test "new(binary) always succeeds" do
       assert {:ok, %Client{token_source: :static}} = Client.new("some-api-token")
     end
+
+    test "new(bare map with api_token) creates a static client" do
+      assert {:ok, %Client{token_source: :static}} =
+               Client.new(%{api_token: "test-token", org_slug: "personal"})
+    end
   end
 
   describe "401 retry logic" do
@@ -254,19 +259,25 @@ defmodule Atlas.Providers.Adapters.Fly.ClientTest do
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(200, Jason.encode!(%{
-          "data" => %{
-            "organizations" => %{
-              "nodes" => [
-                %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"},
-                %{"slug" => "my-team", "name" => "My Team", "type" => "ORGANIZATION"}
-              ]
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "data" => %{
+              "organizations" => %{
+                "nodes" => [
+                  %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"},
+                  %{"slug" => "my-team", "name" => "My Team", "type" => "ORGANIZATION"}
+                ]
+              }
             }
-          }
-        }))
+          })
+        )
       end)
 
-      client = %{client | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_ok})}
+      client = %{
+        client
+        | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_ok})
+      }
 
       assert {:ok, %{status: 200, body: body}} = Client.list_orgs(client)
       nodes = body["data"]["organizations"]["nodes"]
@@ -280,10 +291,16 @@ defmodule Atlas.Providers.Adapters.Fly.ClientTest do
       Req.Test.stub(:fly_list_orgs_err, fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(401, Jason.encode!(%{"errors" => [%{"message" => "Unauthorized"}]}))
+        |> Plug.Conn.send_resp(
+          401,
+          Jason.encode!(%{"errors" => [%{"message" => "Unauthorized"}]})
+        )
       end)
 
-      client = %{client | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_err})}
+      client = %{
+        client
+        | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_err})
+      }
 
       assert {:ok, %{status: 401}} = Client.list_orgs(client)
     end
@@ -306,13 +323,19 @@ defmodule Atlas.Providers.Adapters.Fly.ClientTest do
         else
           conn
           |> Plug.Conn.put_resp_content_type("application/json")
-          |> Plug.Conn.send_resp(200, Jason.encode!(%{
-            "data" => %{"organizations" => %{"nodes" => []}}
-          }))
+          |> Plug.Conn.send_resp(
+            200,
+            Jason.encode!(%{
+              "data" => %{"organizations" => %{"nodes" => []}}
+            })
+          )
         end
       end)
 
-      client = %{client | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_retry})}
+      client = %{
+        client
+        | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_retry})
+      }
 
       assert {:ok, %{status: 200}} = Client.list_orgs(client)
     end

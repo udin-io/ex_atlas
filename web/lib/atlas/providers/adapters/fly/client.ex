@@ -60,6 +60,10 @@ defmodule Atlas.Providers.Adapters.Fly.Client do
     end
   end
 
+  def new(%{api_token: api_token}, _cache_server) when is_binary(api_token) do
+    new(api_token, nil)
+  end
+
   def new(api_token, _cache_server) when is_binary(api_token) do
     {:ok, %__MODULE__{token_source: :static, req: build_req(api_token)}}
   end

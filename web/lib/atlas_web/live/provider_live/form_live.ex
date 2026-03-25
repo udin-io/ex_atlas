@@ -12,6 +12,7 @@ defmodule AtlasWeb.ProviderLive.FormLive do
        test_result: nil,
        cli_detect_status: nil,
        detected_orgs: [],
+       orgs_loading: false,
        req_options: [],
        cli_detector_opts: []
      )}
@@ -119,31 +120,16 @@ defmodule AtlasWeb.ProviderLive.FormLive do
       socket.assigns.form.source |> AshPhoenix.Form.params() |> Map.get("api_token")
 
     if api_token && api_token != "" do
-      case Client.new(api_token) do
-        {:ok, client} ->
-          case Client.list_orgs(client, socket.assigns.req_options) do
-            {:ok, %{status: 200, body: body}} ->
-              nodes = get_in(body, ["data", "organizations", "nodes"]) || []
+      req_options = socket.assigns.req_options
 
-              orgs =
-                Enum.map(nodes, fn node ->
-                  {node["name"], node["slug"]}
-                end)
+      Task.Supervisor.async_nolink(Atlas.TaskSupervisor, fn ->
+        case Client.new(api_token) do
+          {:ok, client} -> Client.list_orgs(client, req_options)
+          {:error, _} = error -> error
+        end
+      end)
 
-              {:noreply, assign(socket, detected_orgs: orgs)}
-
-            {:ok, %{status: status}} ->
-              {:noreply,
-               assign(socket, detected_orgs: [], cli_detect_status: {:error, "Failed to fetch orgs (HTTP #{status})"})}
-
-            {:error, _} ->
-              {:noreply,
-               assign(socket, detected_orgs: [], cli_detect_status: {:error, "Failed to connect to Fly.io API"})}
-          end
-
-        {:error, _} ->
-          {:noreply, assign(socket, cli_detect_status: {:error, "Invalid token"})}
-      end
+      {:noreply, assign(socket, orgs_loading: true)}
     else
       {:noreply, assign(socket, cli_detect_status: {:error, "Enter an API token first"})}
     end
@@ -198,10 +184,50 @@ defmodule AtlasWeb.ProviderLive.FormLive do
   end
 
   @impl true
+  def handle_info({ref, {:ok, %{status: 200, body: body}}}, socket) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    nodes = get_in(body, ["data", "organizations", "nodes"]) || []
+
+    orgs =
+      Enum.map(nodes, fn node ->
+        {node["name"], node["slug"]}
+      end)
+
+    {:noreply, assign(socket, detected_orgs: orgs, orgs_loading: false)}
+  end
+
+  def handle_info({ref, {:ok, %{status: status}}}, socket) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+
+    {:noreply,
+     assign(socket,
+       detected_orgs: [],
+       orgs_loading: false,
+       cli_detect_status: {:error, "Failed to fetch orgs (HTTP #{status})"}
+     )}
+  end
+
+  def handle_info({ref, {:error, _}}, socket) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+
+    {:noreply,
+     assign(socket,
+       detected_orgs: [],
+       orgs_loading: false,
+       cli_detect_status: {:error, "Failed to connect to Fly.io API"}
+     )}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket) do
+    {:noreply, assign(socket, orgs_loading: false)}
+  end
+
+  @impl true
   def handle_info({:set_req_options, options}, socket) do
     {:noreply, assign(socket, req_options: options)}
   end
 
+  @impl true
   def handle_info({:set_cli_detector_opts, opts}, socket) do
     {:noreply, assign(socket, cli_detector_opts: opts)}
   end
@@ -225,6 +251,7 @@ defmodule AtlasWeb.ProviderLive.FormLive do
       assigns
       |> assign(:fly_selected, fly_selected?(assigns.form))
       |> assign(:has_token, has_api_token?(assigns.form))
+
     ~H"""
     <div class="max-w-xl mx-auto space-y-6">
       <.header>
@@ -256,10 +283,18 @@ defmodule AtlasWeb.ProviderLive.FormLive do
               <button type="button" phx-click="detect_cli_token" class="btn btn-ghost btn-xs">
                 <.icon name="hero-command-line" class="size-3" /> Detect from CLI
               </button>
-              <span :if={@cli_detect_status == :detected} data-role="cli-detect-success" class="badge badge-success badge-sm gap-1">
+              <span
+                :if={@cli_detect_status == :detected}
+                data-role="cli-detect-success"
+                class="badge badge-success badge-sm gap-1"
+              >
                 <.icon name="hero-check-circle" class="size-3" /> Token detected
               </span>
-              <span :if={match?({:error, _}, @cli_detect_status)} data-role="cli-detect-error" class="text-error text-xs">
+              <span
+                :if={match?({:error, _}, @cli_detect_status)}
+                data-role="cli-detect-error"
+                class="text-error text-xs"
+              >
                 {elem(@cli_detect_status, 1)}
               </span>
             </div>
@@ -267,8 +302,15 @@ defmodule AtlasWeb.ProviderLive.FormLive do
             <.input field={@form[:org_slug]} label="Organization Slug" placeholder="personal" />
 
             <div :if={@fly_selected && @has_token} class="flex flex-wrap items-center gap-2 -mt-2">
-              <button type="button" phx-click="fetch_orgs" class="btn btn-ghost btn-xs">
-                <.icon name="hero-building-office" class="size-3" /> Fetch Organizations
+              <button
+                type="button"
+                phx-click="fetch_orgs"
+                class="btn btn-ghost btn-xs"
+                disabled={@orgs_loading}
+              >
+                <span :if={@orgs_loading} class="loading loading-spinner loading-xs"></span>
+                <.icon :if={!@orgs_loading} name="hero-building-office" class="size-3" />
+                {if @orgs_loading, do: "Fetching...", else: "Fetch Organizations"}
               </button>
               <button
                 :for={{name, slug} <- @detected_orgs}
