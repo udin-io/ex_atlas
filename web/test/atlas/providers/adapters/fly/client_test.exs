@@ -243,6 +243,81 @@ defmodule Atlas.Providers.Adapters.Fly.ClientTest do
     end
   end
 
+  describe "list_orgs/1" do
+    test "returns org nodes on success" do
+      {:ok, client} = Client.new("test-token")
+
+      Req.Test.stub(:fly_list_orgs_ok, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["query"] =~ "organizations"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{
+          "data" => %{
+            "organizations" => %{
+              "nodes" => [
+                %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"},
+                %{"slug" => "my-team", "name" => "My Team", "type" => "ORGANIZATION"}
+              ]
+            }
+          }
+        }))
+      end)
+
+      client = %{client | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_ok})}
+
+      assert {:ok, %{status: 200, body: body}} = Client.list_orgs(client)
+      nodes = body["data"]["organizations"]["nodes"]
+      assert length(nodes) == 2
+      assert Enum.any?(nodes, &(&1["slug"] == "personal"))
+    end
+
+    test "handles error responses" do
+      {:ok, client} = Client.new("bad-token")
+
+      Req.Test.stub(:fly_list_orgs_err, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(401, Jason.encode!(%{"errors" => [%{"message" => "Unauthorized"}]}))
+      end)
+
+      client = %{client | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_err})}
+
+      assert {:ok, %{status: 401}} = Client.list_orgs(client)
+    end
+
+    test "retries on 401 for non-static tokens", ctx do
+      System.put_env("FLY_ACCESS_TOKEN", @test_token)
+      start_cache(ctx)
+
+      {:ok, client} = Client.new(:cli, ctx.server_name)
+      call_count = :counters.new(1, [:atomics])
+
+      Req.Test.stub(:fly_list_orgs_retry, fn conn ->
+        count = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+
+        if count == 0 do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(401, Jason.encode!(%{"error" => "unauthorized"}))
+        else
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, Jason.encode!(%{
+            "data" => %{"organizations" => %{"nodes" => []}}
+          }))
+        end
+      end)
+
+      client = %{client | req: Req.Request.merge_options(client.req, plug: {Req.Test, :fly_list_orgs_retry})}
+
+      assert {:ok, %{status: 200}} = Client.list_orgs(client)
+    end
+  end
+
   describe "all request functions use execute/2" do
     test "list_machines retries on 401", ctx do
       System.put_env("FLY_ACCESS_TOKEN", @test_token)
