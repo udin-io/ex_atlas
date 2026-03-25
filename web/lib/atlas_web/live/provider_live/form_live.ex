@@ -1,11 +1,20 @@
 defmodule AtlasWeb.ProviderLive.FormLive do
   use AtlasWeb, :live_view
 
+  alias Atlas.Providers.Adapters.Fly.{CliDetector, Client}
+
   on_mount {AtlasWeb.LiveUserAuth, :live_user_required}
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket, test_result: nil)}
+    {:ok,
+     assign(socket,
+       test_result: nil,
+       cli_detect_status: nil,
+       detected_orgs: [],
+       req_options: [],
+       cli_detector_opts: []
+     )}
   end
 
   @impl true
@@ -54,6 +63,17 @@ defmodule AtlasWeb.ProviderLive.FormLive do
   @impl true
   def handle_event("validate", %{"form" => params}, socket) do
     form = AshPhoenix.Form.validate(socket.assigns.form.source, params) |> to_form()
+
+    prev_type = current_provider_type(socket.assigns.form)
+    new_type = params["provider_type"]
+
+    socket =
+      if prev_type != new_type do
+        assign(socket, cli_detect_status: nil, detected_orgs: [])
+      else
+        socket
+      end
+
     {:noreply, assign(socket, form: form)}
   end
 
@@ -74,6 +94,67 @@ defmodule AtlasWeb.ProviderLive.FormLive do
       {:error, form} ->
         {:noreply, assign(socket, form: to_form(form))}
     end
+  end
+
+  def handle_event("detect_cli_token", _params, socket) do
+    case CliDetector.detect(socket.assigns.cli_detector_opts) do
+      {:ok, token} ->
+        # Update the form with the detected token
+        params = socket.assigns.form.source |> AshPhoenix.Form.params()
+        updated_params = Map.put(params, "api_token", token)
+        form = AshPhoenix.Form.validate(socket.assigns.form.source, updated_params) |> to_form()
+
+        {:noreply, assign(socket, form: form, cli_detect_status: :detected)}
+
+      :not_found ->
+        {:noreply,
+         assign(socket,
+           cli_detect_status: {:error, "No Fly.io CLI token found. Run `fly auth login` first."}
+         )}
+    end
+  end
+
+  def handle_event("fetch_orgs", _params, socket) do
+    api_token =
+      socket.assigns.form.source |> AshPhoenix.Form.params() |> Map.get("api_token")
+
+    if api_token && api_token != "" do
+      case Client.new(api_token) do
+        {:ok, client} ->
+          case Client.list_orgs(client, socket.assigns.req_options) do
+            {:ok, %{status: 200, body: body}} ->
+              nodes = get_in(body, ["data", "organizations", "nodes"]) || []
+
+              orgs =
+                Enum.map(nodes, fn node ->
+                  {node["name"], node["slug"]}
+                end)
+
+              {:noreply, assign(socket, detected_orgs: orgs)}
+
+            {:ok, %{status: status}} ->
+              {:noreply,
+               assign(socket, detected_orgs: [], cli_detect_status: {:error, "Failed to fetch orgs (HTTP #{status})"})}
+
+            {:error, _} ->
+              {:noreply,
+               assign(socket, detected_orgs: [], cli_detect_status: {:error, "Failed to connect to Fly.io API"})}
+          end
+
+        {:error, _} ->
+          {:noreply, assign(socket, cli_detect_status: {:error, "Invalid token"})}
+      end
+    else
+      {:noreply, assign(socket, cli_detect_status: {:error, "Enter an API token first"})}
+    end
+  end
+
+  def handle_event("select_org", %{"slug" => slug}, socket) do
+    params = socket.assigns.form.source |> AshPhoenix.Form.params()
+    updated_params = Map.put(params, "org_slug", slug)
+    form = AshPhoenix.Form.validate(socket.assigns.form.source, updated_params) |> to_form()
+
+    {:noreply, assign(socket, form: form)}
   end
 
   def handle_event("test_connection", _params, socket) do
@@ -117,7 +198,33 @@ defmodule AtlasWeb.ProviderLive.FormLive do
   end
 
   @impl true
+  def handle_info({:set_req_options, options}, socket) do
+    {:noreply, assign(socket, req_options: options)}
+  end
+
+  def handle_info({:set_cli_detector_opts, opts}, socket) do
+    {:noreply, assign(socket, cli_detector_opts: opts)}
+  end
+
+  defp current_provider_type(form) do
+    form.source |> AshPhoenix.Form.params() |> Map.get("provider_type")
+  end
+
+  defp fly_selected?(form) do
+    current_provider_type(form) == "fly"
+  end
+
+  defp has_api_token?(form) do
+    token = form.source |> AshPhoenix.Form.params() |> Map.get("api_token")
+    token && token != ""
+  end
+
+  @impl true
   def render(assigns) do
+    assigns =
+      assigns
+      |> assign(:fly_selected, fly_selected?(assigns.form))
+      |> assign(:has_token, has_api_token?(assigns.form))
     ~H"""
     <div class="max-w-xl mx-auto space-y-6">
       <.header>
@@ -144,7 +251,36 @@ defmodule AtlasWeb.ProviderLive.FormLive do
 
             <.input field={@form[:name]} label="Name" placeholder="My Fly.io account" />
             <.input field={@form[:api_token]} type="password" label="API Token" placeholder="fo1_..." />
+
+            <div :if={@fly_selected} class="flex items-center gap-2 -mt-2">
+              <button type="button" phx-click="detect_cli_token" class="btn btn-ghost btn-xs">
+                <.icon name="hero-command-line" class="size-3" /> Detect from CLI
+              </button>
+              <span :if={@cli_detect_status == :detected} data-role="cli-detect-success" class="badge badge-success badge-sm gap-1">
+                <.icon name="hero-check-circle" class="size-3" /> Token detected
+              </span>
+              <span :if={match?({:error, _}, @cli_detect_status)} data-role="cli-detect-error" class="text-error text-xs">
+                {elem(@cli_detect_status, 1)}
+              </span>
+            </div>
+
             <.input field={@form[:org_slug]} label="Organization Slug" placeholder="personal" />
+
+            <div :if={@fly_selected && @has_token} class="flex flex-wrap items-center gap-2 -mt-2">
+              <button type="button" phx-click="fetch_orgs" class="btn btn-ghost btn-xs">
+                <.icon name="hero-building-office" class="size-3" /> Fetch Organizations
+              </button>
+              <button
+                :for={{name, slug} <- @detected_orgs}
+                type="button"
+                phx-click="select_org"
+                phx-value-slug={slug}
+                data-role="org-badge"
+                class="badge badge-outline badge-sm cursor-pointer hover:badge-primary"
+              >
+                {name} ({slug})
+              </button>
+            </div>
 
             <div class="divider text-xs">Sync Settings</div>
 

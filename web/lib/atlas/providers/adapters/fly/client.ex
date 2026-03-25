@@ -19,6 +19,7 @@ defmodule Atlas.Providers.Adapters.Fly.Client do
         }
 
   @base_url "https://api.machines.dev/v1"
+  @graphql_url "https://api.fly.io/graphql"
   @default_cache TokenCache
 
   # --- Construction ---
@@ -104,6 +105,30 @@ defmodule Atlas.Providers.Adapters.Fly.Client do
   def get_machine(%__MODULE__{} = client, app_name, machine_id) do
     execute(client, fn req ->
       Req.get(req, url: "/apps/#{app_name}/machines/#{machine_id}")
+    end)
+  end
+
+  @doc """
+  Lists organizations accessible to the authenticated user via the Fly.io GraphQL API.
+
+  Accepts optional `req_options` keyword list that gets merged into the request
+  (useful for injecting test plugs).
+  """
+  def list_orgs(%__MODULE__{} = client, req_options \\ []) do
+    query = "query { organizations { nodes { slug name type } } }"
+
+    execute(client, fn req ->
+      # Build a fresh Req because GraphQL URL differs from Machines API base_url,
+      # but copy auth headers and any test plug options from the existing request.
+      graphql_req =
+        Req.new(
+          headers: Map.to_list(req.headers),
+          retry: false
+        )
+        |> Req.Request.merge_options(req.options |> Map.drop([:base_url]) |> Map.to_list())
+        |> Req.Request.merge_options(req_options)
+
+      Req.post(graphql_req, url: @graphql_url, json: %{query: query})
     end)
   end
 
