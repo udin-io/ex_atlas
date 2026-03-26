@@ -75,6 +75,230 @@ defmodule AtlasWeb.ProviderLiveTest do
     end
   end
 
+  describe "CLI Detection" do
+    test "detect button shown for fly, hidden for runpod", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      # Select fly → detect button appears
+      view
+      |> form("form", %{form: %{provider_type: "fly"}})
+      |> render_change()
+
+      assert has_element?(view, "button", "Detect from CLI")
+
+      # Switch to runpod → detect button disappears
+      view
+      |> form("form", %{form: %{provider_type: "runpod"}})
+      |> render_change()
+
+      refute has_element?(view, "button", "Detect from CLI")
+    end
+
+    test "detect_cli_token success shows token detected", %{conn: conn} do
+      original = System.get_env("FLY_ACCESS_TOKEN")
+
+      on_exit(fn ->
+        if original,
+          do: System.put_env("FLY_ACCESS_TOKEN", original),
+          else: System.delete_env("FLY_ACCESS_TOKEN")
+      end)
+
+      System.put_env("FLY_ACCESS_TOKEN", "fm2_detected_token_abc")
+
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      view
+      |> form("form", %{form: %{provider_type: "fly"}})
+      |> render_change()
+
+      view
+      |> element("button", "Detect from CLI")
+      |> render_click()
+
+      assert has_element?(view, "[data-role=cli-detect-success]")
+    end
+
+    test "detect_cli_token failure shows error", %{conn: conn} do
+      original = System.get_env("FLY_ACCESS_TOKEN")
+
+      on_exit(fn ->
+        if original,
+          do: System.put_env("FLY_ACCESS_TOKEN", original),
+          else: System.delete_env("FLY_ACCESS_TOKEN")
+      end)
+
+      System.delete_env("FLY_ACCESS_TOKEN")
+
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      # Use a fake config path so file-based detection also fails
+      send(view.pid, {:set_cli_detector_opts, [config_path: "/tmp/nonexistent_fly_config.yml"]})
+
+      view
+      |> form("form", %{form: %{provider_type: "fly"}})
+      |> render_change()
+
+      view
+      |> element("button", "Detect from CLI")
+      |> render_click()
+
+      assert has_element?(view, "[data-role=cli-detect-error]")
+    end
+
+    test "fetch_orgs shows org badges", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      # Stub the GraphQL call
+      Req.Test.stub(:fly_graphql, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "data" => %{
+              "organizations" => %{
+                "nodes" => [
+                  %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"},
+                  %{"slug" => "my-team", "name" => "My Team", "type" => "ORGANIZATION"}
+                ]
+              }
+            }
+          })
+        )
+      end)
+
+      # Set up form with fly + token and inject test plug
+      view
+      |> form("form", %{form: %{provider_type: "fly", api_token: "test-token-123"}})
+      |> render_change()
+
+      # Inject req_options for test plug
+      send(view.pid, {:set_req_options, [plug: {Req.Test, :fly_graphql}]})
+
+      view
+      |> element("button", "Fetch Organizations")
+      |> render_click()
+
+      # Wait for async task to complete and deliver result
+      Process.sleep(50)
+      render(view)
+
+      assert has_element?(view, "[data-role=org-badge]", "personal")
+      assert has_element?(view, "[data-role=org-badge]", "my-team")
+    end
+
+    test "clicking org badge fills org_slug field", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      Req.Test.stub(:fly_graphql, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "data" => %{
+              "organizations" => %{
+                "nodes" => [
+                  %{"slug" => "personal", "name" => "Personal", "type" => "PERSONAL"}
+                ]
+              }
+            }
+          })
+        )
+      end)
+
+      view
+      |> form("form", %{form: %{provider_type: "fly", api_token: "test-token-123"}})
+      |> render_change()
+
+      send(view.pid, {:set_req_options, [plug: {Req.Test, :fly_graphql}]})
+
+      view
+      |> element("button", "Fetch Organizations")
+      |> render_click()
+
+      # Wait for async task to complete and deliver result
+      Process.sleep(50)
+      render(view)
+
+      view
+      |> element("[data-role=org-badge]", "personal")
+      |> render_click()
+
+      # The org_slug input should now have the value
+      assert view
+             |> element("input[name='form[org_slug]']")
+             |> render() =~ "personal"
+    end
+
+    test "switching provider type resets detection state", %{conn: conn} do
+      original = System.get_env("FLY_ACCESS_TOKEN")
+
+      on_exit(fn ->
+        if original,
+          do: System.put_env("FLY_ACCESS_TOKEN", original),
+          else: System.delete_env("FLY_ACCESS_TOKEN")
+      end)
+
+      System.put_env("FLY_ACCESS_TOKEN", "fm2_detected_token_abc")
+
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      # Select fly and detect
+      view
+      |> form("form", %{form: %{provider_type: "fly"}})
+      |> render_change()
+
+      view
+      |> element("button", "Detect from CLI")
+      |> render_click()
+
+      assert has_element?(view, "[data-role=cli-detect-success]")
+
+      # Switch to runpod
+      view
+      |> form("form", %{form: %{provider_type: "runpod"}})
+      |> render_change()
+
+      refute has_element?(view, "[data-role=cli-detect-success]")
+
+      # Switch back to fly — should be clean
+      view
+      |> form("form", %{form: %{provider_type: "fly"}})
+      |> render_change()
+
+      refute has_element?(view, "[data-role=cli-detect-success]")
+    end
+  end
+
+  describe "Test Connection" do
+    test "test_connection requires provider type and token", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      view
+      |> element("button", "Test Connection")
+      |> render_click()
+
+      assert render(view) =~ "Fill in provider type and API token first"
+    end
+
+    test "test_connection requires valid provider type", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers/new")
+
+      # Set only token without a valid provider type selected
+      view
+      |> form("form", %{form: %{provider_type: "", api_token: "test-token"}})
+      |> render_change()
+
+      view
+      |> element("button", "Test Connection")
+      |> render_click()
+
+      # Empty string provider_type doesn't match any known provider
+      assert render(view) =~ "Select a provider type first"
+    end
+  end
+
   describe "Show" do
     test "shows provider details", %{conn: conn} do
       {:ok, credential} =
