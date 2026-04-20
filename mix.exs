@@ -60,7 +60,7 @@ defmodule Atlas.MixProject do
     [
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib .formatter.exs mix.exs README.md LICENSE CHANGELOG.md),
+      files: ~w(lib guides .formatter.exs mix.exs README.md LICENSE CHANGELOG.md),
       maintainers: ["Peter Shoukry"]
     ]
   end
@@ -68,7 +68,19 @@ defmodule Atlas.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md"],
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "guides/getting_started.md",
+        "guides/transient_pods.md",
+        "guides/writing_a_provider.md",
+        "guides/telemetry.md",
+        "guides/testing.md",
+        "LICENSE"
+      ],
+      groups_for_extras: [
+        Guides: ~r{guides/.+\.md}
+      ],
       source_ref: "v#{@version}",
       groups_for_modules: [
         "Core API": [Atlas, Atlas.Config, Atlas.Error],
