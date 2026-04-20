@@ -265,6 +265,30 @@ Atlas.spawn_compute(
 )
 ```
 
+## Phoenix LiveDashboard integration
+
+If your Phoenix app already mounts `Phoenix.LiveDashboard`, adding an
+**Atlas** tab is a one-liner — the library ships
+`Atlas.LiveDashboard.ComputePage`:
+
+```elixir
+# lib/my_app_web/router.ex
+import Phoenix.LiveDashboard.Router
+
+live_dashboard "/dashboard",
+  metrics: MyAppWeb.Telemetry,
+  allow_destructive_actions: true,   # required for Stop/Terminate buttons
+  additional_pages: [
+    atlas: Atlas.LiveDashboard.ComputePage
+  ]
+```
+
+Visit `/dashboard/atlas` to see a live-refreshing table of every tracked
+compute resource, with per-row **Touch**, **Stop**, and **Terminate**
+buttons. The page is only compiled when `:phoenix_live_dashboard` is in
+your deps (both LiveDashboard and LiveView are declared as `optional: true`
+in Atlas, so library-only users pay nothing).
+
 ## Roadmap
 
 - **v0.1** — RunPod (full surface), Mock provider, orchestrator, auth.

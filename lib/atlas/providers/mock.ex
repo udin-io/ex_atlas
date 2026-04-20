@@ -42,7 +42,11 @@ defmodule Atlas.Providers.Mock do
   def ensure_started do
     case :ets.whereis(@table) do
       :undefined ->
-        :ets.new(@table, [:public, :named_table, :set, read_concurrency: true])
+        try do
+          :ets.new(@table, [:public, :named_table, :set, read_concurrency: true])
+        rescue
+          ArgumentError -> @table
+        end
 
       _ref ->
         @table

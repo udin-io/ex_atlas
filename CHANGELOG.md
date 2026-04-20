@@ -18,3 +18,6 @@ Initial release. Highlights:
   `Phoenix.PubSub` broadcasts.
 - Telemetry events `[:atlas, <provider>, :request]`.
 - Shared `Atlas.Test.ProviderConformance` suite every provider must pass.
+- `Atlas.LiveDashboard.ComputePage` — drop-in `Phoenix.LiveDashboard.PageBuilder`
+  page listing tracked compute resources with Touch/Stop/Terminate actions.
+  Compiled only when `:phoenix_live_dashboard` is in the host app's deps.

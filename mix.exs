@@ -38,6 +38,8 @@ defmodule Atlas.MixProject do
       {:telemetry, "~> 1.3"},
       {:plug_crypto, "~> 2.1"},
       {:phoenix_pubsub, "~> 2.1", optional: true},
+      {:phoenix_live_dashboard, "~> 0.8", optional: true},
+      {:phoenix_live_view, "~> 1.0", optional: true},
       {:bypass, "~> 2.1", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -87,6 +89,7 @@ defmodule Atlas.MixProject do
           Atlas.Providers.Vast
         ],
         Auth: [Atlas.Auth.Token, Atlas.Auth.SignedUrl],
+        "LiveDashboard integration": [Atlas.LiveDashboard.ComputePage],
         Orchestrator: [
           Atlas.Orchestrator,
           Atlas.Orchestrator.ComputeServer,
