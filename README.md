@@ -1,4 +1,4 @@
-# Atlas
+# ExAtlas
 
 [![Hex.pm](https://img.shields.io/hexpm/v/atlas.svg)](https://hex.pm/packages/atlas)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/atlas)
@@ -12,25 +12,25 @@ Two concerns under one roof:
    changing one option.
 2. **Fly.io platform operations.** First-class deploys, log streaming, and
    token lifecycle — independent of the compute pipeline. See
-   [`Atlas.Fly`](lib/atlas/fly.ex) and the [Fly guide](guides/fly.md).
+   [`ExAtlas.Fly`](lib/atlas/fly.ex) and the [Fly guide](guides/fly.md).
 
-- **One contract, many providers.** `Atlas.Provider` is a behaviour; swap
+- **One contract, many providers.** `ExAtlas.Provider` is a behaviour; swap
   `:runpod`, `:fly`, `:lambda_labs`, `:vast`, or your own module without
   changing call sites.
-- **Fly.io platform ops.** `Atlas.Fly.*` handles `fly deploy` streaming,
+- **Fly.io platform ops.** `ExAtlas.Fly.*` handles `fly deploy` streaming,
   log tailing, and the full token resolution chain
   (ETS → DETS → `~/.fly/config.yml` → `fly tokens create`). Works without
   Phoenix.
 - **Batteries-included orchestration.** `Registry` + `DynamicSupervisor`
   + `Phoenix.PubSub` + reaper for the "per-user transient pod" pattern.
-- **Igniter installer.** `mix igniter.install atlas` wires everything up.
-- **Built for the S3-style handoff.** `Atlas.Auth` mints bearer tokens and
+- **Igniter installer.** `mix igniter.install ex_atlas` wires everything up.
+- **Built for the S3-style handoff.** `ExAtlas.Auth` mints bearer tokens and
   S3-style HMAC-signed URLs so your browser can talk directly to a pod without
   the Phoenix app proxying every frame.
 - **Pure `Req` under the hood.** Every HTTP call goes through
   [Req](https://hex.pm/packages/req), so you get retries, decoding, and
   telemetry for free.
-- **LiveDashboard included.** Drop `Atlas.LiveDashboard.ComputePage` into
+- **LiveDashboard included.** Drop `ExAtlas.LiveDashboard.ComputePage` into
   your existing dashboard and get a live ops view of every tracked pod.
 
 ---
@@ -45,8 +45,8 @@ Two concerns under one roof:
 - [Swapping providers](#swapping-providers)
 - [Configuration](#configuration)
 - [Providers](#providers)
-- [The `Atlas.Provider` behaviour](#the-atlasprovider-behaviour)
-- [Normalized specs (`Atlas.Spec.*`)](#normalized-specs-atlasspec)
+- [The `ExAtlas.Provider` behaviour](#the-atlasprovider-behaviour)
+- [Normalized specs (`ExAtlas.Spec.*`)](#normalized-specs-atlasspec)
 - [Auth primitives](#auth-primitives)
 - [Orchestrator — lifecycle, events, reaper](#orchestrator--lifecycle-events-reaper)
 - [Phoenix LiveDashboard integration](#phoenix-livedashboard-integration)
@@ -68,7 +68,7 @@ The one-liner — uses the [Igniter](https://hex.pm/packages/igniter) installer
 to add the dep, write sensible config, and create storage directories:
 
 ```bash
-mix igniter.install atlas
+mix igniter.install ex_atlas
 ```
 
 Or add manually to `mix.exs`:
@@ -76,22 +76,22 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:atlas, "~> 0.2"}
+    {:ex_atlas, "~> 0.2"}
   ]
 end
 ```
 
-…then run `mix atlas.install` once to wire config defaults, or configure
+…then run `mix ex_atlas.install` once to wire config defaults, or configure
 things yourself (see [Configuration](#configuration)).
 
 For the optional orchestrator + LiveDashboard features, also include:
 
 ```elixir
 {:phoenix_pubsub, "~> 2.1"},           # PubSub broadcasts from the orchestrator
-{:phoenix_live_dashboard, "~> 0.8"}    # Atlas.LiveDashboard.ComputePage tab
+{:phoenix_live_dashboard, "~> 0.8"}    # ExAtlas.LiveDashboard.ComputePage tab
 ```
 
-Atlas declares both as `optional: true`, so they are not pulled into pure
+ExAtlas declares both as `optional: true`, so they are not pulled into pure
 library consumers.
 
 ### Upgrading
@@ -100,7 +100,7 @@ To upgrade atlas and run any version-specific migrations:
 
 ```bash
 mix deps.update atlas
-mix atlas.upgrade
+mix ex_atlas.upgrade
 ```
 
 The upgrade task is idempotent and runs only the steps needed between your
@@ -110,12 +110,12 @@ previous and current atlas version.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Atlas (top-level provider-agnostic API)                              │
-│  Atlas.spawn_compute/1 · run_job/2 · stream_job/1 · terminate/1       │
+│  ExAtlas (top-level provider-agnostic API)                              │
+│  ExAtlas.spawn_compute/1 · run_job/2 · stream_job/1 · terminate/1       │
 └───────────────────────────┬───────────────────────────────────────────┘
                             │
             ┌───────────────▼───────────────┐    ┌───────────────────┐
-            │  Atlas.Provider (behaviour)   │◄───│  Atlas.Spec.*     │
+            │  ExAtlas.Provider (behaviour)   │◄───│  ExAtlas.Spec.*     │
             └───────────────┬───────────────┘    │  normalized structs│
                             │                    └───────────────────┘
     ┌─────────┬─────────────┼──────────────┬─────────────┐
@@ -126,42 +126,42 @@ previous and current atlas version.
  └──────┘ └──────┘ └────────────────┘ └────────┘ └─────────────┘
 
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Atlas.Orchestrator (opt-in supervision tree)                         │
+│  ExAtlas.Orchestrator (opt-in supervision tree)                         │
 │  ComputeServer (GenServer/resource) · Registry · DynamicSupervisor    │
 │  · Reaper · PubSub events                                             │
 └───────────────────────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Atlas.Auth                                                           │
+│  ExAtlas.Auth                                                           │
 │  Token (bearer mint/verify) · SignedUrl (S3-style HMAC)               │
 └───────────────────────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Atlas.LiveDashboard.ComputePage                                      │
+│  ExAtlas.LiveDashboard.ComputePage                                      │
 │  Live-refreshing table · per-row Touch/Stop/Terminate                 │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick start — Fly.io platform ops
 
-Atlas gives you a clean Elixir API over `fly deploy`, the Fly Machines log API,
+ExAtlas gives you a clean Elixir API over `fly deploy`, the Fly Machines log API,
 and Fly token lifecycle. Works with or without Phoenix.
 
 ### Discover apps
 
 ```elixir
-Atlas.Fly.discover_apps("/path/to/project")
+ExAtlas.Fly.discover_apps("/path/to/project")
 # => [{"my-api", "/path/to/project"}, {"my-web", "/path/to/project/web"}]
 ```
 
 ### Tail logs
 
 ```elixir
-Atlas.Fly.subscribe_logs("my-api", "/path/to/project")
+ExAtlas.Fly.subscribe_logs("my-api", "/path/to/project")
 
 # In the subscriber:
-def handle_info({:atlas_fly_logs, "my-api", entries}, state) do
-  # entries :: [Atlas.Fly.Logs.LogEntry.t()]
+def handle_info({:ex_atlas_fly_logs, "my-api", entries}, state) do
+  # entries :: [ExAtlas.Fly.Logs.LogEntry.t()]
   ...
 end
 ```
@@ -172,12 +172,12 @@ all subscribers disconnect. Automatic 401 retry is built in.
 ### Stream a deploy
 
 ```elixir
-Atlas.Fly.subscribe_deploy(ticket_id)
+ExAtlas.Fly.subscribe_deploy(ticket_id)
 Task.start(fn ->
-  Atlas.Fly.stream_deploy(project_path, "web", ticket_id)
+  ExAtlas.Fly.stream_deploy(project_path, "web", ticket_id)
 end)
 
-def handle_info({:atlas_fly_deploy, ^ticket_id, line}, state) do
+def handle_info({:ex_atlas_fly_deploy, ^ticket_id, line}, state) do
   ...
 end
 ```
@@ -187,14 +187,14 @@ absolute cap.
 
 ### Tokens
 
-`Atlas.Fly.Tokens` resolves tokens via ETS → DETS (durable) → `~/.fly/config.yml`
+`ExAtlas.Fly.Tokens` resolves tokens via ETS → DETS (durable) → `~/.fly/config.yml`
 → `fly tokens create readonly` → manual override. You usually don't call it
 directly — the log client uses it transparently — but you can:
 
 ```elixir
-{:ok, token} = Atlas.Fly.Tokens.get("my-api")
-Atlas.Fly.Tokens.invalidate("my-api")
-Atlas.Fly.Tokens.set_manual("my-api", "fo1_...")
+{:ok, token} = ExAtlas.Fly.Tokens.get("my-api")
+ExAtlas.Fly.Tokens.invalidate("my-api")
+ExAtlas.Fly.Tokens.set_manual("my-api", "fo1_...")
 ```
 
 Full docs: [Fly guide](guides/fly.md).
@@ -203,20 +203,20 @@ Full docs: [Fly guide](guides/fly.md).
 
 The motivating use case: a Fly.io-hosted Phoenix app spawns a RunPod GPU per
 user, hands the browser a preshared key, the browser runs real-time video
-inference directly against the pod, and Atlas reaps the pod when the session
+inference directly against the pod, and ExAtlas reaps the pod when the session
 ends or goes idle.
 
 ```elixir
 # config/config.exs
-config :atlas, default_provider: :runpod
-config :atlas, :runpod, api_key: System.get_env("RUNPOD_API_KEY")
-config :atlas, start_orchestrator: true
+config :ex_atlas, default_provider: :runpod
+config :ex_atlas, :runpod, api_key: System.get_env("RUNPOD_API_KEY")
+config :ex_atlas, start_orchestrator: true
 ```
 
 ```elixir
 # LiveView.mount/3
 {:ok, pid, compute} =
-  Atlas.Orchestrator.spawn(
+  ExAtlas.Orchestrator.spawn(
     gpu: :h100,
     image: "ghcr.io/me/my-inference-server:latest",
     ports: [{8000, :http}],
@@ -226,7 +226,7 @@ config :atlas, start_orchestrator: true
     name: "atlas-" <> to_string(socket.assigns.current_user.id)
   )
 
-Phoenix.PubSub.subscribe(Atlas.PubSub, "compute:" <> compute.id)
+Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
 
 assign(socket,
   inference_url: hd(compute.ports).url,       # https://<pod-id>-8000.proxy.runpod.net
@@ -251,7 +251,7 @@ end
 Heartbeat while the browser is active:
 
 ```elixir
-Atlas.Orchestrator.touch(compute.id)
+ExAtlas.Orchestrator.touch(compute.id)
 ```
 
 When the user leaves, or after `idle_ttl_ms` with no heartbeat, the
@@ -259,26 +259,26 @@ When the user leaves, or after `idle_ttl_ms` with no heartbeat, the
 You can also terminate manually:
 
 ```elixir
-:ok = Atlas.Orchestrator.stop_tracked(compute.id)
+:ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
 ```
 
 ## Quick start — serverless inference
 
 ```elixir
 {:ok, job} =
-  Atlas.run_job(
+  ExAtlas.run_job(
     provider: :runpod,
     endpoint: "abc123",
     input: %{prompt: "a beautiful sunset"},
     mode: :async
   )
 
-{:ok, done} = Atlas.get_job(job.id, provider: :runpod, endpoint: "abc123")
+{:ok, done} = ExAtlas.get_job(job.id, provider: :runpod, endpoint: "abc123")
 done.output
 
 # Synchronous with a hard timeout (wrapped in Task.async + Task.yield internally)
 {:ok, done} =
-  Atlas.run_job(
+  ExAtlas.run_job(
     provider: :runpod,
     endpoint: "abc123",
     input: %{prompt: "a beautiful sunset"},
@@ -287,7 +287,7 @@ done.output
   )
 
 # Stream partial output
-Atlas.stream_job(job.id, provider: :runpod, endpoint: "abc123")
+ExAtlas.stream_job(job.id, provider: :runpod, endpoint: "abc123")
 |> Enum.each(&IO.inspect/1)
 ```
 
@@ -295,20 +295,20 @@ Atlas.stream_job(job.id, provider: :runpod, endpoint: "abc123")
 
 ```elixir
 # Today
-Atlas.spawn_compute(provider: :runpod,      gpu: :h100, image: "...")
+ExAtlas.spawn_compute(provider: :runpod,      gpu: :h100, image: "...")
 
 # v0.2
-Atlas.spawn_compute(provider: :fly,         gpu: :a100_80g, image: "...")
-Atlas.spawn_compute(provider: :lambda_labs, gpu: :h100, image: "...")
+ExAtlas.spawn_compute(provider: :fly,         gpu: :a100_80g, image: "...")
+ExAtlas.spawn_compute(provider: :lambda_labs, gpu: :h100, image: "...")
 
 # v0.3
-Atlas.spawn_compute(provider: :vast,        gpu: :rtx_4090, image: "...")
+ExAtlas.spawn_compute(provider: :vast,        gpu: :rtx_4090, image: "...")
 
 # Your in-house cloud, today:
-Atlas.spawn_compute(provider: MyCompany.Cloud.Provider, gpu: :h100, image: "...")
+ExAtlas.spawn_compute(provider: MyCompany.Cloud.Provider, gpu: :h100, image: "...")
 ```
 
-All built-in and user-defined providers implement `Atlas.Provider`.
+All built-in and user-defined providers implement `ExAtlas.Provider`.
 
 ## Configuration
 
@@ -316,23 +316,23 @@ All built-in and user-defined providers implement `Atlas.Provider`.
 # config/config.exs
 
 # Provider resolution: per-call :provider option > :default_provider > raise
-config :atlas, default_provider: :runpod
+config :ex_atlas, default_provider: :runpod
 
-# API keys: per-call :api_key > :atlas / :<provider> config > env var
-config :atlas, :runpod,      api_key: System.get_env("RUNPOD_API_KEY")
-config :atlas, :fly,         api_key: System.get_env("FLY_API_TOKEN")
-config :atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY")
-config :atlas, :vast,        api_key: System.get_env("VAST_API_KEY")
+# API keys: per-call :api_key > :ex_atlas / :<provider> config > env var
+config :ex_atlas, :runpod,      api_key: System.get_env("RUNPOD_API_KEY")
+config :ex_atlas, :fly,         api_key: System.get_env("FLY_API_TOKEN")
+config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY")
+config :ex_atlas, :vast,        api_key: System.get_env("VAST_API_KEY")
 
 # Start the orchestrator (Registry + DynamicSupervisor + PubSub + Reaper).
-# When false (default), Atlas boots no processes.
-config :atlas, start_orchestrator: true
+# When false (default), ExAtlas boots no processes.
+config :ex_atlas, start_orchestrator: true
 
 # Reaper: periodic orphan reconciliation and idle-TTL enforcement.
-config :atlas, :orchestrator,
+config :ex_atlas, :orchestrator,
   reap_interval_ms: 60_000,
   reap_providers: [:runpod],
-  reap_name_prefix: "atlas-"     # safety switch: only reap resources Atlas spawned
+  reap_name_prefix: "atlas-"     # safety switch: only reap resources ExAtlas spawned
 ```
 
 **Default environment variable names** used when nothing else is set:
@@ -348,19 +348,19 @@ config :atlas, :orchestrator,
 
 | Provider      | Module                           | Version shipped | Capabilities                                                                        |
 | ------------- | -------------------------------- | --------------- | ----------------------------------------------------------------------------------- |
-| `:runpod`     | `Atlas.Providers.RunPod`         | v0.1            | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
-| `:fly`        | `Atlas.Providers.Fly`            | v0.2 (stub)     | `:http_proxy, :raw_tcp, :global_networking`                                         |
-| `:lambda_labs`| `Atlas.Providers.LambdaLabs`     | v0.2 (stub)     | `:raw_tcp`                                                                          |
-| `:vast`       | `Atlas.Providers.Vast`           | v0.3 (stub)     | `:spot, :raw_tcp`                                                                   |
-| `:mock`       | `Atlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
+| `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
+| `:fly`        | `ExAtlas.Providers.Fly`            | v0.2 (stub)     | `:http_proxy, :raw_tcp, :global_networking`                                         |
+| `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.2 (stub)     | `:raw_tcp`                                                                          |
+| `:vast`       | `ExAtlas.Providers.Vast`           | v0.3 (stub)     | `:spot, :raw_tcp`                                                                   |
+| `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
-Stub modules return `{:error, %Atlas.Error{kind: :unsupported}}` from every
+Stub modules return `{:error, %ExAtlas.Error{kind: :unsupported}}` from every
 non-`capabilities/0` callback so the name is reserved and callers get a clear
 error — no `FunctionClauseError`s.
 
 ### Canonical GPU atoms
 
-Atlas refers to GPUs by stable atoms. `Atlas.Spec.GpuCatalog` maps each atom
+ExAtlas refers to GPUs by stable atoms. `ExAtlas.Spec.GpuCatalog` maps each atom
 to each provider's native identifier.
 
 | Canonical           | RunPod                           | Lambda Labs              | Fly.io            | Vast.ai        |
@@ -376,12 +376,12 @@ to each provider's native identifier.
 | `:rtx_3090`         | `"NVIDIA GeForce RTX 3090"`      | —                        | —                 | `"RTX_3090"`   |
 | `:mi300x`           | `"AMD Instinct MI300X OAM"`      | —                        | —                 | —              |
 
-See `Atlas.Spec.GpuCatalog` for the full mapping.
+See `ExAtlas.Spec.GpuCatalog` for the full mapping.
 
-## The `Atlas.Provider` behaviour
+## The `ExAtlas.Provider` behaviour
 
 Every provider implements one callback per operation. See
-`Atlas.Provider` for the full contract.
+`ExAtlas.Provider` for the full contract.
 
 | Callback                    | Purpose                                           |
 | --------------------------- | ------------------------------------------------- |
@@ -396,12 +396,12 @@ Every provider implements one callback per operation. See
 | `capabilities/0`            | Declare supported features                        |
 | `list_gpu_types/1`          | Catalog + pricing                                 |
 
-Callers can check `Atlas.capabilities(:runpod)` before relying on an
+Callers can check `ExAtlas.capabilities(:runpod)` before relying on an
 optional feature:
 
 ```elixir
-if :serverless in Atlas.capabilities(provider) do
-  Atlas.run_job(provider: provider, endpoint: "...", input: %{...})
+if :serverless in ExAtlas.capabilities(provider) do
+  ExAtlas.run_job(provider: provider, endpoint: "...", input: %{...})
 end
 ```
 
@@ -418,38 +418,38 @@ end
 | `:webhooks`         | Push completion callbacks                                             |
 | `:global_networking`| Private networking across datacenters                                 |
 
-## Normalized specs (`Atlas.Spec.*`)
+## Normalized specs (`ExAtlas.Spec.*`)
 
 Requests and responses flow through normalized structs so callers don't have
 to know each provider's native shape.
 
-- `Atlas.Spec.ComputeRequest` — input to `spawn_compute/1`. Fields:
+- `ExAtlas.Spec.ComputeRequest` — input to `spawn_compute/1`. Fields:
   `:gpu`, `:gpu_count`, `:image`, `:cloud_type`, `:spot`, `:region_hints`,
   `:ports`, `:env`, `:volume_gb`, `:container_disk_gb`, `:network_volume_id`,
   `:name`, `:template_id`, `:auth`, `:idle_ttl_ms`, `:provider_opts`.
-- `Atlas.Spec.Compute` — output. Fields: `:id`, `:provider`, `:status`,
+- `ExAtlas.Spec.Compute` — output. Fields: `:id`, `:provider`, `:status`,
   `:public_ip`, `:ports`, `:gpu_type`, `:gpu_count`, `:cost_per_hour`,
   `:region`, `:image`, `:name`, `:auth`, `:created_at`, `:raw`.
-- `Atlas.Spec.JobRequest` / `Atlas.Spec.Job` — serverless jobs.
-- `Atlas.Spec.GpuType` — catalog entries returned by `list_gpu_types/1`.
-- `Atlas.Spec.GpuCatalog` — atom ↔ provider ID mapping.
+- `ExAtlas.Spec.JobRequest` / `ExAtlas.Spec.Job` — serverless jobs.
+- `ExAtlas.Spec.GpuType` — catalog entries returned by `list_gpu_types/1`.
+- `ExAtlas.Spec.GpuCatalog` — atom ↔ provider ID mapping.
 
 Every spec struct has a `:raw` field preserving the provider's native
-response for callers who need fields Atlas hasn't yet normalized.
+response for callers who need fields ExAtlas hasn't yet normalized.
 
 The `:provider_opts` field on request structs is the escape hatch for
-provider-specific options Atlas doesn't model — values are stringified and
+provider-specific options ExAtlas doesn't model — values are stringified and
 merged into the outgoing REST body.
 
 ## Auth primitives
 
-`Atlas.Auth.Token` and `Atlas.Auth.SignedUrl` are exposed directly if you
+`ExAtlas.Auth.Token` and `ExAtlas.Auth.SignedUrl` are exposed directly if you
 want them without the rest of the orchestration layer.
 
 ### Bearer tokens
 
 ```elixir
-mint = Atlas.Auth.Token.mint()
+mint = ExAtlas.Auth.Token.mint()
 # %{
 #   token: "kX9fP...",                              # hand to client once
 #   hash:  "4c1...",                                # persist this
@@ -457,10 +457,10 @@ mint = Atlas.Auth.Token.mint()
 #   env:   %{"ATLAS_PRESHARED_KEY" => "kX9fP..."}   # inject into the pod
 # }
 
-Atlas.Auth.Token.valid?(candidate, mint.hash)
+ExAtlas.Auth.Token.valid?(candidate, mint.hash)
 ```
 
-When you pass `auth: :bearer` to `spawn_compute/1`, Atlas mints a token,
+When you pass `auth: :bearer` to `spawn_compute/1`, ExAtlas mints a token,
 adds it to the pod's env as `ATLAS_PRESHARED_KEY`, and returns the handle
 in `compute.auth` — all in one round-trip.
 
@@ -471,13 +471,13 @@ headers:
 
 ```elixir
 url =
-  Atlas.Auth.SignedUrl.sign(
+  ExAtlas.Auth.SignedUrl.sign(
     "https://pod-id-8000.proxy.runpod.net/stream",
     secret: signing_secret,
     expires_in: 3600
   )
 
-:ok = Atlas.Auth.SignedUrl.verify(url, secret: signing_secret)
+:ok = ExAtlas.Auth.SignedUrl.verify(url, secret: signing_secret)
 ```
 
 The signature covers the path + canonicalized query + expiry with
@@ -485,13 +485,13 @@ HMAC-SHA256; verification uses constant-time comparison.
 
 ## Orchestrator — lifecycle, events, reaper
 
-### `Atlas.Orchestrator.spawn/1`
+### `ExAtlas.Orchestrator.spawn/1`
 
-Spawns the resource via the provider, then starts an `Atlas.Orchestrator.ComputeServer`
-under `Atlas.Orchestrator.ComputeSupervisor` that:
+Spawns the resource via the provider, then starts an `ExAtlas.Orchestrator.ComputeServer`
+under `ExAtlas.Orchestrator.ComputeSupervisor` that:
 
-1. Registers itself in `Atlas.Orchestrator.ComputeRegistry` under `{:compute, id}`.
-2. Traps exits — its `terminate/2` always calls `Atlas.terminate/2` on the
+1. Registers itself in `ExAtlas.Orchestrator.ComputeRegistry` under `{:compute, id}`.
+2. Traps exits — its `terminate/2` always calls `ExAtlas.terminate/2` on the
    upstream provider, whether the supervisor shuts it down or it exits on
    an idle timeout.
 3. Tracks `:last_activity_ms` and compares against `:idle_ttl_ms` on every
@@ -500,7 +500,7 @@ under `Atlas.Orchestrator.ComputeSupervisor` that:
 
 ### PubSub events
 
-Every state change is broadcast over `Atlas.PubSub` on the topic
+Every state change is broadcast over `ExAtlas.PubSub` on the topic
 `"compute:<id>"` as `{:atlas_compute, id, event}`:
 
 | Event                          | Emitted when                                        |
@@ -514,7 +514,7 @@ Every state change is broadcast over `Atlas.PubSub` on the topic
 Subscribe in a LiveView:
 
 ```elixir
-Phoenix.PubSub.subscribe(Atlas.PubSub, "compute:" <> compute.id)
+Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
 
 def handle_info({:atlas_compute, _id, {:status, :terminated}}, socket) do
   {:noreply, put_flash(socket, :info, "Session ended")}
@@ -523,7 +523,7 @@ end
 
 ### Reaper
 
-`Atlas.Orchestrator.Reaper` runs periodically (configurable, default 60s)
+`ExAtlas.Orchestrator.Reaper` runs periodically (configurable, default 60s)
 and:
 
 1. Lists each configured provider's running resources.
@@ -531,14 +531,14 @@ and:
 3. Terminates any orphan whose `:name` starts with `:reap_name_prefix`
    (default `"atlas-"`).
 
-The prefix is a **safety switch** so Atlas never touches pods created by
+The prefix is a **safety switch** so ExAtlas never touches pods created by
 other tools on the same cloud account. Set it to `""` to disable.
 
 ## Phoenix LiveDashboard integration
 
 If your Phoenix app already mounts `Phoenix.LiveDashboard`, adding an
-**Atlas** tab is a one-liner — the library ships
-`Atlas.LiveDashboard.ComputePage`:
+**ExAtlas** tab is a one-liner — the library ships
+`ExAtlas.LiveDashboard.ComputePage`:
 
 ```elixir
 # lib/my_app_web/router.ex
@@ -548,7 +548,7 @@ live_dashboard "/dashboard",
   metrics: MyAppWeb.Telemetry,
   allow_destructive_actions: true,   # required for Stop/Terminate buttons
   additional_pages: [
-    atlas: Atlas.LiveDashboard.ComputePage
+    atlas: ExAtlas.LiveDashboard.ComputePage
   ]
 ```
 
@@ -556,7 +556,7 @@ Visit `/dashboard/atlas` to see a live-refreshing table of every tracked
 compute resource with per-row **Touch**, **Stop**, and **Terminate**
 controls. The page is only compiled when `:phoenix_live_dashboard` is in
 your deps (both LiveDashboard and LiveView are declared as `optional: true`
-in Atlas, so library-only users pay nothing).
+in ExAtlas, so library-only users pay nothing).
 
 ## HTTP layer + telemetry
 
@@ -570,7 +570,7 @@ Every provider uses `Req` under the hood:
 
 ### Telemetry events
 
-Every request emits `[:atlas, <provider>, :request]`:
+Every request emits `[:ex_atlas, <provider>, :request]`:
 
 | Measurement | Value                    |
 | ----------- | ------------------------ |
@@ -587,9 +587,9 @@ Wire into your existing telemetry pipeline:
 ```elixir
 :telemetry.attach(
   "atlas-http-logger",
-  [:atlas, :runpod, :request],
+  [:ex_atlas, :runpod, :request],
   fn _event, measurements, metadata, _ ->
-    Logger.info("Atlas → RunPod #{metadata.method} #{metadata.url} → #{measurements.status}")
+    Logger.info("ExAtlas → RunPod #{metadata.method} #{metadata.url} → #{measurements.status}")
   end,
   nil
 )
@@ -600,7 +600,7 @@ Wire into your existing telemetry pipeline:
 Any option accepted by `Req.new/1` can be passed via `req_options:`:
 
 ```elixir
-Atlas.spawn_compute(
+ExAtlas.spawn_compute(
   provider: :runpod,
   gpu: :h100,
   image: "...",
@@ -610,7 +610,7 @@ Atlas.spawn_compute(
 
 ## Error handling
 
-All provider callbacks return `{:ok, value}` or `{:error, %Atlas.Error{}}`.
+All provider callbacks return `{:ok, value}` or `{:error, %ExAtlas.Error{}}`.
 The error struct has a stable `:kind` atom you can pattern-match on:
 
 | Kind              | When it happens                                  |
@@ -621,16 +621,16 @@ The error struct has a stable `:kind` atom you can pattern-match on:
 | `:rate_limited`   | Provider 429                                     |
 | `:timeout`        | Client-side timeout (e.g. `run_sync` over cap)   |
 | `:unsupported`    | Provider lacks this capability                   |
-| `:validation`     | Atlas-side validation (e.g. missing `:endpoint`) |
+| `:validation`     | ExAtlas-side validation (e.g. missing `:endpoint`) |
 | `:provider`       | Provider-reported 4xx/5xx with no finer bucket   |
 | `:transport`      | HTTP/socket failure                              |
 | `:unknown`        | Anything else                                    |
 
 ```elixir
-case Atlas.spawn_compute(provider: :runpod, gpu: :h100, image: "...") do
+case ExAtlas.spawn_compute(provider: :runpod, gpu: :h100, image: "...") do
   {:ok, compute} -> ...
-  {:error, %Atlas.Error{kind: :unauthorized}} -> rotate_key()
-  {:error, %Atlas.Error{kind: :rate_limited}} -> backoff()
+  {:error, %ExAtlas.Error{kind: :unauthorized}} -> rotate_key()
+  {:error, %ExAtlas.Error{kind: :rate_limited}} -> backoff()
   {:error, err} -> Logger.error(Exception.message(err))
 end
 ```
@@ -639,55 +639,55 @@ end
 
 ```elixir
 defmodule MyCloud.Provider do
-  @behaviour Atlas.Provider
+  @behaviour ExAtlas.Provider
 
   @impl true
   def capabilities, do: [:http_proxy]
 
   @impl true
-  def spawn_compute(%Atlas.Spec.ComputeRequest{} = req, ctx) do
+  def spawn_compute(%ExAtlas.Spec.ComputeRequest{} = req, ctx) do
     # translate `req` into your cloud's native payload,
-    # POST it with Req, normalize the response into %Atlas.Spec.Compute{}
+    # POST it with Req, normalize the response into %ExAtlas.Spec.Compute{}
   end
 
   # ... implement the other callbacks ...
 end
 
 # Use it without any further configuration:
-Atlas.spawn_compute(provider: MyCloud.Provider, gpu: :h100, image: "...")
+ExAtlas.spawn_compute(provider: MyCloud.Provider, gpu: :h100, image: "...")
 ```
 
-Register it with a short atom by mapping it in your own code — Atlas
+Register it with a short atom by mapping it in your own code — ExAtlas
 accepts modules directly, so the atom is a convenience:
 
 ```elixir
-defmodule MyApp.Atlas do
-  defdelegate spawn_compute(opts), to: Atlas
-  # Or wrap Atlas and inject a default provider module
+defmodule MyApp.ExAtlas do
+  defdelegate spawn_compute(opts), to: ExAtlas
+  # Or wrap ExAtlas and inject a default provider module
 end
 ```
 
 ## Testing
 
-The `Atlas.Test.ProviderConformance` macro runs a shared ExUnit suite
+The `ExAtlas.Test.ProviderConformance` macro runs a shared ExUnit suite
 against any provider implementation:
 
 ```elixir
 defmodule MyCloud.ProviderTest do
   use ExUnit.Case, async: false
 
-  use Atlas.Test.ProviderConformance,
+  use ExAtlas.Test.ProviderConformance,
     provider: MyCloud.Provider,
     reset: {MyCloud.TestHelpers, :reset_fixtures, []}
 end
 ```
 
 For unit tests that don't actually talk to a cloud, use the built-in
-`Atlas.Providers.Mock`:
+`ExAtlas.Providers.Mock`:
 
 ```elixir
 setup do
-  Atlas.Providers.Mock.reset()
+  ExAtlas.Providers.Mock.reset()
   :ok
 end
 
@@ -703,15 +703,15 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
 
 ## Security considerations
 
-- **Preshared tokens are secrets.** `Atlas.Auth.Token.mint/0` returns the
+- **Preshared tokens are secrets.** `ExAtlas.Auth.Token.mint/0` returns the
   raw token **once**. Store only the hash. If you must persist the raw
   token (e.g. to render it back to the user on page reload), encrypt at
   rest.
 - **`allow_destructive_actions`** on the LiveDashboard route must be gated
-  by your own auth pipeline. The Atlas page does not authenticate
+  by your own auth pipeline. The ExAtlas page does not authenticate
   operators — LiveDashboard doesn't either. Put it behind `:require_admin`.
 - **Reaper safety.** `:reap_name_prefix` is the only thing preventing the
-  reaper from terminating pods other tools (or other Atlas-using apps) own
+  reaper from terminating pods other tools (or other ExAtlas-using apps) own
   on the same cloud account. Keep the prefix unique per deployment.
 - **Outbound egress.** RunPod's `*.proxy.runpod.net` is world-reachable.
   If the pod inside doesn't validate `ATLAS_PRESHARED_KEY` on every request,
@@ -721,31 +721,31 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
 
 ## Troubleshooting & FAQ
 
-**Q: `(RuntimeError) Atlas.Orchestrator is not started`**
-You didn't set `config :atlas, start_orchestrator: true`. The orchestrator
+**Q: `(RuntimeError) ExAtlas.Orchestrator is not started`**
+You didn't set `config :ex_atlas, start_orchestrator: true`. The orchestrator
 is opt-in.
 
-**Q: `{:error, %Atlas.Error{kind: :unauthorized}}` on every RunPod call**
+**Q: `{:error, %ExAtlas.Error{kind: :unauthorized}}` on every RunPod call**
 Your API key is missing or wrong. Check the resolution order:
-per-call `api_key:` → `config :atlas, :runpod, api_key:` → `RUNPOD_API_KEY`
+per-call `api_key:` → `config :ex_atlas, :runpod, api_key:` → `RUNPOD_API_KEY`
 env var.
 
 **Q: `get_job/2` returns `{:error, :validation, message: "requires :endpoint"}`**
 RunPod's serverless API is scoped to an endpoint id. Pass it:
-`Atlas.get_job(job.id, provider: :runpod, endpoint: "abc123")`.
+`ExAtlas.get_job(job.id, provider: :runpod, endpoint: "abc123")`.
 
-**Q: My LiveDashboard Atlas tab is empty.**
+**Q: My LiveDashboard ExAtlas tab is empty.**
 Either the orchestrator isn't running, or nothing has been spawned with
-`Atlas.Orchestrator.spawn/1`. Non-tracked resources (spawned via
-`Atlas.spawn_compute/1` directly) don't show in the table — they're not
+`ExAtlas.Orchestrator.spawn/1`. Non-tracked resources (spawned via
+`ExAtlas.spawn_compute/1` directly) don't show in the table — they're not
 under supervision.
 
 **Q: Stop/Terminate buttons don't show.**
 Set `allow_destructive_actions: true` on the `live_dashboard` call.
 
-**Q: I want to use Atlas with `httpc` / Mint / Finch directly instead of Req.**
+**Q: I want to use ExAtlas with `httpc` / Mint / Finch directly instead of Req.**
 Rewrite the provider module, or pass a custom `Req` adapter via
-`req_options: [adapter: my_adapter]`. The Atlas.Provider contract doesn't
+`req_options: [adapter: my_adapter]`. The ExAtlas.Provider contract doesn't
 mandate Req — it's an implementation choice of the bundled providers.
 
 ## Roadmap

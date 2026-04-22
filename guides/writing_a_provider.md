@@ -1,7 +1,7 @@
 # Writing a provider
 
-Atlas providers are plain Elixir modules that implement the
-`Atlas.Provider` behaviour. They're free to use any HTTP client, any auth
+ExAtlas providers are plain Elixir modules that implement the
+`ExAtlas.Provider` behaviour. They're free to use any HTTP client, any auth
 scheme, and any data model internally — the only contract is the
 callbacks and the normalized structs they return.
 
@@ -9,9 +9,9 @@ callbacks and the normalized structs they return.
 
 ```elixir
 defmodule MyCloud.Provider do
-  @behaviour Atlas.Provider
+  @behaviour ExAtlas.Provider
 
-  alias Atlas.Spec
+  alias ExAtlas.Spec
 
   @impl true
   def capabilities, do: [:http_proxy]
@@ -21,7 +21,7 @@ defmodule MyCloud.Provider do
     client = build_client(ctx)
 
     body = %{
-      # translate Atlas.Spec.ComputeRequest into MyCloud's native shape
+      # translate ExAtlas.Spec.ComputeRequest into MyCloud's native shape
       "gpu" => translate_gpu(req.gpu),
       "image" => req.image,
       "ports" => Enum.map(req.ports, fn {p, _} -> p end)
@@ -32,10 +32,10 @@ defmodule MyCloud.Provider do
         {:ok, to_compute(body)}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, Atlas.Error.from_response(status, body, :mycloud)}
+        {:error, ExAtlas.Error.from_response(status, body, :mycloud)}
 
       {:error, err} ->
-        {:error, Atlas.Error.new(:transport, provider: :mycloud, raw: err)}
+        {:error, ExAtlas.Error.new(:transport, provider: :mycloud, raw: err)}
     end
   end
 
@@ -51,7 +51,7 @@ defmodule MyCloud.Provider do
   end
 
   defp translate_gpu(canonical) do
-    case Atlas.Spec.GpuCatalog.for_provider(canonical, :mycloud) do
+    case ExAtlas.Spec.GpuCatalog.for_provider(canonical, :mycloud) do
       {:ok, id} -> id
       {:error, _} -> raise "no mapping for #{inspect(canonical)}"
     end
@@ -71,11 +71,11 @@ end
 
 ## Use it right away
 
-The top-level `Atlas.*` functions accept modules directly — no
+The top-level `ExAtlas.*` functions accept modules directly — no
 registration required:
 
 ```elixir
-Atlas.spawn_compute(
+ExAtlas.spawn_compute(
   provider: MyCloud.Provider,
   gpu: :h100,
   image: "..."
@@ -84,7 +84,7 @@ Atlas.spawn_compute(
 
 If you want the short atom form (`provider: :mycloud`) for your own app,
 alias it in your own wrapper module or add it to your host app's
-`Atlas.Config` mapping.
+`ExAtlas.Config` mapping.
 
 ## Callbacks breakdown
 
@@ -93,8 +93,8 @@ alias it in your own wrapper module or add it to your host app's
 - **`capabilities/0`** — list of atoms. Callers use this to branch on
   optional features. Be honest: declaring `:serverless` when you don't
   implement `run_job/2` will surface as runtime errors, not compile errors.
-- **`spawn_compute/2`** — must return `{:ok, %Atlas.Spec.Compute{}}` or
-  `{:error, %Atlas.Error{} | term()}`.
+- **`spawn_compute/2`** — must return `{:ok, %ExAtlas.Spec.Compute{}}` or
+  `{:error, %ExAtlas.Error{} | term()}`.
 - **`get_compute/2`** — fetch by id, return normalized struct.
 - **`list_compute/2`** — honor at minimum `:status` and `:name` filters.
 - **`terminate/2`** — return `:ok` on success, `{:error, ...}` on failure.
@@ -109,9 +109,9 @@ alias it in your own wrapper module or add it to your host app's
 
 ## Register GPU mappings
 
-Add your provider to `Atlas.Spec.GpuCatalog`'s `@providers` map so
+Add your provider to `ExAtlas.Spec.GpuCatalog`'s `@providers` map so
 callers can use the canonical atoms (`:h100`, `:a100_80g`, ...) against
-your cloud. This is the only code change inside the Atlas library itself
+your cloud. This is the only code change inside the ExAtlas library itself
 that a new provider typically requires.
 
 ## Use the shared conformance suite
@@ -121,7 +121,7 @@ that a new provider typically requires.
 defmodule MyCloud.ProviderTest do
   use ExUnit.Case, async: false
 
-  use Atlas.Test.ProviderConformance,
+  use ExAtlas.Test.ProviderConformance,
     provider: MyCloud.Provider,
     reset: {MyCloud.TestHelpers, :reset_bypass, []}
 end
@@ -138,7 +138,7 @@ If your provider passes these, it's wired correctly.
 
 ## Error normalization
 
-Use `Atlas.Error.from_response/3` to translate HTTP responses into the
+Use `ExAtlas.Error.from_response/3` to translate HTTP responses into the
 canonical shape. Callers that pattern-match on `kind:` atoms will then
 work against your provider the same way they work against RunPod.
 
@@ -150,9 +150,9 @@ normalized yet — this is the forward-compatibility lever.
 
 ## Reference implementations
 
-- `Atlas.Providers.RunPod` (+ `Atlas.Providers.RunPod.Translate`) — full
+- `ExAtlas.Providers.RunPod` (+ `ExAtlas.Providers.RunPod.Translate`) — full
   production provider against REST + GraphQL.
-- `Atlas.Providers.Mock` — minimal in-memory implementation, good for
+- `ExAtlas.Providers.Mock` — minimal in-memory implementation, good for
   understanding the callback shapes.
-- `Atlas.Providers.Stub` — the macro used by Fly/Lambda/Vast placeholders
+- `ExAtlas.Providers.Stub` — the macro used by Fly/Lambda/Vast placeholders
   to reserve names before their real implementations land.

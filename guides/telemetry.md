@@ -1,12 +1,12 @@
 # Telemetry
 
-Every HTTP request that Atlas makes emits a `:telemetry` event, so you
+Every HTTP request that ExAtlas makes emits a `:telemetry` event, so you
 can wire the library into your existing metrics pipeline without writing
 provider-specific code.
 
 ## Events
 
-### `[:atlas, <provider>, :request]`
+### `[:ex_atlas, <provider>, :request]`
 
 Emitted after every REST, runtime, or GraphQL call.
 
@@ -29,10 +29,10 @@ Emitted after every REST, runtime, or GraphQL call.
 ```elixir
 :telemetry.attach(
   "atlas-http-logger",
-  [:atlas, :runpod, :request],
+  [:ex_atlas, :runpod, :request],
   fn _event, measurements, metadata, _config ->
     Logger.info(
-      "Atlas → #{metadata.api} #{metadata.method} #{metadata.url} → #{measurements.status}"
+      "ExAtlas → #{metadata.api} #{metadata.method} #{metadata.url} → #{measurements.status}"
     )
   end,
   nil
@@ -50,14 +50,14 @@ defmodule MyAppWeb.Telemetry do
     [
       # Count requests grouped by provider + status class
       counter("atlas.runpod.request.count",
-        event_name: [:atlas, :runpod, :request],
+        event_name: [:ex_atlas, :runpod, :request],
         measurement: :status,
         tags: [:api, :method]
       ),
 
       # Watch error rates
       counter("atlas.runpod.request.errors",
-        event_name: [:atlas, :runpod, :request],
+        event_name: [:ex_atlas, :runpod, :request],
         measurement: :status,
         tags: [:api, :method],
         keep: fn metadata, measurements ->
@@ -77,10 +77,10 @@ prefer (`TelemetryMetricsPrometheus`, `TelemetryMetricsStatsd`, ...).
 ```elixir
 defmodule MyApp.AtlasTelemetry do
   @events [
-    [:atlas, :runpod, :request],
-    [:atlas, :fly, :request],
-    [:atlas, :lambda_labs, :request],
-    [:atlas, :vast, :request]
+    [:ex_atlas, :runpod, :request],
+    [:ex_atlas, :fly, :request],
+    [:ex_atlas, :lambda_labs, :request],
+    [:ex_atlas, :vast, :request]
   ]
 
   def attach do
@@ -107,9 +107,9 @@ end
 ## Orchestrator events
 
 PubSub broadcasts from the orchestrator are covered in the README —
-subscribe to `"compute:<id>"` on `Atlas.PubSub` for state-change
+subscribe to `"compute:<id>"` on `ExAtlas.PubSub` for state-change
 notifications. These are **PubSub messages**, not Telemetry events.
 
 If you want Telemetry-style metrics for spawn/terminate counts, wrap
-`Atlas.Orchestrator.spawn/1` in your own helper that emits a Telemetry
+`ExAtlas.Orchestrator.spawn/1` in your own helper that emits a Telemetry
 event alongside the call.

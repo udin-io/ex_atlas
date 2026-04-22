@@ -1,6 +1,6 @@
 # Transient per-user pods
 
-This is the scenario Atlas was built for: a Phoenix app spawns a GPU pod
+This is the scenario ExAtlas was built for: a Phoenix app spawns a GPU pod
 per active user, the user's browser talks directly to the pod, and the
 pod is reaped when the user leaves.
 
@@ -47,7 +47,7 @@ defmodule MyAppWeb.InferenceLive do
 
   def mount(_params, _session, socket) do
     {:ok, _pid, compute} =
-      Atlas.Orchestrator.spawn(
+      ExAtlas.Orchestrator.spawn(
         gpu: :h100,
         image: "ghcr.io/me/my-inference-server:latest",
         ports: [{8000, :http}],
@@ -57,7 +57,7 @@ defmodule MyAppWeb.InferenceLive do
         name: "atlas-" <> to_string(socket.assigns.current_user.id)
       )
 
-    Phoenix.PubSub.subscribe(Atlas.PubSub, "compute:" <> compute.id)
+    Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
 
     {:ok,
      assign(socket,
@@ -68,7 +68,7 @@ defmodule MyAppWeb.InferenceLive do
   end
 
   def handle_event("ping", _, socket) do
-    _ = Atlas.Orchestrator.touch(socket.assigns.compute_id)
+    _ = ExAtlas.Orchestrator.touch(socket.assigns.compute_id)
     {:noreply, socket}
   end
 
@@ -83,7 +83,7 @@ defmodule MyAppWeb.InferenceLive do
 
   def terminate(_reason, socket) do
     # LiveView process is dying; cut the pod short to save $
-    _ = Atlas.Orchestrator.stop_tracked(socket.assigns.compute_id)
+    _ = ExAtlas.Orchestrator.stop_tracked(socket.assigns.compute_id)
     :ok
   end
 end
@@ -95,7 +95,7 @@ end
 defmodule InferenceServer do
   @moduledoc """
   Minimal Plug app running inside the RunPod pod. Rejects any request
-  that doesn't carry the preshared key injected by Atlas.
+  that doesn't carry the preshared key injected by ExAtlas.
   """
 
   import Plug.Conn
@@ -130,13 +130,13 @@ end
 ### Signed URLs for media streams
 
 `<video src>` can't send an `Authorization` header. Use
-`Atlas.Auth.SignedUrl`:
+`ExAtlas.Auth.SignedUrl`:
 
 ```elixir
-# Generate a secret once per pod, inject it via env var (Atlas already does
+# Generate a secret once per pod, inject it via env var (ExAtlas already does
 # this when auth: :signed_url)
 signed =
-  Atlas.Auth.SignedUrl.sign(
+  ExAtlas.Auth.SignedUrl.sign(
     hd(compute.ports).url <> "/video/session-42.m3u8",
     secret: compute.auth.token,
     expires_in: 3600
@@ -171,7 +171,7 @@ sends a `:ping` every 30 seconds and users normally stay active,
 
 - **Don't** share a single pod across users unless you've designed for
   isolation. The preshared-key model assumes one key per pod.
-- **Don't** put the orchestrator in a cluster-shared PubSub — Atlas's
+- **Don't** put the orchestrator in a cluster-shared PubSub — ExAtlas's
   PubSub is per-node. If you need cluster-wide visibility, subscribe
   from each node and reduce upstream.
 - **Don't** spawn from a `Task.start/1` without supervision. If the task

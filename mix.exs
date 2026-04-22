@@ -1,12 +1,12 @@
-defmodule Atlas.MixProject do
+defmodule ExAtlas.MixProject do
   use Mix.Project
 
   @version "0.2.0-dev"
-  @source_url "https://github.com/udin-io/atlas"
+  @source_url "https://github.com/udin-io/ex_atlas"
 
   def project do
     [
-      app: :atlas,
+      app: :ex_atlas,
       version: @version,
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
@@ -15,7 +15,7 @@ defmodule Atlas.MixProject do
       description: description(),
       package: package(),
       docs: docs(),
-      name: "Atlas",
+      name: "ExAtlas",
       source_url: @source_url
     ]
   end
@@ -23,7 +23,7 @@ defmodule Atlas.MixProject do
   def application do
     [
       extra_applications: [:logger, :crypto],
-      mod: {Atlas.Application, []}
+      mod: {ExAtlas.Application, []}
     ]
   end
 
@@ -62,8 +62,8 @@ defmodule Atlas.MixProject do
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
       files: ~w(lib guides .formatter.exs mix.exs README.md LICENSE CHANGELOG.md),
-      # Igniter looks up installers by name convention: `mix atlas.install` is
-      # autodiscovered from `Mix.Tasks.Atlas.Install`. No extra manifest needed.
+      # Igniter looks up installers by name convention: `mix ex_atlas.install`
+      # is autodiscovered from `Mix.Tasks.ExAtlas.Install`. No extra manifest needed.
       maintainers: ["Peter Shoukry"]
     ]
   end
@@ -87,45 +87,45 @@ defmodule Atlas.MixProject do
       ],
       source_ref: "v#{@version}",
       groups_for_modules: [
-        "Core API": [Atlas, Atlas.Config, Atlas.Error],
+        "Core API": [ExAtlas, ExAtlas.Config, ExAtlas.Error],
         "Provider contract": [
-          Atlas.Provider,
-          Atlas.Spec.ComputeRequest,
-          Atlas.Spec.Compute,
-          Atlas.Spec.JobRequest,
-          Atlas.Spec.Job,
-          Atlas.Spec.GpuType,
-          Atlas.Spec.GpuCatalog
+          ExAtlas.Provider,
+          ExAtlas.Spec.ComputeRequest,
+          ExAtlas.Spec.Compute,
+          ExAtlas.Spec.JobRequest,
+          ExAtlas.Spec.Job,
+          ExAtlas.Spec.GpuType,
+          ExAtlas.Spec.GpuCatalog
         ],
         Providers: [
-          Atlas.Providers.RunPod,
-          Atlas.Providers.Mock,
-          Atlas.Providers.Fly,
-          Atlas.Providers.LambdaLabs,
-          Atlas.Providers.Vast
+          ExAtlas.Providers.RunPod,
+          ExAtlas.Providers.Mock,
+          ExAtlas.Providers.Fly,
+          ExAtlas.Providers.LambdaLabs,
+          ExAtlas.Providers.Vast
         ],
         "Fly platform ops": [
-          Atlas.Fly,
-          Atlas.Fly.Deploy,
-          Atlas.Fly.Dispatcher,
-          Atlas.Fly.Tokens,
-          Atlas.Fly.Tokens.Server,
-          Atlas.Fly.TokenStorage,
-          Atlas.Fly.TokenStorage.Dets,
-          Atlas.Fly.Logs.Client,
-          Atlas.Fly.Logs.LogEntry,
-          Atlas.Fly.Logs.Streamer,
-          Atlas.Fly.Logs.StreamerSupervisor
+          ExAtlas.Fly,
+          ExAtlas.Fly.Deploy,
+          ExAtlas.Fly.Dispatcher,
+          ExAtlas.Fly.Tokens,
+          ExAtlas.Fly.Tokens.Server,
+          ExAtlas.Fly.TokenStorage,
+          ExAtlas.Fly.TokenStorage.Dets,
+          ExAtlas.Fly.Logs.Client,
+          ExAtlas.Fly.Logs.LogEntry,
+          ExAtlas.Fly.Logs.Streamer,
+          ExAtlas.Fly.Logs.StreamerSupervisor
         ],
-        Auth: [Atlas.Auth.Token, Atlas.Auth.SignedUrl],
-        "LiveDashboard integration": [Atlas.LiveDashboard.ComputePage],
+        Auth: [ExAtlas.Auth.Token, ExAtlas.Auth.SignedUrl],
+        "LiveDashboard integration": [ExAtlas.LiveDashboard.ComputePage],
         Orchestrator: [
-          Atlas.Orchestrator,
-          Atlas.Orchestrator.ComputeServer,
-          Atlas.Orchestrator.ComputeSupervisor,
-          Atlas.Orchestrator.ComputeRegistry,
-          Atlas.Orchestrator.Reaper,
-          Atlas.Orchestrator.Events
+          ExAtlas.Orchestrator,
+          ExAtlas.Orchestrator.ComputeServer,
+          ExAtlas.Orchestrator.ComputeSupervisor,
+          ExAtlas.Orchestrator.ComputeRegistry,
+          ExAtlas.Orchestrator.Reaper,
+          ExAtlas.Orchestrator.Events
         ]
       ]
     ]
