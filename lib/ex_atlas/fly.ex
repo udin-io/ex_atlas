@@ -54,8 +54,12 @@ defmodule ExAtlas.Fly do
   @doc """
   Subscribe the calling pid to log events for `app_name`, starting a streamer
   if none is running.
+
+  Returns `{:error, :no_streamer}` if the streamer supervisor tree is not
+  running (e.g. the Fly sub-tree is disabled via
+  `config :ex_atlas, :fly, enabled: false`).
   """
-  @spec subscribe_logs(String.t(), String.t(), keyword()) :: :ok
+  @spec subscribe_logs(String.t(), String.t(), keyword()) :: :ok | {:error, :no_streamer}
   def subscribe_logs(app_name, project_dir, opts \\ []) do
     opts =
       Keyword.merge(opts,

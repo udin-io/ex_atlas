@@ -20,7 +20,13 @@ defmodule ExAtlas.Fly.Tokens do
   @spec invalidate(String.t()) :: :ok
   defdelegate invalidate(app_name), to: Server, as: :invalidate_token
 
-  @doc "Store a manual override token for `app_name` (used as a last-resort fallback)."
-  @spec set_manual(String.t(), String.t()) :: :ok
+  @doc """
+  Store a manual override token for `app_name` (used as a last-resort fallback).
+
+  Returns `{:error, {:persist_failed, reason}}` if the underlying storage fails —
+  manual tokens are not re-acquirable, so the failure is surfaced rather than logged.
+  """
+  @spec set_manual(String.t(), String.t()) ::
+          :ok | {:error, {:persist_failed, String.t()}}
   defdelegate set_manual(app_name, token), to: Server, as: :set_manual_token
 end

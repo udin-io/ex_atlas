@@ -44,7 +44,8 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
   end
 
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @impl ExAtlas.Fly.TokenStorage
@@ -65,14 +66,26 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
   def init(opts) do
     dir = resolve_storage_dir(opts)
     File.mkdir_p!(dir)
+    # Tokens are bearer credentials — restrict the dir so another local user
+    # cannot read the DETS files. No-op on Windows; harmless if already set.
+    _ = File.chmod(dir, 0o700)
 
-    cached_path = Path.join(dir, "cached.dets") |> String.to_charlist()
-    manual_path = Path.join(dir, "manual.dets") |> String.to_charlist()
+    cached_table = Keyword.get(opts, :cached_table, @cached_table)
+    manual_table = Keyword.get(opts, :manual_table, @manual_table)
 
-    {:ok, @cached_table} = open(@cached_table, cached_path)
-    {:ok, @manual_table} = open(@manual_table, manual_path)
+    cached_path_str = Path.join(dir, "cached.dets")
+    manual_path_str = Path.join(dir, "manual.dets")
+    cached_path = String.to_charlist(cached_path_str)
+    manual_path = String.to_charlist(manual_path_str)
 
-    {:ok, %{dir: dir}}
+    with {:ok, ^cached_table} <- open_cached(cached_table, cached_path),
+         {:ok, ^manual_table} <- open_manual(manual_table, manual_path) do
+      # DETS writes files with default umask — tighten to 0600 once each is open.
+      _ = File.chmod(cached_path_str, 0o600)
+      _ = File.chmod(manual_path_str, 0o600)
+
+      {:ok, %{dir: dir, cached_table: cached_table, manual_table: manual_table}}
+    end
   end
 
   @impl GenServer
@@ -89,9 +102,9 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
   end
 
   @impl GenServer
-  def terminate(_reason, _state) do
-    _ = :dets.close(@cached_table)
-    _ = :dets.close(@manual_table)
+  def terminate(_reason, state) do
+    _ = :dets.close(state.cached_table)
+    _ = :dets.close(state.manual_table)
     :ok
   end
 
@@ -111,18 +124,45 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
     ArgumentError -> :error
   end
 
-  defp open(name, path) do
+  # Cached tokens are re-acquirable. A corrupt cached file is a perf regression
+  # only, so fall back to recreating the file if repair fails — the server
+  # must still come up because manual-token lookups depend on it.
+  defp open_cached(name, path) do
     case :dets.open_file(name, file: path, type: :set, repair: true) do
       {:ok, ^name} ->
         {:ok, name}
 
       {:error, reason} ->
         Logger.warning(
-          "[ExAtlas.Fly.TokenStorage.Dets] DETS file #{inspect(path)} unreadable (#{inspect(reason)}); recreating"
+          "[ExAtlas.Fly.TokenStorage.Dets] cached token DETS file #{inspect(path)} unreadable (#{inspect(reason)}); recreating"
         )
 
         _ = File.rm(to_string(path))
-        :dets.open_file(name, file: path, type: :set)
+
+        case :dets.open_file(name, file: path, type: :set) do
+          {:ok, ^name} -> {:ok, name}
+          {:error, reason2} -> {:stop, {:cached_dets_unopenable, path, reason2}}
+        end
+    end
+  end
+
+  # Manual tokens are NOT re-acquirable. If the manual DETS file is corrupt,
+  # refuse to start and leave the file in place so an operator can decide —
+  # silently recreating would wipe a bearer token that the user manually set.
+  defp open_manual(name, path) do
+    case :dets.open_file(name, file: path, type: :set, repair: true) do
+      {:ok, ^name} ->
+        {:ok, name}
+
+      {:error, reason} ->
+        Logger.error(
+          "[ExAtlas.Fly.TokenStorage.Dets] manual token DETS file #{inspect(path)} " <>
+            "unreadable (#{inspect(reason)}); refusing to auto-recreate — " <>
+            "operator intervention required (the file contains bearer tokens that are " <>
+            "NOT re-acquirable from the Fly API)"
+        )
+
+        {:stop, {:manual_dets_corrupt, path, reason}}
     end
   end
 

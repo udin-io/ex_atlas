@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.0 — unreleased
+
+### Changed — Fly token / streamer return contracts
+
+- `ExAtlas.Fly.Tokens.set_manual/2` (and `Tokens.Server.set_manual_token/3`)
+  now return `:ok | {:error, {:persist_failed, reason}}` instead of always
+  `:ok`. Manual tokens are not re-acquirable, so storage failures must be
+  surfaced rather than silently logged. Callers that pattern-match on
+  `:ok` should handle the error tuple.
+- `ExAtlas.Fly.subscribe_logs/3` (and `Streamer.subscribe/3`) now return
+  `:ok | {:error, :no_streamer}` when no streamer can be resolved
+  (e.g. the Fly sub-tree is disabled). Previously this case returned a
+  silent `:ok` with no messages ever arriving.
+
+### Fixed — Hardening round
+
+- `ExAtlas.Fly.Tokens.Server` `persist/3` (cached path) now returns
+  `:ok | {:error, {:persist_failed, reason}}` and logs failures at
+  `:error` level with `{app, reason}` metadata instead of `:warning`
+  with interpolated strings. ETS still holds a fresh token for the
+  session, but a silent storage outage is now operator-visible.
+- `ExAtlas.Fly.Dispatcher` `:mfa` mode wraps the host MFA in
+  `try/rescue/catch` so a raising MFA no longer takes down the caller
+  (most commonly the log Streamer, whose crash drops the pagination
+  cursor). Failures are logged at `:error` level with the topic and MFA
+  identity.
+- `ExAtlas.Fly.TokenStorage.Dets` refuses to auto-recreate a corrupt
+  `manual.dets` file on startup — manual tokens are bearer credentials
+  that are NOT re-acquirable. Returns `{:stop, {:manual_dets_corrupt,
+  path, reason}}` and preserves the file for operator intervention. The
+  cached-token path still recreates (re-acquirable, perf regression only).
+- `ExAtlas.Fly.TokenStorage.Dets` now `chmod`s the storage dir to `0700`
+  and each DETS file to `0600` after open. Default umask on typical
+  Linux/macOS left token files world- or group-readable.
+- `mix ex_atlas.install` surfaces `.gitignore` update failures as an
+  `Igniter.add_notice` with the exact line the user must add manually;
+  previously the installer silently swallowed the exception and moved on.
+- `ExAtlas.Fly.TokenStorage.Memory` (test support) now catches `:exit`
+  from pre-init reads and returns `:error`, matching the Dets `rescue
+  ArgumentError` semantics so the test double is faithful to prod.
+
+### Added
+
+- `ExAtlas.Fly.TokenStorage.Dets.start_link/1` accepts `:name`,
+  `:cached_table`, `:manual_table` opts so custom-supervised /
+  per-test instances are possible alongside the default singleton.
+- First test coverage for `ExAtlas.Fly.Dispatcher`, `TokenStorage.Dets`,
+  `TokenStorage.Memory`, and the `Streamer.subscribe/3` silent-failure
+  path.
+
 ## v0.2.0 — unreleased
 
 ### Fixed
