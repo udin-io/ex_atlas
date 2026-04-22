@@ -34,6 +34,11 @@ defmodule ExAtlas.Fly.TokenStorage.Memory do
       nil -> :error
       record -> {:ok, record}
     end
+  catch
+    # Parity with ExAtlas.Fly.TokenStorage.Dets: when the backing process
+    # isn't started yet (pre-init reads), return :error rather than propagating
+    # the GenServer :exit. Keeps the test double faithful to prod semantics.
+    :exit, _ -> :error
   end
 
   @impl ExAtlas.Fly.TokenStorage
