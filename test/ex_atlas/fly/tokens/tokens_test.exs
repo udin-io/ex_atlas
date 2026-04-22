@@ -1,9 +1,23 @@
-defmodule ExAtlas.Fly.Tokens.ServerTest do
+defmodule ExAtlas.Fly.TokensTest do
+  @moduledoc """
+  Exercises the `ExAtlas.Fly.Tokens` facade end-to-end against a per-test
+  instance of the `ExAtlas.Fly.Tokens.Supervisor` trio. The facade dispatches
+  via `Application.get_env(:ex_atlas, :fly_tokens_names, %{})`, which each
+  test sets up + tears down in setup/on_exit.
+
+  Migrated from the pre-E1 `server_test.exs` — the old tests called
+  `Tokens.Server.get_token/2` directly with a per-test process name. After
+  the per-app split they route through the facade; the AppServer resolves
+  lazily on first call.
+  """
+
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
-  alias ExAtlas.Fly.Tokens.Server
+  alias ExAtlas.Fly.Tokens
+  alias ExAtlas.Fly.Tokens.AppServer
+  alias ExAtlas.Fly.Tokens.Supervisor, as: TokensSupervisor
   alias ExAtlas.Fly.TokenStorage.Memory
   alias ExAtlas.Fly.TokenStorage.Raising
 
@@ -14,58 +28,105 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
   setup do
     start_supervised!(Memory)
 
-    test_name = :"ex_atlas_fly_tokens_#{System.unique_integer([:positive])}"
-    table_name = :"#{test_name}_ets"
+    unique = System.unique_integer([:positive])
 
-    %{test_name: test_name, table_name: table_name}
+    names = %{
+      supervisor: :"tokens_sup_#{unique}",
+      registry: :"tokens_registry_#{unique}",
+      ets_owner: :"tokens_ets_owner_#{unique}",
+      dynamic_sup: :"tokens_dyn_sup_#{unique}",
+      ets_table: :"tokens_ets_#{unique}"
+    }
+
+    {:ok, %{names: names, unique: unique}}
   end
 
-  defp start_server(context, opts \\ []) do
+  # Boot a per-test Supervisor trio and configure the facade to route to it
+  # via the :fly_tokens_names Application env override. Any AppServer
+  # resolved through the facade inherits the test's cmd_fn/config_file_fn
+  # /storage_mod/cli_timeout_ms from :app_server_defaults.
+  defp start_tokens_trio(context, opts \\ []) do
     cmd_fn = Keyword.get(opts, :cmd_fn, fn _cmd, _args, _opts -> {"", 1} end)
+    config_file_fn = Keyword.get(opts, :config_file_fn, fn -> :miss end)
+    storage_mod = Keyword.get(opts, :storage_mod, Memory)
+    cli_timeout_ms = Keyword.get(opts, :cli_timeout_ms, 500)
 
-    server_opts = [
-      name: context.test_name,
-      table_name: context.table_name,
+    app_server_defaults = [
       cmd_fn: cmd_fn,
-      storage_mod: Memory,
-      config_file_fn: Keyword.get(opts, :config_file_fn, fn -> :miss end),
-      cli_timeout_ms: Keyword.get(opts, :cli_timeout_ms, 500)
+      config_file_fn: config_file_fn,
+      storage_mod: storage_mod,
+      cli_timeout_ms: cli_timeout_ms
     ]
 
-    {:ok, pid} = start_supervised({Server, server_opts}, id: context.test_name)
+    previous = Application.get_env(:ex_atlas, :fly_tokens_names)
+
+    Application.put_env(:ex_atlas, :fly_tokens_names, %{
+      registry: context.names.registry,
+      dynamic_sup: context.names.dynamic_sup,
+      ets_owner: context.names.ets_owner,
+      ets_table: context.names.ets_table,
+      app_server_defaults: app_server_defaults
+    })
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:ex_atlas, :fly_tokens_names)
+        _ -> Application.put_env(:ex_atlas, :fly_tokens_names, previous)
+      end
+    end)
+
+    {:ok, pid} =
+      start_supervised(
+        {TokensSupervisor,
+         [
+           name: context.names.supervisor,
+           registry: context.names.registry,
+           ets_owner: context.names.ets_owner,
+           dynamic_sup: context.names.dynamic_sup,
+           ets_table: context.names.ets_table
+         ]},
+        id: context.names.supervisor
+      )
+
     pid
   end
 
-  describe "get_token/2 cache miss → CLI acquisition" do
+  defp expire_token(context, app_name) do
+    pid = TokensSupervisor.whereis_app_server(app_name, registry: context.names.registry)
+    refute is_nil(pid), "expected an AppServer for #{app_name} to be running"
+    GenServer.call(pid, :expire_token)
+  end
+
+  describe "Tokens.get/1 cache miss → CLI acquisition" do
     test "acquires token via CLI when cache and storage are empty", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
     end
 
     test "stores acquired token in ETS for subsequent reads", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
     end
 
     test "persists acquired token in TokenStorage", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
       assert {:ok, %{token: @token, expires_at: expires_at}} = Memory.get(@app_name, :cached)
       assert is_integer(expires_at)
     end
   end
 
-  describe "get_token/2 cache hit" do
+  describe "Tokens.get/1 cache hit" do
     test "returns cached token without CLI call", context do
       call_count = :counters.new(1, [:atomics])
 
@@ -74,17 +135,17 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         {@token, 0}
       end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
       assert :counters.get(call_count, 1) == 1
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
       assert :counters.get(call_count, 1) == 1
     end
   end
 
-  describe "get_token/2 token expiry" do
+  describe "Tokens.get/1 token expiry" do
     test "re-acquires token when cached token is expired", context do
       new_token = "FlyV1 fm2_refreshed_token"
       call_count = :counters.new(1, [:atomics])
@@ -98,18 +159,18 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         end
       end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
 
-      GenServer.call(context.test_name, {:expire_token, @app_name})
+      expire_token(context, @app_name)
 
-      assert {:ok, ^new_token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, ^new_token} = Tokens.get(@app_name)
       assert :counters.get(call_count, 1) == 2
     end
   end
 
-  describe "get_token/2 storage restoration" do
+  describe "Tokens.get/1 storage restoration" do
     test "restores token from storage when ETS is empty but storage has valid token",
          context do
       expires_at = System.system_time(:second) + @ttl_seconds
@@ -119,9 +180,9 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         raise "CLI should not be called when storage has valid token"
       end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
     end
 
     test "skips expired storage token and acquires via CLI", context do
@@ -130,13 +191,13 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
 
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
     end
   end
 
-  describe "get_token/2 CLI failure → manual token fallback" do
+  describe "Tokens.get/1 CLI failure → manual token fallback" do
     test "falls back to manual token when CLI fails", context do
       manual_token = "FlyV1 fm2_manual_token"
       Memory.put(@app_name, :manual, %{token: manual_token, expires_at: nil})
@@ -145,9 +206,9 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         {"Error: could not find flyctl", 1}
       end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, ^manual_token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, ^manual_token} = Tokens.get(@app_name)
     end
 
     test "returns error when CLI fails and no manual token exists", context do
@@ -155,33 +216,45 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         {"Error: not authenticated", 1}
       end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:error, :no_token_available} = Server.get_token(@app_name, context.test_name)
+      assert {:error, :no_token_available} = Tokens.get(@app_name)
     end
   end
 
-  describe "get_token/2 CLI timeout" do
+  describe "Tokens.get/1 CLI timeout" do
     test "handles CLI timeout gracefully", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts ->
         Process.sleep(:infinity)
       end
 
-      start_server(context, cmd_fn: cmd_fn, cli_timeout_ms: 100)
+      start_tokens_trio(context, cmd_fn: cmd_fn, cli_timeout_ms: 100)
 
-      assert {:error, :no_token_available} = Server.get_token(@app_name, context.test_name)
+      assert {:error, :no_token_available} = Tokens.get(@app_name)
     end
   end
 
-  describe "invalidate_token/2" do
+  describe "Tokens.invalidate/1" do
     test "removes token from ETS cache", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
-      assert :ok = Server.invalidate_token(@app_name, context.test_name)
-      assert :ets.lookup(context.table_name, @app_name) == []
+      assert {:ok, @token} = Tokens.get(@app_name)
+      assert :ok = Tokens.invalidate(@app_name)
+      assert :ets.lookup(context.names.ets_table, @app_name) == []
+    end
+
+    test "is a cheap :ok no-op for unknown apps", context do
+      start_tokens_trio(context)
+
+      assert :ok = Tokens.invalidate("never-resolved-app-#{context.unique}")
+
+      # Should not have booted an AppServer for the unknown app.
+      assert nil ==
+               TokensSupervisor.whereis_app_server("never-resolved-app-#{context.unique}",
+                 registry: context.names.registry
+               )
     end
   end
 
@@ -190,9 +263,9 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
       config_token = "FlyV1 fm2_config_file_token"
       config_file_fn = fn -> {:ok, config_token} end
 
-      start_server(context, config_file_fn: config_file_fn)
+      start_tokens_trio(context, config_file_fn: config_file_fn)
 
-      assert {:ok, ^config_token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, ^config_token} = Tokens.get(@app_name)
     end
 
     test "caches config file token in ETS after first read", context do
@@ -204,12 +277,12 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         {:ok, config_token}
       end
 
-      start_server(context, config_file_fn: config_file_fn)
+      start_tokens_trio(context, config_file_fn: config_file_fn)
 
-      assert {:ok, ^config_token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, ^config_token} = Tokens.get(@app_name)
       assert :counters.get(call_count, 1) == 1
 
-      assert {:ok, ^config_token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, ^config_token} = Tokens.get(@app_name)
       assert :counters.get(call_count, 1) == 1
     end
 
@@ -226,22 +299,22 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
           Keyword.put(previous, :fly_config_file_enabled, false)
         )
 
-        start_server(context, config_file_fn: config_file_fn, cmd_fn: cmd_fn)
+        start_tokens_trio(context, config_file_fn: config_file_fn, cmd_fn: cmd_fn)
 
-        assert {:error, :no_token_available} = Server.get_token(@app_name, context.test_name)
+        assert {:error, :no_token_available} = Tokens.get(@app_name)
       after
         Application.put_env(:ex_atlas, :fly, previous)
       end
     end
   end
 
-  describe "set_manual_token/3" do
+  describe "Tokens.set_manual/2" do
     test "stores manual token in storage", context do
       manual_token = "FlyV1 fm2_user_provided"
 
-      start_server(context)
+      start_tokens_trio(context)
 
-      assert :ok = Server.set_manual_token(@app_name, manual_token, context.test_name)
+      assert :ok = Tokens.set_manual(@app_name, manual_token)
       assert {:ok, %{token: ^manual_token, expires_at: nil}} = Memory.get(@app_name, :manual)
     end
 
@@ -252,10 +325,10 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
         {"Error: flyctl not found", 1}
       end
 
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert :ok = Server.set_manual_token(@app_name, manual_token, context.test_name)
-      assert {:ok, ^manual_token} = Server.get_token(@app_name, context.test_name)
+      assert :ok = Tokens.set_manual(@app_name, manual_token)
+      assert {:ok, ^manual_token} = Tokens.get(@app_name)
     end
   end
 
@@ -274,15 +347,15 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
     end
 
     test "emits :start and :stop with source=:cli when CLI acquires a fresh token", context do
-      attach_telemetry("token-cli-#{context.test_name}", [
+      attach_telemetry("token-cli-#{context.unique}", [
         @acquire_event ++ [:start],
         @acquire_event ++ [:stop]
       ])
 
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
 
       start_event = @acquire_event ++ [:start]
       stop_event = @acquire_event ++ [:stop]
@@ -295,15 +368,15 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
 
     test "emits :stop with source=:ets on cache hit", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
       # Prime the cache.
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
 
       # Now attach and fetch — must hit ETS.
-      attach_telemetry("token-ets-#{context.test_name}", [@acquire_event ++ [:stop]])
+      attach_telemetry("token-ets-#{context.unique}", [@acquire_event ++ [:stop]])
 
-      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, @token} = Tokens.get(@app_name)
 
       stop_event = @acquire_event ++ [:stop]
       assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
@@ -311,14 +384,14 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
     end
 
     test "emits :stop with source=:config when config file resolves", context do
-      attach_telemetry("token-config-#{context.test_name}", [@acquire_event ++ [:stop]])
+      attach_telemetry("token-config-#{context.unique}", [@acquire_event ++ [:stop]])
 
       config_token = "FlyV1 fm2_config_file_token"
       config_file_fn = fn -> {:ok, config_token} end
 
-      start_server(context, config_file_fn: config_file_fn)
+      start_tokens_trio(context, config_file_fn: config_file_fn)
 
-      assert {:ok, ^config_token} = Server.get_token(@app_name, context.test_name)
+      assert {:ok, ^config_token} = Tokens.get(@app_name)
 
       stop_event = @acquire_event ++ [:stop]
       assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
@@ -326,12 +399,12 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
     end
 
     test "emits :stop with source=:none when resolution fails", context do
-      attach_telemetry("token-none-#{context.test_name}", [@acquire_event ++ [:stop]])
+      attach_telemetry("token-none-#{context.unique}", [@acquire_event ++ [:stop]])
 
       cmd_fn = fn _, _, _ -> {"Error: not authenticated", 1} end
-      start_server(context, cmd_fn: cmd_fn)
+      start_tokens_trio(context, cmd_fn: cmd_fn)
 
-      assert {:error, :no_token_available} = Server.get_token(@app_name, context.test_name)
+      assert {:error, :no_token_available} = Tokens.get(@app_name)
 
       stop_event = @acquire_event ++ [:stop]
       assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
@@ -343,21 +416,11 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
     test "CLI-acquired token is still returned when storage put fails", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
 
-      # Use raising storage (not Memory) to simulate a persist failure.
-      server_opts = [
-        name: context.test_name,
-        table_name: context.table_name,
-        cmd_fn: cmd_fn,
-        storage_mod: Raising,
-        config_file_fn: fn -> :miss end,
-        cli_timeout_ms: 500
-      ]
-
-      {:ok, _pid} = start_supervised({Server, server_opts}, id: context.test_name)
+      start_tokens_trio(context, cmd_fn: cmd_fn, storage_mod: Raising)
 
       log =
         capture_log(fn ->
-          assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+          assert {:ok, @token} = Tokens.get(@app_name)
         end)
 
       # Error-level log (not merely warning) so operators catch silent data loss.
@@ -369,44 +432,54 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
     test "config-file-sourced token is still returned when storage put fails", context do
       config_file_fn = fn -> {:ok, @token} end
 
-      server_opts = [
-        name: context.test_name,
-        table_name: context.table_name,
-        cmd_fn: fn _, _, _ -> {"", 1} end,
-        storage_mod: Raising,
+      start_tokens_trio(context,
         config_file_fn: config_file_fn,
-        cli_timeout_ms: 500
-      ]
-
-      {:ok, _pid} = start_supervised({Server, server_opts}, id: context.test_name)
+        storage_mod: Raising
+      )
 
       log =
         capture_log(fn ->
-          assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+          assert {:ok, @token} = Tokens.get(@app_name)
         end)
 
       assert log =~ "[error]"
       assert log =~ "persist"
     end
 
-    test "set_manual_token surfaces storage failure as {:error, reason}", context do
+    test "set_manual surfaces storage failure as {:error, reason}", context do
       manual_token = "FlyV1 fm2_user_provided"
 
-      server_opts = [
-        name: context.test_name,
-        table_name: context.table_name,
-        cmd_fn: fn _, _, _ -> {"", 1} end,
-        storage_mod: Raising,
-        config_file_fn: fn -> :miss end,
-        cli_timeout_ms: 500
-      ]
-
-      {:ok, _pid} = start_supervised({Server, server_opts}, id: context.test_name)
+      start_tokens_trio(context, storage_mod: Raising)
 
       # Manual-token put goes directly to storage; failure must be surfaced,
       # not silently swallowed — manual tokens are NOT re-acquirable.
-      assert {:error, _reason} =
-               Server.set_manual_token(@app_name, manual_token, context.test_name)
+      assert {:error, _reason} = Tokens.set_manual(@app_name, manual_token)
+    end
+  end
+
+  describe "AppServer direct (internal behavior)" do
+    # A sanity check that AppServer's own public API works when called directly —
+    # used rarely (test backdoors, diagnostics) but part of the module's
+    # contract.
+    test "AppServer.acquire/1 returns {{:ok, token}, :cli} on success", context do
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn)
+
+      {:ok, pid} =
+        TokensSupervisor.resolve_app_server(@app_name,
+          registry: context.names.registry,
+          dynamic_sup: context.names.dynamic_sup,
+          ets_table: context.names.ets_table,
+          app_server_defaults: [
+            cmd_fn: cmd_fn,
+            config_file_fn: fn -> :miss end,
+            storage_mod: Memory,
+            cli_timeout_ms: 500
+          ]
+        )
+
+      assert {{:ok, @token}, :cli} = AppServer.acquire(pid)
     end
   end
 end
