@@ -3,8 +3,14 @@ defmodule ExAtlas.Fly.Logs.StreamerSupervisor do
   Supervises per-app Fly log `Streamer` processes.
 
   Combines a `Registry` (unique keys by `app_name`) and a `DynamicSupervisor`
-  (one `Streamer` per tracked app) under a single `:one_for_all` supervisor —
-  if the registry dies, the streamers restart with a fresh registry.
+  (one `Streamer` per tracked app) under a `:rest_for_one` supervisor: if the
+  registry dies, the DynamicSupervisor restarts with it (children are addressed
+  via the registry, so a stale registry would be useless); but if a streamer
+  burns the DynamicSupervisor's restart budget, the registry survives so other
+  apps' cursors are not lost.
+
+  The DynamicSupervisor also gets a generous `max_restarts` so a single
+  misbehaving streamer (bad token, network flap) does not tear down its peers.
   """
 
   use Supervisor
@@ -22,10 +28,11 @@ defmodule ExAtlas.Fly.Logs.StreamerSupervisor do
   def init(_init_arg) do
     children = [
       {Registry, keys: :unique, name: @registry},
-      {DynamicSupervisor, name: @dynamic_sup, strategy: :one_for_one}
+      {DynamicSupervisor,
+       name: @dynamic_sup, strategy: :one_for_one, max_restarts: 20, max_seconds: 60}
     ]
 
-    Supervisor.init(children, strategy: :one_for_all)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   @doc "Start a Streamer for `app_name` if one isn't already running."
