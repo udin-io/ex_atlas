@@ -37,29 +37,38 @@ defmodule ExAtlas.Fly.Logs.StreamerTest do
   end
 
   describe "initial fetch and broadcasting" do
-    test "fetches initial logs on start and dispatches via the registry" do
+    test "fetches initial logs on start and dispatches to later subscribers" do
+      # L7: the Streamer no longer dispatches until it has a registered
+      # subscriber (via Streamer.subscribe_pid/2). Test flow: poll interval
+      # 50ms, subscribe immediately after start — the 2nd poll is the first
+      # that dispatches.
       test_pid = self()
       entries = make_entries(3)
+      call_count = :counters.new(1, [:atomics])
 
       retry_fetch_fn = fn _app, _opts ->
+        :counters.add(call_count, 1, 1)
         send(test_pid, :fetch_called)
         {:ok, entries}
       end
 
       app_name = "initial-fetch-#{System.unique_integer([:positive])}"
 
-      # Subscribe BEFORE starting streamer, since initial fetch fires immediately.
       Dispatcher.subscribe("ex_atlas_fly_logs:#{app_name}")
 
-      start_supervised!(
-        {Streamer,
-         [
-           app_name: app_name,
-           project_dir: "/tmp/test",
-           poll_interval: 60_000,
-           retry_fetch_fn: retry_fetch_fn
-         ]}
-      )
+      pid =
+        start_supervised!(
+          {Streamer,
+           [
+             app_name: app_name,
+             project_dir: "/tmp/test",
+             poll_interval: 50,
+             retry_fetch_fn: retry_fetch_fn
+           ]}
+        )
+
+      # Register with the Streamer so it knows someone is listening.
+      Streamer.subscribe_pid(pid, self())
 
       assert_receive :fetch_called, 1_000
       assert_receive {:ex_atlas_fly_logs, ^app_name, received}, 1_000
@@ -226,6 +235,26 @@ defmodule ExAtlas.Fly.Logs.StreamerTest do
     end
   end
 
+  describe "subscribe/3 project_dir optional (L4)" do
+    test "Streamer.subscribe/1 works without project_dir" do
+      app_name = "no-dir-#{System.unique_integer([:positive])}"
+      registry = StreamerSupervisor.registry_name()
+      dynamic_sup = StreamerSupervisor.dynamic_supervisor_name()
+
+      retry_fetch_fn = fn _app, _opts -> {:ok, []} end
+
+      # No project_dir argument — used to be required; now optional.
+      assert :ok =
+               Streamer.subscribe(app_name,
+                 registry: registry,
+                 dynamic_sup: dynamic_sup,
+                 retry_fetch_fn: retry_fetch_fn
+               )
+
+      StreamerSupervisor.stop_streamer(app_name)
+    end
+  end
+
   describe "subscribe/3 silent-failure path (M3)" do
     test "returns {:error, :no_streamer} when no registry is provided" do
       # No :registry opt — the cond falls through the is_nil(registry) branch.
@@ -245,6 +274,74 @@ defmodule ExAtlas.Fly.Logs.StreamerTest do
                  "/tmp/test",
                  registry: registry
                )
+    end
+  end
+
+  describe "initial-poll race (L7)" do
+    test "first poll does not dispatch when no subscriber is registered yet" do
+      test_pid = self()
+      entries = make_entries(2)
+      call_count = :counters.new(1, [:atomics])
+
+      retry_fetch_fn = fn _app, _opts ->
+        :counters.add(call_count, 1, 1)
+        send(test_pid, {:fetch_called, :counters.get(call_count, 1)})
+        {:ok, entries}
+      end
+
+      app_name = "no-sub-#{System.unique_integer([:positive])}"
+
+      # Watch the topic from the test process, BUT never call subscribe_pid/2
+      # on the Streamer.
+      Dispatcher.subscribe("ex_atlas_fly_logs:#{app_name}")
+
+      start_supervised!(
+        {Streamer,
+         [
+           app_name: app_name,
+           project_dir: "/tmp/test",
+           poll_interval: 50,
+           retry_fetch_fn: retry_fetch_fn
+         ]}
+      )
+
+      # Poll fires, cursor advances, but no dispatch happens.
+      assert_receive {:fetch_called, 1}, 1_000
+      refute_receive {:ex_atlas_fly_logs, _, _}, 200
+    end
+  end
+
+  describe "terminate signals subscribers (L5)" do
+    test "emits :ex_atlas_fly_logs_stopped to the topic on shutdown" do
+      test_pid = self()
+
+      retry_fetch_fn = fn _app, _opts ->
+        send(test_pid, :fetch_called)
+        {:ok, []}
+      end
+
+      app_name = "stop-signal-#{System.unique_integer([:positive])}"
+
+      Dispatcher.subscribe("ex_atlas_fly_logs:#{app_name}")
+
+      pid =
+        start_supervised!(
+          {Streamer,
+           [
+             app_name: app_name,
+             project_dir: "/tmp/test",
+             poll_interval: 60_000,
+             retry_fetch_fn: retry_fetch_fn
+           ]}
+        )
+
+      # Ensure the Streamer is fully up (initial fetch ran).
+      assert_receive :fetch_called, 1_000
+
+      ref = Process.monitor(pid)
+      GenServer.stop(pid, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:ex_atlas_fly_logs_stopped, ^app_name}, 1_000
     end
   end
 

@@ -9,6 +9,22 @@ defmodule ExAtlas.Fly.Deploy do
 
   Streamed output lands as `{:ex_atlas_fly_deploy, ticket_id, line}` on the topic
   `"ex_atlas_fly_deploy:\#{ticket_id}"`.
+
+  ## Error shape
+
+  Both `deploy/2` and `stream_deploy/3` return the same error shape on
+  failure:
+
+      {:error, :invalid_deploy_dir}
+        | {:error, {:fly_error, :not_found, String.t()}}
+        | {:error, {:fly_error, :timeout,   String.t()}}
+        | {:error, {:fly_error, non_neg_integer(), String.t()}}  # exit code + captured output
+
+  `:not_found` means the `fly` executable is not on `PATH`; `:timeout` means
+  the 15 min (`deploy/2`) or 30 min (`stream_deploy/3`) cap was hit; a
+  positive integer is the process exit code. The third element is always a
+  human-readable string (captured output or a short explanation) suitable
+  for logging — do not pattern match on it.
   """
 
   require Logger
@@ -22,73 +38,119 @@ defmodule ExAtlas.Fly.Deploy do
   # Non-streaming deploy timeout (15 min)
   @fly_deploy_timeout_ms 900_000
 
+  @type fly_error_reason :: :not_found | :timeout | non_neg_integer()
+  @type deploy_error ::
+          :invalid_deploy_dir
+          | {:fly_error, fly_error_reason(), String.t()}
+
   @doc """
-  Scan `project_path` for Fly apps (root `fly.toml` + one level of subdirs).
+  Scan `project_path` for Fly apps (root `fly.toml` + `:max_depth` levels of
+  subdirectories, default `1`).
 
   Returns a sorted list of `{app_name, directory}` tuples.
+
+  ## Options
+
+    * `:max_depth` — how many subdirectory levels below `project_path` to
+      descend when searching for `fly.toml` files. Default `1`. Set higher
+      (e.g. `2` or `3`) for monorepos that nest Fly apps under `apps/*/`
+      or `services/*/` trees.
   """
-  @spec discover_apps(String.t()) :: [{String.t(), String.t()}]
-  def discover_apps(project_path) do
-    unless File.dir?(project_path) do
-      []
+  @spec discover_apps(String.t(), keyword()) :: [{String.t(), String.t()}]
+  def discover_apps(project_path, opts \\ []) do
+    max_depth = Keyword.get(opts, :max_depth, 1)
+
+    if File.dir?(project_path) do
+      apps = scan_dir(project_path, max_depth)
+      Enum.sort_by(apps, &elem(&1, 0))
     else
-      root_apps = parse_fly_toml(project_path)
-
-      sub_apps =
-        project_path
-        |> File.ls!()
-        |> Enum.map(&Path.join(project_path, &1))
-        |> Enum.filter(&File.dir?/1)
-        |> Enum.flat_map(&parse_fly_toml/1)
-
-      (root_apps ++ sub_apps)
-      |> Enum.sort_by(&elem(&1, 0))
+      []
     end
   end
 
-  @doc "Parse the `app = \"...\"` line out of a `fly.toml` body."
+  # Depth 0 means "just this directory, no recursion".
+  defp scan_dir(dir, depth_remaining) do
+    here = parse_fly_toml(dir)
+
+    if depth_remaining <= 0 do
+      here
+    else
+      nested =
+        dir
+        |> File.ls!()
+        |> Enum.map(&Path.join(dir, &1))
+        |> Enum.filter(&File.dir?/1)
+        |> Enum.flat_map(&scan_dir(&1, depth_remaining - 1))
+
+      here ++ nested
+    end
+  end
+
+  @doc """
+  Parse the `app = "..."` line out of a `fly.toml` body.
+
+  Requires the value to be either fully quoted (`app = "my-app"` or
+  `app = 'my-app'`) or an unquoted sequence of non-whitespace, non-quote
+  characters (`app = my-app`). Values with internal whitespace inside quotes
+  are intentionally rejected since Fly app names cannot contain whitespace.
+  """
   @spec parse_app_name(String.t()) :: {:ok, String.t()} | :error
   def parse_app_name(content) do
-    case Regex.run(~r/^app\s*=\s*["']?([^"'\s]+)["']?/m, content) do
-      [_, app_name] -> {:ok, app_name}
-      _ -> :error
+    cond do
+      match = Regex.run(~r/^\s*app\s*=\s*"([^"\s]+)"/m, content) -> {:ok, Enum.at(match, 1)}
+      match = Regex.run(~r/^\s*app\s*=\s*'([^'\s]+)'/m, content) -> {:ok, Enum.at(match, 1)}
+      match = Regex.run(~r/^\s*app\s*=\s*([^"'\s#]+)/m, content) -> {:ok, Enum.at(match, 1)}
+      true -> :error
     end
   end
 
   @doc """
   Run `fly deploy --remote-only` from `fly_toml_dir` (absolute path or relative
-  to `project_path`). 15 min timeout. Returns `{:ok, output}` or `{:error, reason}`.
+  to `project_path`). 15 min timeout.
+
+  Returns `{:ok, output}` or `{:error, reason}` — see the module docs for the
+  full error shape. In particular, a missing `fly` executable returns
+  `{:error, {:fly_error, :not_found, _}}`, matching `stream_deploy/3`.
   """
-  @spec deploy(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  @spec deploy(String.t(), String.t()) :: {:ok, String.t()} | {:error, deploy_error()}
   def deploy(project_path, fly_toml_dir) do
     deploy_dir = resolve_dir(project_path, fly_toml_dir)
 
-    unless File.dir?(deploy_dir) do
-      {:error, :invalid_deploy_dir}
-    else
-      Logger.info("[ExAtlas.Fly.Deploy] Running `fly deploy` in #{deploy_dir}")
+    cond do
+      not File.dir?(deploy_dir) ->
+        {:error, :invalid_deploy_dir}
 
-      task =
-        Task.async(fn ->
-          System.cmd("fly", ["deploy", "--remote-only"],
-            cd: deploy_dir,
-            stderr_to_stdout: true
-          )
-        end)
+      is_nil(System.find_executable("fly")) ->
+        Logger.error("[ExAtlas.Fly.Deploy] `fly` executable not found in PATH")
+        {:error, {:fly_error, :not_found, "fly executable not found in PATH"}}
 
-      case Task.yield(task, @fly_deploy_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {output, 0}} ->
-          Logger.info("[ExAtlas.Fly.Deploy] Deploy succeeded")
-          {:ok, output}
+      true ->
+        Logger.info("[ExAtlas.Fly.Deploy] Running `fly deploy` in #{deploy_dir}")
 
-        {:ok, {output, exit_code}} ->
-          Logger.error("[ExAtlas.Fly.Deploy] Deploy failed (exit #{exit_code}): #{output}")
-          {:error, {:fly_error, exit_code, output}}
+        task =
+          Task.async(fn ->
+            System.cmd("fly", ["deploy", "--remote-only"],
+              cd: deploy_dir,
+              stderr_to_stdout: true
+            )
+          end)
 
-        nil ->
-          Logger.error("[ExAtlas.Fly.Deploy] Deploy timed out after #{@fly_deploy_timeout_ms}ms")
-          {:error, {:fly_error, :timeout, "Deploy timed out after #{@fly_deploy_timeout_ms}ms"}}
-      end
+        case Task.yield(task, @fly_deploy_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+          {:ok, {output, 0}} ->
+            Logger.info("[ExAtlas.Fly.Deploy] Deploy succeeded")
+            {:ok, output}
+
+          {:ok, {output, exit_code}} ->
+            Logger.error("[ExAtlas.Fly.Deploy] Deploy failed (exit #{exit_code}): #{output}")
+            {:error, {:fly_error, exit_code, output}}
+
+          nil ->
+            Logger.error(
+              "[ExAtlas.Fly.Deploy] Deploy timed out after #{@fly_deploy_timeout_ms}ms"
+            )
+
+            {:error, {:fly_error, :timeout, "Deploy timed out after #{@fly_deploy_timeout_ms}ms"}}
+        end
     end
   end
 
@@ -110,52 +172,54 @@ defmodule ExAtlas.Fly.Deploy do
     * `:max_timeout_ms` — override the absolute deploy timeout.
   """
   @spec stream_deploy(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, String.t()} | {:error, term()}
+          {:ok, String.t()} | {:error, deploy_error()}
   def stream_deploy(project_path, fly_toml_dir, ticket_id, opts \\ []) do
     deploy_dir = resolve_dir(project_path, fly_toml_dir)
 
-    unless File.dir?(deploy_dir) do
-      {:error, :invalid_deploy_dir}
-    else
-      Logger.debug("[ExAtlas.Fly.Deploy] Streaming `fly deploy` in #{deploy_dir}")
+    cond do
+      not File.dir?(deploy_dir) ->
+        {:error, :invalid_deploy_dir}
 
-      case System.find_executable("fly") do
-        nil ->
-          Logger.error("[ExAtlas.Fly.Deploy] `fly` executable not found in PATH")
-          {:error, {:fly_error, :not_found, "fly executable not found in PATH"}}
+      fly_executable = System.find_executable("fly") ->
+        Logger.debug("[ExAtlas.Fly.Deploy] Streaming `fly deploy` in #{deploy_dir}")
+        stream_deploy_with_fly(fly_executable, deploy_dir, ticket_id, opts)
 
-        fly_executable ->
-          activity_timeout = Keyword.get(opts, :activity_timeout_ms, @fly_activity_timeout_ms)
-          max_timeout = Keyword.get(opts, :max_timeout_ms, @fly_max_timeout_ms)
-
-          port =
-            Port.open({:spawn_executable, fly_executable}, [
-              :binary,
-              :exit_status,
-              :stderr_to_stdout,
-              args: ["deploy", "--remote-only"],
-              cd: deploy_dir
-            ])
-
-          activity_ref =
-            Process.send_after(self(), {:deploy_activity_timeout, port}, activity_timeout)
-
-          absolute_ref =
-            Process.send_after(self(), {:deploy_absolute_timeout, port}, max_timeout)
-
-          timers = %{activity: activity_ref, absolute: absolute_ref, port: port}
-
-          {result, final_timers} =
-            collect_port_output(port, ticket_id, [], timers, activity_timeout)
-
-          cancel_and_flush(final_timers.activity, {:deploy_activity_timeout, port})
-          cancel_and_flush(final_timers.absolute, {:deploy_absolute_timeout, port})
-
-          emit_deploy_exit(ticket_id, result)
-
-          result
-      end
+      true ->
+        Logger.error("[ExAtlas.Fly.Deploy] `fly` executable not found in PATH")
+        {:error, {:fly_error, :not_found, "fly executable not found in PATH"}}
     end
+  end
+
+  defp stream_deploy_with_fly(fly_executable, deploy_dir, ticket_id, opts) do
+    activity_timeout = Keyword.get(opts, :activity_timeout_ms, @fly_activity_timeout_ms)
+    max_timeout = Keyword.get(opts, :max_timeout_ms, @fly_max_timeout_ms)
+
+    port =
+      Port.open({:spawn_executable, fly_executable}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: ["deploy", "--remote-only"],
+        cd: deploy_dir
+      ])
+
+    activity_ref =
+      Process.send_after(self(), {:deploy_activity_timeout, port}, activity_timeout)
+
+    absolute_ref =
+      Process.send_after(self(), {:deploy_absolute_timeout, port}, max_timeout)
+
+    timers = %{activity: activity_ref, absolute: absolute_ref, port: port}
+
+    {result, final_timers} =
+      collect_port_output(port, ticket_id, [], timers, activity_timeout)
+
+    cancel_and_flush(final_timers.activity, {:deploy_activity_timeout, port})
+    cancel_and_flush(final_timers.absolute, {:deploy_absolute_timeout, port})
+
+    emit_deploy_exit(ticket_id, result)
+
+    result
   end
 
   # Public helpers for telemetry — kept alongside the stream so the
@@ -205,7 +269,7 @@ defmodule ExAtlas.Fly.Deploy do
         data
         |> String.split("\n", trim: false)
         |> Enum.each(fn line ->
-          unless line == "" do
+          if line != "" do
             Dispatcher.dispatch(
               "ex_atlas_fly_deploy:#{ticket_id}",
               {:ex_atlas_fly_deploy, ticket_id, line}

@@ -42,8 +42,9 @@ defmodule ExAtlas.Fly do
   alias ExAtlas.Fly.Dispatcher
   alias ExAtlas.Fly.Logs.{Streamer, StreamerSupervisor}
 
-  @doc "See `ExAtlas.Fly.Deploy.discover_apps/1`."
+  @doc "See `ExAtlas.Fly.Deploy.discover_apps/2`."
   defdelegate discover_apps(project_path), to: ExAtlas.Fly.Deploy
+  defdelegate discover_apps(project_path, opts), to: ExAtlas.Fly.Deploy
 
   @doc "See `ExAtlas.Fly.Deploy.deploy/2`."
   defdelegate deploy(project_path, fly_toml_dir), to: ExAtlas.Fly.Deploy
@@ -58,16 +59,28 @@ defmodule ExAtlas.Fly do
   Returns `{:error, :no_streamer}` if the streamer supervisor tree is not
   running (e.g. the Fly sub-tree is disabled via
   `config :ex_atlas, :fly, enabled: false`).
-  """
-  @spec subscribe_logs(String.t(), String.t(), keyword()) :: :ok | {:error, :no_streamer}
-  def subscribe_logs(app_name, project_dir, opts \\ []) do
-    opts =
-      Keyword.merge(opts,
-        registry: StreamerSupervisor.registry_name(),
-        dynamic_sup: StreamerSupervisor.dynamic_supervisor_name()
-      )
 
-    Streamer.subscribe(app_name, project_dir, opts)
+  `project_dir` is optional — it is carried in the Streamer's state for
+  introspection but not used in the log-fetching code path.
+
+  ### Teardown
+
+  When the Streamer for `app_name` stops (all subscribers gone, or
+  `stop_streamer/1`), it sends a final
+  `{:ex_atlas_fly_logs_stopped, app_name}` message on the same topic.
+  Subscribers should match on that and call `unsubscribe_logs/1` to clean
+  up — atlas cannot unsubscribe them from a framework-agnostic dispatcher.
+  """
+  @spec subscribe_logs(String.t(), String.t() | nil, keyword()) ::
+          :ok | {:error, :no_streamer}
+  def subscribe_logs(app_name, project_dir \\ nil, opts \\ []) do
+    opts =
+      opts
+      |> Keyword.put(:project_dir, project_dir)
+      |> Keyword.put_new(:registry, StreamerSupervisor.registry_name())
+      |> Keyword.put_new(:dynamic_sup, StreamerSupervisor.dynamic_supervisor_name())
+
+    Streamer.subscribe(app_name, opts)
   end
 
   @doc "Unsubscribe the calling pid from log events for `app_name`."

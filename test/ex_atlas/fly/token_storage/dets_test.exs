@@ -21,6 +21,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
 
     %{
       dir: storage_dir,
+      unique: unique,
       process_name: process_name,
       cached_table: cached_table,
       manual_table: manual_table
@@ -74,6 +75,37 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
 
       assert File.exists?(Path.join(context.dir, "cached.dets"))
       assert File.exists?(Path.join(context.dir, "manual.dets"))
+    end
+  end
+
+  describe "mkdir fallback (M6)" do
+    @describetag :unix
+
+    test "explicitly-configured read-only path falls back to tmp_dir", context do
+      # Create a read-only parent so the configured subdirectory cannot
+      # be created. Post-M6 this falls back to a tmp_dir path; pre-M6
+      # init/1 raised on File.mkdir_p! and took down the Fly tree.
+      readonly_parent = Path.join(Path.expand(@tmp_root), "ro_#{context.unique}")
+      File.mkdir_p!(readonly_parent)
+      File.chmod!(readonly_parent, 0o500)
+
+      on_exit(fn ->
+        File.chmod!(readonly_parent, 0o700)
+        File.rm_rf!(readonly_parent)
+      end)
+
+      bad_path = Path.join(readonly_parent, "not_writable")
+
+      opts =
+        context
+        |> start_opts()
+        |> Keyword.put(:storage_path, bad_path)
+
+      assert {:ok, pid} = Dets.start_link(opts)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      # Server must be up and functional despite the configured path failing.
+      assert Process.alive?(pid)
     end
   end
 

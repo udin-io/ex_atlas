@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.5.0 — unreleased
+
+Closes all remaining audit items. Library is now at feature parity with
+the audit recommendations.
+
+### Added
+
+- **`ExAtlas.Fly.Supervisor`** (E3) — top-level supervisor for the Fly
+  sub-tree, exposed as a `child_spec/1` so hosts can embed ExAtlas under
+  their own supervision tree. `ExAtlas.Application` delegates to its
+  `fly_children/0` to avoid duplication.
+- **`ExAtlas.Fly.Tokens.refresh/1`** (E5) — atomic invalidate-then-acquire.
+  Equivalent to `invalidate/1` + `get/1` but runs under a single
+  GenServer call on the AppServer, closing the race where a concurrent
+  caller acquires between the two.
+- **`ExAtlas.Fly.Dispatcher.subscribe_with_backpressure/2`** (E6) — opt-in
+  eviction watchdog. Monitors the subscriber's message queue and signals
+  an eviction via `{:ex_atlas_fly_backpressure_evict, topic}` if the
+  queue exceeds a configurable threshold.
+- **Proactive soft-expiry refresh** (E7) — `ExAtlas.Fly.Tokens.AppServer`
+  schedules a background refresh `:soft_expiry_lead_seconds` (default 3600)
+  before a cached token's `expires_at`. Avoids the expiry cliff where
+  every caller around expiry hits the CLI at once.
+- **Monorepo discovery** (M4) — `ExAtlas.Fly.Deploy.discover_apps/2`
+  now accepts a `:max_depth` option. Default `1` preserves current
+  behavior; set higher for `apps/<name>/fly.toml` layouts.
+- **Streamer shutdown signal** (L5) — the Streamer sends a final
+  `{:ex_atlas_fly_logs_stopped, app_name}` on its topic when it
+  terminates, so subscribers can unsubscribe themselves from the
+  framework-agnostic dispatcher.
+
+### Changed
+
+- **`ExAtlas.Fly.Deploy.deploy/2`** (M5) — now returns
+  `{:error, {:fly_error, :not_found, _}}` when `fly` is not on `PATH`,
+  matching `stream_deploy/3`. Previously raised `ErlangError` from
+  `System.cmd/3` on missing executables.
+- **`ExAtlas.Fly.Deploy.parse_app_name/1`** (L3) — tightened regex:
+  quoted values must not contain whitespace (pre-fix `app = "my app"`
+  returned `{:ok, "my"}`). Still accepts unquoted values and
+  whitespace-separated inline comments on the `app =` line.
+- **`ExAtlas.Fly.Logs.Streamer` L7 race fix** — until the first
+  subscriber registers via `subscribe_pid/2`, the Streamer advances its
+  cursor silently without dispatching. Previously the very first poll
+  could fire before a caller's `subscribe_pid/2`, dropping the first
+  batch onto a zero-subscriber topic.
+- **`ExAtlas.Fly.Logs.Streamer.subscribe/2`** (L4) — `project_dir` is
+  no longer required. New `subscribe/2` arity takes keyword options
+  only; `subscribe/3` stays for backward compatibility with the old
+  positional signature.
+- **`ExAtlas.Fly.Tokens.AppServer` config resolution** (M8, M9) —
+  `:fly_config_file_enabled` and `:cli_timeout_ms` are now resolved
+  once at AppServer `init/1` rather than on every `handle_call`. Uses
+  the consistent `Keyword.get(config, :key, default)` pattern.
+- **`ExAtlas.Fly.Tokens.AppServer` structured logging** (E4) —
+  remaining `Logger.warning` interpolations for CLI failures now use
+  metadata (`app:`, `exit_code:`, `output:`, `timeout_ms:`) instead of
+  interpolated strings.
+- **`ExAtlas.Fly.TokenStorage.Dets` mkdir fallback** (M6) — when the
+  explicitly-configured `:storage_path` is not writable, falls back to
+  `System.tmp_dir!/0` with a `:warning` log, rather than crashing on
+  `File.mkdir_p!/1`. Previously only the default path had the fallback.
+- **`unless` → `if` throughout `deploy.ex`** (L1).
+- **`deploy/2` and `stream_deploy/3` error shape typed explicitly**
+  (L2) — new `ExAtlas.Fly.Deploy.deploy_error/0` type spec documents
+  the three `:fly_error` reason variants (`:not_found`, `:timeout`,
+  `non_neg_integer()`).
+
+### Installer
+
+- **`mix ex_atlas.install` runtime.exs example** (M2) — the post-install
+  notice now includes a `runtime.exs` pattern for containerized deploys
+  that want to override `:storage_path` via an environment variable.
+
+### Dispatcher docs (H7)
+
+- Added a subsection describing dispatch serialization semantics and
+  pointing hosts with large fan-out at `:phoenix_pubsub` mode. The
+  per-subscriber `send/2` loop in `:registry` mode is documented as
+  intentional for the typical log-streaming / deploy workload.
+
 ## v0.4.1 — unreleased
 
 ### Changed — Async token persist (closes audit H3)

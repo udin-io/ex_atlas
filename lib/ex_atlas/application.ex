@@ -17,14 +17,11 @@ defmodule ExAtlas.Application do
   """
   use Application
 
-  alias ExAtlas.Fly.Dispatcher
-  alias ExAtlas.Fly.Logs.StreamerSupervisor
-  alias ExAtlas.Fly.Tokens
   alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeSupervisor, Reaper}
 
   @impl true
   def start(_type, _args) do
-    children = orchestrator_children() ++ fly_children()
+    children = orchestrator_children() ++ ExAtlas.Fly.Supervisor.fly_children()
 
     Supervisor.start_link(children, strategy: :one_for_one, name: ExAtlas.Supervisor)
   end
@@ -37,29 +34,6 @@ defmodule ExAtlas.Application do
       ]
 
       base ++ pubsub_child() ++ [Reaper]
-    else
-      []
-    end
-  end
-
-  defp fly_children do
-    fly_config = Application.get_env(:ex_atlas, :fly, [])
-
-    case Keyword.get(fly_config, :enabled, true) do
-      false ->
-        []
-
-      _ ->
-        storage_mod = Keyword.get(fly_config, :token_storage, ExAtlas.Fly.TokenStorage.Dets)
-
-        [{storage_mod, fly_config}, Tokens.Supervisor, StreamerSupervisor] ++
-          dispatcher_child()
-    end
-  end
-
-  defp dispatcher_child do
-    if Dispatcher.needs_registry?() do
-      [Dispatcher]
     else
       []
     end

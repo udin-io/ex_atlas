@@ -111,6 +111,44 @@ defmodule ExAtlas.Fly.Tokens do
   end
 
   @doc """
+  Atomic `invalidate/1` + `get/1`.
+
+  Equivalent to calling `invalidate(app_name)` followed by `get(app_name)`, but
+  executed under a single GenServer call on the AppServer so no concurrent
+  caller can slip in between the two and observe the pre-refresh token.
+
+  Use this when you've learned a cached token is invalid (e.g. a 401 from
+  the Fly API) and want to replace it atomically.
+
+  Returns the same shape as `get/1`.
+  """
+  @spec refresh(String.t()) :: {:ok, String.t()} | {:error, :no_token_available}
+  def refresh(app_name) do
+    :telemetry.span(
+      @acquire_event,
+      %{app: app_name},
+      fn ->
+        names = resolve_names()
+
+        case Supervisor.resolve_app_server(app_name,
+               registry: names.registry,
+               dynamic_sup: names.dynamic_sup,
+               task_sup: names.task_sup,
+               ets_table: names.ets_table,
+               app_server_defaults: names.app_server_defaults
+             ) do
+          {:ok, pid} ->
+            {result, source} = AppServer.refresh(pid)
+            {result, %{app: app_name, source: source, acquirer: :app_server}}
+
+          {:error, reason} ->
+            {{:error, reason}, %{app: app_name, source: :none, acquirer: :app_server}}
+        end
+      end
+    )
+  end
+
+  @doc """
   Store a manual override token for `app_name` (used as a last-resort
   fallback in the resolution chain).
 
