@@ -1,8 +1,11 @@
 defmodule ExAtlas.Fly.Tokens.ServerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias ExAtlas.Fly.Tokens.Server
   alias ExAtlas.Fly.TokenStorage.Memory
+  alias ExAtlas.Fly.TokenStorage.Raising
 
   @app_name "my-fly-app"
   @token "FlyV1 fm2_test_token_abc123"
@@ -217,7 +220,12 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
       previous = Application.get_env(:ex_atlas, :fly, [])
 
       try do
-        Application.put_env(:ex_atlas, :fly, Keyword.put(previous, :fly_config_file_enabled, false))
+        Application.put_env(
+          :ex_atlas,
+          :fly,
+          Keyword.put(previous, :fly_config_file_enabled, false)
+        )
+
         start_server(context, config_file_fn: config_file_fn, cmd_fn: cmd_fn)
 
         assert {:error, :no_token_available} = Server.get_token(@app_name, context.test_name)
@@ -248,6 +256,77 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
 
       assert :ok = Server.set_manual_token(@app_name, manual_token, context.test_name)
       assert {:ok, ^manual_token} = Server.get_token(@app_name, context.test_name)
+    end
+  end
+
+  describe "persist failures (H2)" do
+    test "CLI-acquired token is still returned when storage put fails", context do
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+
+      # Use raising storage (not Memory) to simulate a persist failure.
+      server_opts = [
+        name: context.test_name,
+        table_name: context.table_name,
+        cmd_fn: cmd_fn,
+        storage_mod: Raising,
+        config_file_fn: fn -> :miss end,
+        cli_timeout_ms: 500
+      ]
+
+      {:ok, _pid} = start_supervised({Server, server_opts}, id: context.test_name)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+        end)
+
+      # Error-level log (not merely warning) so operators catch silent data loss.
+      assert log =~ "[error]"
+      assert log =~ "persist"
+      assert log =~ @app_name
+    end
+
+    test "config-file-sourced token is still returned when storage put fails", context do
+      config_file_fn = fn -> {:ok, @token} end
+
+      server_opts = [
+        name: context.test_name,
+        table_name: context.table_name,
+        cmd_fn: fn _, _, _ -> {"", 1} end,
+        storage_mod: Raising,
+        config_file_fn: config_file_fn,
+        cli_timeout_ms: 500
+      ]
+
+      {:ok, _pid} = start_supervised({Server, server_opts}, id: context.test_name)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+        end)
+
+      assert log =~ "[error]"
+      assert log =~ "persist"
+    end
+
+    test "set_manual_token surfaces storage failure as {:error, reason}", context do
+      manual_token = "FlyV1 fm2_user_provided"
+
+      server_opts = [
+        name: context.test_name,
+        table_name: context.table_name,
+        cmd_fn: fn _, _, _ -> {"", 1} end,
+        storage_mod: Raising,
+        config_file_fn: fn -> :miss end,
+        cli_timeout_ms: 500
+      ]
+
+      {:ok, _pid} = start_supervised({Server, server_opts}, id: context.test_name)
+
+      # Manual-token put goes directly to storage; failure must be surfaced,
+      # not silently swallowed — manual tokens are NOT re-acquirable.
+      assert {:error, _reason} =
+               Server.set_manual_token(@app_name, manual_token, context.test_name)
     end
   end
 end

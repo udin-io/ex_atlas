@@ -67,8 +67,15 @@ defmodule ExAtlas.Fly.Tokens.Server do
     GenServer.call(server, {:invalidate, app_name})
   end
 
-  @doc "Persist a manual-override token (no expiry)."
-  @spec set_manual_token(String.t(), String.t(), atom()) :: :ok
+  @doc """
+  Persist a manual-override token (no expiry).
+
+  Returns `{:error, {:persist_failed, reason}}` if the storage backend raises —
+  manual tokens are the one case in atlas where the caller gets a real error
+  rather than a silent log, because a manual token is not re-acquirable.
+  """
+  @spec set_manual_token(String.t(), String.t(), atom()) ::
+          :ok | {:error, {:persist_failed, String.t()}}
   def set_manual_token(app_name, token, server \\ __MODULE__) do
     GenServer.call(server, {:set_manual_token, app_name, token})
   end
@@ -128,8 +135,26 @@ defmodule ExAtlas.Fly.Tokens.Server do
   end
 
   def handle_call({:set_manual_token, app_name, token}, _from, state) do
-    state.storage_mod.put(app_name, :manual, %{token: token, expires_at: nil})
-    {:reply, :ok, state}
+    # Manual tokens are NOT re-acquirable — never silently swallow a
+    # persist failure here.
+    result =
+      try do
+        state.storage_mod.put(app_name, :manual, %{token: token, expires_at: nil})
+        :ok
+      rescue
+        e ->
+          reason = Exception.message(e)
+
+          Logger.error(
+            "[ExAtlas.Fly.Tokens] manual token persist failed for #{app_name}: #{reason}",
+            app: app_name,
+            reason: reason
+          )
+
+          {:error, {:persist_failed, reason}}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:expire_token, app_name}, _from, state) do
@@ -282,13 +307,24 @@ defmodule ExAtlas.Fly.Tokens.Server do
     :ets.insert(table_name, {app_name, token, expires_at})
   end
 
+  # Persist a cached token. A failure here means VM restart will lose the
+  # cached token; the caller still gets a working token (ETS is authoritative
+  # for the current session), but the event must be loud enough for operators
+  # to notice — upgraded from :warning to :error and surfaced as a return tuple.
   defp persist(storage_mod, app_name, token, expires_at) do
     storage_mod.put(app_name, :cached, %{token: token, expires_at: expires_at})
+    :ok
   rescue
     e ->
-      Logger.warning(
-        "[ExAtlas.Fly.Tokens] Failed to persist token for #{app_name}: #{inspect(e)}"
+      reason = Exception.message(e)
+
+      Logger.error(
+        "[ExAtlas.Fly.Tokens] cached token persist failed for #{app_name}: #{reason}",
+        app: app_name,
+        reason: reason
       )
+
+      {:error, {:persist_failed, reason}}
   end
 
   defp resolve_storage_mod do
