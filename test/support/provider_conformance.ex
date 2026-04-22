@@ -1,14 +1,14 @@
-defmodule Atlas.Test.ProviderConformance do
+defmodule ExAtlas.Test.ProviderConformance do
   @moduledoc """
-  Shared ExUnit suite every `Atlas.Provider` implementation must pass.
+  Shared ExUnit suite every `ExAtlas.Provider` implementation must pass.
 
   Usage:
 
-      defmodule Atlas.Providers.MockTest do
+      defmodule ExAtlas.Providers.MockTest do
         use ExUnit.Case, async: false
-        use Atlas.Test.ProviderConformance,
+        use ExAtlas.Test.ProviderConformance,
           provider: :mock,
-          reset: {Atlas.Providers.Mock, :reset, []}
+          reset: {ExAtlas.Providers.Mock, :reset, []}
       end
 
   The `:reset` option names a `{mod, fun, args}` tuple the suite calls in its
@@ -18,7 +18,7 @@ defmodule Atlas.Test.ProviderConformance do
   @doc false
   def build_reset_call(nil), do: quote(do: :ok)
 
-  # `use Atlas.Test.ProviderConformance, reset: {Atlas.Providers.Mock, :reset, []}`
+  # `use ExAtlas.Test.ProviderConformance, reset: {ExAtlas.Providers.Mock, :reset, []}`
   # passes the 3-tuple as a quoted AST (`{:{}, meta, [mod_alias, fun, args]}`).
   # We rebuild it as an `apply/3` call — unquoting the AST nodes directly so the
   # alias resolves at the call site.
@@ -39,7 +39,7 @@ defmodule Atlas.Test.ProviderConformance do
     reset_call = build_reset_call(Keyword.get(opts, :reset))
 
     quote do
-      alias Atlas.Spec
+      alias ExAtlas.Spec
 
       @provider unquote(provider)
 
@@ -49,14 +49,14 @@ defmodule Atlas.Test.ProviderConformance do
       end
 
       test "capabilities/0 returns a list of atoms" do
-        caps = Atlas.capabilities(@provider)
+        caps = ExAtlas.capabilities(@provider)
         assert is_list(caps)
         assert Enum.all?(caps, &is_atom/1)
       end
 
       test "spawn_compute → get_compute → terminate round-trip" do
         {:ok, compute} =
-          Atlas.spawn_compute(
+          ExAtlas.spawn_compute(
             provider: @provider,
             gpu: :h100,
             image: "test/image:latest",
@@ -66,15 +66,15 @@ defmodule Atlas.Test.ProviderConformance do
         assert %Spec.Compute{provider: @provider} = compute
         assert is_binary(compute.id)
 
-        {:ok, fetched} = Atlas.get_compute(compute.id, provider: @provider)
+        {:ok, fetched} = ExAtlas.get_compute(compute.id, provider: @provider)
         assert fetched.id == compute.id
 
-        :ok = Atlas.terminate(compute.id, provider: @provider)
+        :ok = ExAtlas.terminate(compute.id, provider: @provider)
       end
 
       test "spawn_compute with auth: :bearer returns a token" do
         {:ok, compute} =
-          Atlas.spawn_compute(
+          ExAtlas.spawn_compute(
             provider: @provider,
             gpu: :h100,
             image: "test/image",
@@ -87,8 +87,8 @@ defmodule Atlas.Test.ProviderConformance do
       end
 
       test "list_compute returns a list" do
-        {:ok, _} = Atlas.spawn_compute(provider: @provider, gpu: :h100, image: "test/image")
-        {:ok, all} = Atlas.list_compute(provider: @provider)
+        {:ok, _} = ExAtlas.spawn_compute(provider: @provider, gpu: :h100, image: "test/image")
+        {:ok, all} = ExAtlas.list_compute(provider: @provider)
         assert is_list(all)
       end
     end

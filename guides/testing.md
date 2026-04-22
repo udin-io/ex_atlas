@@ -2,18 +2,18 @@
 
 ## The Mock provider
 
-`Atlas.Providers.Mock` is an in-memory implementation of the full
-`Atlas.Provider` behaviour. It runs synchronously — pods are
+`ExAtlas.Providers.Mock` is an in-memory implementation of the full
+`ExAtlas.Provider` behaviour. It runs synchronously — pods are
 `:running` immediately after `spawn_compute/2`, jobs complete on the
 next `get_job/2` call. Perfect for testing your own code that depends
-on Atlas without hitting any network.
+on ExAtlas without hitting any network.
 
 ### Setup
 
 ```elixir
 # test/test_helper.exs
 ExUnit.start()
-Atlas.Providers.Mock.ensure_started()
+ExAtlas.Providers.Mock.ensure_started()
 ```
 
 ```elixir
@@ -22,13 +22,13 @@ defmodule MyApp.InferenceTest do
   use ExUnit.Case, async: false
 
   setup do
-    Atlas.Providers.Mock.reset()
+    ExAtlas.Providers.Mock.reset()
     :ok
   end
 
   test "my code handles a running pod" do
     {:ok, compute} = MyApp.start_session(user_id: 42)
-    # my code calls Atlas internally; we point it at :mock via config
+    # my code calls ExAtlas internally; we point it at :mock via config
     assert compute.status == :running
     assert compute.provider == :mock
   end
@@ -39,14 +39,14 @@ Set the default provider per test suite:
 
 ```elixir
 # config/test.exs
-config :atlas,
+config :ex_atlas,
   default_provider: :mock,
   start_orchestrator: false
 ```
 
 ## Shared conformance suite
 
-`Atlas.Test.ProviderConformance` is a `use` macro that runs the same
+`ExAtlas.Test.ProviderConformance` is a `use` macro that runs the same
 suite against any provider implementation, so every provider in the
 library (and yours) exercises the same contract.
 
@@ -54,7 +54,7 @@ library (and yours) exercises the same contract.
 defmodule MyCloud.ProviderTest do
   use ExUnit.Case, async: false
 
-  use Atlas.Test.ProviderConformance,
+  use ExAtlas.Test.ProviderConformance,
     provider: MyCloud.Provider,
     reset: {MyCloud.TestHelpers, :reset_bypass, []}
 end
@@ -69,7 +69,7 @@ The `:reset` MFA is called before every test. Use it to:
 ## Integration tests against a live cloud
 
 ```elixir
-defmodule Atlas.Providers.RunPodLiveTest do
+defmodule ExAtlas.Providers.RunPodLiveTest do
   use ExUnit.Case, async: false
 
   @moduletag :live
@@ -77,7 +77,7 @@ defmodule Atlas.Providers.RunPodLiveTest do
   @tag timeout: 120_000
   test "spawn → wait-for-healthy → terminate on community RTX A4000" do
     {:ok, compute} =
-      Atlas.spawn_compute(
+      ExAtlas.spawn_compute(
         provider: :runpod,
         gpu: :a4000,
         image: "ubuntu:22.04",
@@ -85,7 +85,7 @@ defmodule Atlas.Providers.RunPodLiveTest do
         ports: [{22, :tcp}]
       )
 
-    on_exit(fn -> Atlas.terminate(compute.id, provider: :runpod) end)
+    on_exit(fn -> ExAtlas.terminate(compute.id, provider: :runpod) end)
 
     assert compute.status in [:provisioning, :running]
   end
@@ -136,7 +136,7 @@ test "spawn_compute POSTs /pods", %{bypass: bypass, opts: opts} do
   end)
 
   {:ok, compute} =
-    Atlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
+    ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
 
   assert compute.id == "pod_abc"
 end
@@ -150,14 +150,14 @@ tree:
 
 ```elixir
 setup do
-  Application.put_env(:atlas, :start_orchestrator, true)
-  Application.put_env(:atlas, :default_provider, :mock)
-  Atlas.Providers.Mock.reset()
+  Application.put_env(:ex_atlas, :start_orchestrator, true)
+  Application.put_env(:ex_atlas, :default_provider, :mock)
+  ExAtlas.Providers.Mock.reset()
 
-  start_supervised!({Registry, keys: :unique, name: Atlas.Orchestrator.ComputeRegistry})
-  start_supervised!({DynamicSupervisor, name: Atlas.Orchestrator.ComputeSupervisor,
+  start_supervised!({Registry, keys: :unique, name: ExAtlas.Orchestrator.ComputeRegistry})
+  start_supervised!({DynamicSupervisor, name: ExAtlas.Orchestrator.ComputeSupervisor,
                                          strategy: :one_for_one})
-  start_supervised!({Phoenix.PubSub, name: Atlas.PubSub})
+  start_supervised!({Phoenix.PubSub, name: ExAtlas.PubSub})
 
   :ok
 end
