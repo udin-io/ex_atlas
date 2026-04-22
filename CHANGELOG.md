@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v0.2.0-dev — unreleased
+## v0.2.0 — unreleased
+
+### Fixed
+
+- `ExAtlas.Fly.Logs.Client.next_start_time/1` no longer crashes the
+  Streamer when a log entry has a `nil` or malformed ISO-8601 timestamp;
+  unparseable entries are logged and skipped.
+- `ExAtlas.Fly.Deploy.stream_deploy/3` cleans both the activity and
+  absolute timers symmetrically across all exit branches, so no stray
+  `{:deploy_*_timeout, _}` message leaks into a long-lived caller's
+  mailbox. Exposes `:activity_timeout_ms` / `:max_timeout_ms` options.
+- `ExAtlas.Fly.Tokens.Server` now implements `terminate/2` to delete its
+  named ETS table, avoiding an `ArgumentError` on supervisor restart,
+  and defensively reclaims an existing table in `init/1`.
+- `ExAtlas.Fly.Tokens.Server` shuts down a hung `fly` CLI task with
+  `:brutal_kill` so the configured `cli_timeout_ms` is actually the
+  mailbox blocking time, not `cli_timeout_ms + 5_000`.
+- `ExAtlas.Fly.Logs.StreamerSupervisor` uses `:rest_for_one` with a
+  generous restart budget on the `DynamicSupervisor` so one app's
+  misbehaving streamer no longer tears down the registry and every
+  other app's pagination cursor.
 
 ### Added — Fly.io platform operations
 
