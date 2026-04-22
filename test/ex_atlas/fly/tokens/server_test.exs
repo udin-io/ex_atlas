@@ -259,6 +259,86 @@ defmodule ExAtlas.Fly.Tokens.ServerTest do
     end
   end
 
+  describe "telemetry (N6a)" do
+    @acquire_event [:ex_atlas, :fly, :token, :acquire]
+
+    defp attach_telemetry(handler_id, events) do
+      test_pid = self()
+
+      handler = fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end
+
+      :telemetry.attach_many(handler_id, events, handler, nil)
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    test "emits :start and :stop with source=:cli when CLI acquires a fresh token", context do
+      attach_telemetry("token-cli-#{context.test_name}", [
+        @acquire_event ++ [:start],
+        @acquire_event ++ [:stop]
+      ])
+
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+      start_server(context, cmd_fn: cmd_fn)
+
+      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+
+      start_event = @acquire_event ++ [:start]
+      stop_event = @acquire_event ++ [:stop]
+
+      assert_receive {:telemetry, ^start_event, %{system_time: _}, %{app: @app_name}}, 500
+      assert_receive {:telemetry, ^stop_event, %{duration: _}, meta}, 500
+      assert meta.app == @app_name
+      assert meta.source == :cli
+    end
+
+    test "emits :stop with source=:ets on cache hit", context do
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+      start_server(context, cmd_fn: cmd_fn)
+
+      # Prime the cache.
+      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+
+      # Now attach and fetch — must hit ETS.
+      attach_telemetry("token-ets-#{context.test_name}", [@acquire_event ++ [:stop]])
+
+      assert {:ok, @token} = Server.get_token(@app_name, context.test_name)
+
+      stop_event = @acquire_event ++ [:stop]
+      assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
+      assert meta.source == :ets
+    end
+
+    test "emits :stop with source=:config when config file resolves", context do
+      attach_telemetry("token-config-#{context.test_name}", [@acquire_event ++ [:stop]])
+
+      config_token = "FlyV1 fm2_config_file_token"
+      config_file_fn = fn -> {:ok, config_token} end
+
+      start_server(context, config_file_fn: config_file_fn)
+
+      assert {:ok, ^config_token} = Server.get_token(@app_name, context.test_name)
+
+      stop_event = @acquire_event ++ [:stop]
+      assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
+      assert meta.source == :config
+    end
+
+    test "emits :stop with source=:none when resolution fails", context do
+      attach_telemetry("token-none-#{context.test_name}", [@acquire_event ++ [:stop]])
+
+      cmd_fn = fn _, _, _ -> {"Error: not authenticated", 1} end
+      start_server(context, cmd_fn: cmd_fn)
+
+      assert {:error, :no_token_available} = Server.get_token(@app_name, context.test_name)
+
+      stop_event = @acquire_event ++ [:stop]
+      assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
+      assert meta.source == :none
+    end
+  end
+
   describe "persist failures (H2)" do
     test "CLI-acquired token is still returned when storage put fails", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end

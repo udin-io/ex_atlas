@@ -45,21 +45,41 @@ defmodule ExAtlas.Fly.Tokens.Server do
 
   @doc """
   Returns a token for `app_name`, acquiring it from the resolution chain if needed.
+
+  ## Telemetry
+
+  Emits `[:ex_atlas, :fly, :token, :acquire]` span events (`:start`, `:stop`,
+  `:exception`). `:stop` metadata includes `source:` which is one of `:ets`,
+  `:storage`, `:config`, `:cli`, `:manual`, or `:none` (when resolution failed).
   """
   @spec get_token(String.t(), atom()) :: {:ok, String.t()} | {:error, :no_token_available}
   def get_token(app_name, server \\ __MODULE__) do
+    :telemetry.span(
+      [:ex_atlas, :fly, :token, :acquire],
+      %{app: app_name},
+      fn ->
+        {result, source} = do_get_token(app_name, server)
+        {to_public(result), %{app: app_name, source: source}}
+      end
+    )
+  end
+
+  defp do_get_token(app_name, server) do
     table_name = get_table_name(server)
     now = System.system_time(:second)
 
     case ets_lookup(table_name, app_name, now) do
       {:ok, token} ->
-        {:ok, token}
+        {{:ok, token}, :ets}
 
       :miss ->
         timeout = cli_timeout_ms() + 5_000
         GenServer.call(server, {:acquire_token, app_name}, timeout)
     end
   end
+
+  defp to_public({:ok, token}), do: {:ok, token}
+  defp to_public({:error, _} = err), do: err
 
   @doc "Drop the ETS entry for `app_name` so the next `get_token/2` re-acquires."
   @spec invalidate_token(String.t(), atom()) :: :ok
@@ -120,13 +140,13 @@ defmodule ExAtlas.Fly.Tokens.Server do
   def handle_call({:acquire_token, app_name}, _from, state) do
     now = System.system_time(:second)
 
-    result =
+    reply =
       case ets_lookup(state.table_name, app_name, now) do
-        {:ok, token} -> {:ok, token}
+        {:ok, token} -> {{:ok, token}, :ets}
         :miss -> resolve_token(app_name, now, state)
       end
 
-    {:reply, result, state}
+    {:reply, reply, state}
   end
 
   def handle_call({:invalidate, app_name}, _from, state) do
@@ -200,12 +220,15 @@ defmodule ExAtlas.Fly.Tokens.Server do
     end
   end
 
+  # Returns {result, source} where source identifies which link in the
+  # resolution chain produced the token (or :none on failure). The source tag
+  # bubbles up into telemetry metadata so operators can see cache-hit rates.
   defp resolve_token(app_name, now, state) do
     with :miss <- check_storage(app_name, now, state),
          :miss <- check_fly_config(app_name, state),
          :miss <- acquire_from_cli(app_name, state),
          :miss <- check_manual_token(app_name, state) do
-      {:error, :no_token_available}
+      {{:error, :no_token_available}, :none}
     end
   end
 
@@ -214,7 +237,7 @@ defmodule ExAtlas.Fly.Tokens.Server do
       {:ok, %{token: token, expires_at: expires_at}}
       when is_integer(expires_at) and expires_at > now ->
         cache_token(state.table_name, app_name, token, expires_at)
-        {:ok, token}
+        {{:ok, token}, :storage}
 
       _ ->
         :miss
@@ -228,7 +251,7 @@ defmodule ExAtlas.Fly.Tokens.Server do
           expires_at = System.system_time(:second) + state.ttl_seconds
           cache_token(state.table_name, app_name, token, expires_at)
           persist(state.storage_mod, app_name, token, expires_at)
-          {:ok, token}
+          {{:ok, token}, :config}
 
         _ ->
           :miss
@@ -271,7 +294,7 @@ defmodule ExAtlas.Fly.Tokens.Server do
           expires_at = System.system_time(:second) + state.ttl_seconds
           cache_token(state.table_name, app_name, token, expires_at)
           persist(state.storage_mod, app_name, token, expires_at)
-          {:ok, token}
+          {{:ok, token}, :cli}
         else
           Logger.warning(
             "[ExAtlas.Fly.Tokens] `fly tokens create` returned empty output for #{app_name}"
@@ -296,7 +319,7 @@ defmodule ExAtlas.Fly.Tokens.Server do
   defp check_manual_token(app_name, state) do
     case state.storage_mod.get(app_name, :manual) do
       {:ok, %{token: token}} when is_binary(token) and token != "" ->
-        {:ok, token}
+        {{:ok, token}, :manual}
 
       _ ->
         :miss

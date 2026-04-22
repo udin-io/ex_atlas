@@ -3,6 +3,19 @@ defmodule ExAtlas.Fly.TokenStorage.MemoryTest do
 
   alias ExAtlas.Fly.TokenStorage.Memory
 
+  # The E2 conformance suite covers the full get/put/delete contract across
+  # :cached and :manual keys for every TokenStorage implementation.
+  use ExAtlas.Fly.TokenStorageConformance,
+    storage: ExAtlas.Fly.TokenStorage.Memory,
+    setup: {__MODULE__, :__setup_memory__, []}
+
+  @doc false
+  def __setup_memory__ do
+    if pid = Process.whereis(Memory), do: GenServer.stop(pid)
+    {:ok, _} = Memory.start_link()
+    :ok
+  end
+
   describe "parity with Dets pre-init behavior (M10)" do
     test "get/2 returns :error when the Memory Agent has not been started" do
       # Make sure the Agent is definitely not started. It's not started by the
@@ -14,30 +27,6 @@ defmodule ExAtlas.Fly.TokenStorage.MemoryTest do
       # Old behavior: Agent.get exits with :noproc. Dets swallows the
       # equivalent ArgumentError and returns :error; Memory must match.
       assert :error = Memory.get("any-app", :cached)
-    end
-  end
-
-  describe "round-trip" do
-    setup do
-      start_supervised!(Memory)
-      :ok
-    end
-
-    test "put + get" do
-      assert :ok = Memory.put("app", :cached, %{token: "t", expires_at: 123})
-      assert {:ok, %{token: "t", expires_at: 123}} = Memory.get("app", :cached)
-    end
-
-    test "get miss returns :error" do
-      assert :error = Memory.get("missing", :cached)
-    end
-
-    test "delete removes the entry" do
-      Memory.put("app", :manual, %{token: "t", expires_at: nil})
-      assert {:ok, _} = Memory.get("app", :manual)
-
-      Memory.delete("app", :manual)
-      assert :error = Memory.get("app", :manual)
     end
   end
 end

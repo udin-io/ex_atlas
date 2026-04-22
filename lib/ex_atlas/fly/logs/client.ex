@@ -34,6 +34,24 @@ defmodule ExAtlas.Fly.Logs.Client do
   @spec fetch_logs(String.t(), String.t(), keyword()) ::
           {:ok, [LogEntry.t()]} | {:error, term()}
   def fetch_logs(app_name, token, opts \\ []) do
+    :telemetry.span(
+      [:ex_atlas, :fly, :logs, :fetch],
+      %{app: app_name},
+      fn ->
+        result = do_fetch_logs(app_name, token, opts)
+
+        meta =
+          case result do
+            {:ok, entries} -> %{app: app_name, status: :ok, count: length(entries)}
+            {:error, reason} -> %{app: app_name, status: {:error, reason}, count: 0}
+          end
+
+        {result, meta}
+      end
+    )
+  end
+
+  defp do_fetch_logs(app_name, token, opts) do
     url = build_url(app_name, opts)
 
     case http_get(url, token, opts) do
