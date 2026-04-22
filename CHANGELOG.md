@@ -5,7 +5,41 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v0.3.1 — unreleased
+## v0.4.0 — unreleased
+
+### Changed — Per-app Fly tokens (audit E1; closes H3, H4)
+
+- Replaced the singleton `ExAtlas.Fly.Tokens.Server` with a per-app
+  `ExAtlas.Fly.Tokens.AppServer` supervised under
+  `ExAtlas.Fly.Tokens.Supervisor`. Token resolution for one app no
+  longer blocks resolution for any other. A thundering herd of CLI
+  acquisitions (e.g. post-VM-restart across N apps) now runs in
+  parallel rather than serialized behind a single mailbox.
+- `ExAtlas.Fly.Tokens.Server` is **removed**. The documented public API
+  (`ExAtlas.Fly.Tokens.{get/1, invalidate/1, set_manual/2}`) is
+  unchanged and remains the stable entry point.
+- Shared ETS table (`:ex_atlas_fly_tokens`) is now `:public` and owned
+  by `ExAtlas.Fly.Tokens.ETSOwner`, outliving individual AppServer
+  crashes. A crashed AppServer restarts with its cache intact; an
+  ETSOwner crash rebuilds the whole tokens subtree via `:rest_for_one`
+  (Registry survives, DynamicSupervisor + every AppServer restart).
+- Concurrent `Tokens.get/1` calls for the **same** app coalesce at the
+  AppServer mailbox — only the first-in-line caller invokes the CLI;
+  subsequent callers re-check ETS (filled by the first) before
+  descending the resolution chain.
+
+### Added
+
+- `[:ex_atlas, :fly, :token, :acquire]` `:stop` metadata gains a new
+  `:acquirer` field — `:facade` for pure ETS fast-path hits (no
+  AppServer consulted) or `:app_server` for slow-path / coalesced
+  resolutions. Existing handlers that match only on `:source` are
+  unaffected. See `guides/telemetry.md` for the diagnostic interpretation.
+- `ExAtlas.Fly.Tokens.Supervisor.whereis_app_server/2` and
+  `resolve_app_server/2` — lookup / resolve-or-start helpers.
+  Primarily for tests.
+
+## v0.3.1 — 2026-04-22
 
 ### Added — Telemetry for Fly platform ops
 
