@@ -76,4 +76,31 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
       assert File.exists?(Path.join(context.dir, "manual.dets"))
     end
   end
+
+  describe "file permissions (M7)" do
+    @describetag :unix
+
+    test "storage dir is 0700 after init", context do
+      assert {:ok, pid} = Dets.start_link(start_opts(context))
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      %File.Stat{mode: mode} = File.stat!(context.dir)
+      # Low 9 bits are the rwx permission triad.
+      assert Bitwise.band(mode, 0o777) == 0o700,
+             "dir mode was #{Integer.to_string(Bitwise.band(mode, 0o777), 8)}, expected 700"
+    end
+
+    test "DETS files are 0600 after init", context do
+      assert {:ok, pid} = Dets.start_link(start_opts(context))
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      for file <- ["cached.dets", "manual.dets"] do
+        path = Path.join(context.dir, file)
+        %File.Stat{mode: mode} = File.stat!(path)
+
+        assert Bitwise.band(mode, 0o777) == 0o600,
+               "#{file} mode was #{Integer.to_string(Bitwise.band(mode, 0o777), 8)}, expected 600"
+      end
+    end
+  end
 end

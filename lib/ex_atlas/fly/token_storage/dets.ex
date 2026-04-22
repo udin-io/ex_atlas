@@ -66,15 +66,24 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
   def init(opts) do
     dir = resolve_storage_dir(opts)
     File.mkdir_p!(dir)
+    # Tokens are bearer credentials — restrict the dir so another local user
+    # cannot read the DETS files. No-op on Windows; harmless if already set.
+    _ = File.chmod(dir, 0o700)
 
     cached_table = Keyword.get(opts, :cached_table, @cached_table)
     manual_table = Keyword.get(opts, :manual_table, @manual_table)
 
-    cached_path = Path.join(dir, "cached.dets") |> String.to_charlist()
-    manual_path = Path.join(dir, "manual.dets") |> String.to_charlist()
+    cached_path_str = Path.join(dir, "cached.dets")
+    manual_path_str = Path.join(dir, "manual.dets")
+    cached_path = String.to_charlist(cached_path_str)
+    manual_path = String.to_charlist(manual_path_str)
 
     with {:ok, ^cached_table} <- open_cached(cached_table, cached_path),
          {:ok, ^manual_table} <- open_manual(manual_table, manual_path) do
+      # DETS writes files with default umask — tighten to 0600 once each is open.
+      _ = File.chmod(cached_path_str, 0o600)
+      _ = File.chmod(manual_path_str, 0o600)
+
       {:ok, %{dir: dir, cached_table: cached_table, manual_table: manual_table}}
     end
   end
