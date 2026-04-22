@@ -93,10 +93,11 @@ defmodule ExAtlas.Fly.Logs.Client do
 
   def next_start_time(entries) when is_list(entries) do
     entries
-    |> Enum.max_by(& &1.timestamp)
-    |> then(& &1.timestamp)
-    |> to_nanoseconds()
-    |> Kernel.+(1)
+    |> Enum.flat_map(&parse_timestamp/1)
+    |> case do
+      [] -> nil
+      nanoseconds -> Enum.max(nanoseconds) + 1
+    end
   end
 
   # ── Private ──
@@ -159,15 +160,30 @@ defmodule ExAtlas.Fly.Logs.Client do
           [LogEntry.from_json(json) | acc]
 
         {:error, _} ->
-          Logger.debug("[ExAtlas.Fly.Logs.Client] Skipping malformed NDJSON line: #{inspect(line)}")
+          Logger.debug(
+            "[ExAtlas.Fly.Logs.Client] Skipping malformed NDJSON line: #{inspect(line)}"
+          )
+
           acc
       end
     end)
     |> Enum.reverse()
   end
 
-  defp to_nanoseconds(iso8601_string) do
-    {:ok, datetime, _offset} = DateTime.from_iso8601(iso8601_string)
-    DateTime.to_unix(datetime, :nanosecond)
+  defp parse_timestamp(%LogEntry{timestamp: nil}), do: []
+
+  defp parse_timestamp(%LogEntry{timestamp: iso8601}) when is_binary(iso8601) do
+    case DateTime.from_iso8601(iso8601) do
+      {:ok, datetime, _offset} ->
+        [DateTime.to_unix(datetime, :nanosecond)]
+
+      {:error, reason} ->
+        Logger.warning("[ExAtlas.Fly.Logs.Client] skipping unparseable timestamp",
+          timestamp: iso8601,
+          reason: reason
+        )
+
+        []
+    end
   end
 end

@@ -244,5 +244,34 @@ defmodule ExAtlas.Fly.Logs.ClientTest do
     test "returns nil for empty list" do
       assert Client.next_start_time([]) == nil
     end
+
+    test "ignores entries with nil timestamp" do
+      entries = [
+        %LogEntry{timestamp: nil},
+        %LogEntry{timestamp: "2024-01-01T00:00:02Z"},
+        %LogEntry{timestamp: nil}
+      ]
+
+      assert Client.next_start_time(entries) == 1_704_067_202_000_000_001
+    end
+
+    test "returns nil when all timestamps are nil" do
+      entries = [%LogEntry{timestamp: nil}, %LogEntry{timestamp: nil}]
+      assert Client.next_start_time(entries) == nil
+    end
+
+    test "ignores entries with malformed ISO-8601 timestamp" do
+      entries = [
+        %LogEntry{timestamp: "not-a-date"},
+        %LogEntry{timestamp: "2024-01-01T00:00:02Z"}
+      ]
+
+      assert Client.next_start_time(entries) == 1_704_067_202_000_000_001
+    end
+
+    test "returns nil when all timestamps are malformed" do
+      entries = [%LogEntry{timestamp: "nope"}, %LogEntry{timestamp: "also-nope"}]
+      assert Client.next_start_time(entries) == nil
+    end
   end
 end
