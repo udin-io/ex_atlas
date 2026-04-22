@@ -192,6 +192,103 @@ defmodule ExAtlas.Fly.DeployTest do
       refute_received {:deploy_absolute_timeout, _}
     end
 
+    test "telemetry (N6c): emits :line per non-empty line and :exit on success", %{test_dir: dir} do
+      abs_dir = Path.expand(dir)
+      fake_fly = Path.join(abs_dir, "fly")
+
+      # Three non-empty lines + a blank one (which must NOT emit a :line event).
+      File.write!(fake_fly, """
+      #!/bin/sh
+      echo "step 1"
+      echo "step 2"
+      echo ""
+      echo "step 3"
+      exit 0
+      """)
+
+      File.chmod!(fake_fly, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{abs_dir}:#{original_path}")
+      on_exit(fn -> System.put_env("PATH", original_path) end)
+
+      test_pid = self()
+
+      handler_id = "deploy-ok-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:ex_atlas, :fly, :deploy, :line],
+          [:ex_atlas, :fly, :deploy, :exit]
+        ],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      ticket = "ticket-telemetry-ok"
+
+      assert {:ok, _output} = Deploy.stream_deploy(abs_dir, abs_dir, ticket)
+
+      line_event = [:ex_atlas, :fly, :deploy, :line]
+
+      for _ <- 1..3 do
+        assert_receive {:telemetry, ^line_event, %{count: 1}, %{ticket_id: ^ticket}}, 2_000
+      end
+
+      # No fourth line event for the blank line.
+      refute_received {:telemetry, ^line_event, _, _}
+
+      exit_event = [:ex_atlas, :fly, :deploy, :exit]
+
+      assert_receive {:telemetry, ^exit_event, _measurements, exit_meta}, 2_000
+      assert exit_meta.ticket_id == ticket
+      assert exit_meta.result == :ok
+    end
+
+    test "telemetry (N6c): emits :exit with {:error, _} on non-zero exit", %{test_dir: dir} do
+      abs_dir = Path.expand(dir)
+      fake_fly = Path.join(abs_dir, "fly")
+
+      File.write!(fake_fly, """
+      #!/bin/sh
+      echo "failing line"
+      exit 7
+      """)
+
+      File.chmod!(fake_fly, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{abs_dir}:#{original_path}")
+      on_exit(fn -> System.put_env("PATH", original_path) end)
+
+      test_pid = self()
+      handler_id = "deploy-fail-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:ex_atlas, :fly, :deploy, :exit],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      ticket = "ticket-fail"
+      assert {:error, {:fly_error, 7, _}} = Deploy.stream_deploy(abs_dir, abs_dir, ticket)
+
+      exit_event = [:ex_atlas, :fly, :deploy, :exit]
+      assert_receive {:telemetry, ^exit_event, _measurements, meta}, 2_000
+      assert meta.ticket_id == ticket
+      assert match?({:error, {:exit_code, 7}}, meta.result)
+    end
+
     test "does not leak timer messages into the caller mailbox", %{test_dir: dir} do
       # Create a fake `fly` executable that prints a line and exits 0,
       # then prepend its dir to PATH so System.find_executable/1 picks it up.

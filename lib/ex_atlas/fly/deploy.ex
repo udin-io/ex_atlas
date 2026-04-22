@@ -151,9 +151,42 @@ defmodule ExAtlas.Fly.Deploy do
           cancel_and_flush(final_timers.activity, {:deploy_activity_timeout, port})
           cancel_and_flush(final_timers.absolute, {:deploy_absolute_timeout, port})
 
+          emit_deploy_exit(ticket_id, result)
+
           result
       end
     end
+  end
+
+  # Public helpers for telemetry — kept alongside the stream so the
+  # event contract lives next to the emission point.
+  @deploy_line_event [:ex_atlas, :fly, :deploy, :line]
+  @deploy_exit_event [:ex_atlas, :fly, :deploy, :exit]
+
+  defp emit_deploy_line(ticket_id) do
+    :telemetry.execute(@deploy_line_event, %{count: 1}, %{ticket_id: ticket_id})
+  end
+
+  # Normalize the (:ok, _) / (:error, _) return shape into a compact result tag
+  # suitable for metric filtering. Line content is never included — Fly build
+  # output can contain bearer tokens that must not leak into metrics pipelines.
+  defp emit_deploy_exit(ticket_id, {:ok, _output}) do
+    :telemetry.execute(@deploy_exit_event, %{}, %{ticket_id: ticket_id, result: :ok})
+  end
+
+  defp emit_deploy_exit(ticket_id, {:error, {:fly_error, :timeout, _}}) do
+    :telemetry.execute(@deploy_exit_event, %{}, %{
+      ticket_id: ticket_id,
+      result: {:error, :timeout}
+    })
+  end
+
+  defp emit_deploy_exit(ticket_id, {:error, {:fly_error, exit_code, _}})
+       when is_integer(exit_code) do
+    :telemetry.execute(@deploy_exit_event, %{}, %{
+      ticket_id: ticket_id,
+      result: {:error, {:exit_code, exit_code}}
+    })
   end
 
   # ── Private ──
@@ -177,6 +210,8 @@ defmodule ExAtlas.Fly.Deploy do
               "ex_atlas_fly_deploy:#{ticket_id}",
               {:ex_atlas_fly_deploy, ticket_id, line}
             )
+
+            emit_deploy_line(ticket_id)
           end
         end)
 
