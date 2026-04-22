@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.1 — unreleased
+
+### Added — Telemetry for Fly platform ops
+
+- `[:ex_atlas, :fly, :token, :acquire]` span events around every
+  `ExAtlas.Fly.Tokens.get/1` call. `:stop` metadata includes `source:`
+  (`:ets` / `:storage` / `:config` / `:cli` / `:manual` / `:none`) so
+  operators can measure cache-hit rate and acquisition-path latency.
+- `[:ex_atlas, :fly, :logs, :fetch]` span events around
+  `ExAtlas.Fly.Logs.Client.fetch_logs/3`. Metadata: `{app, status, count}`.
+  Inherited automatically by `fetch_logs_with_retry/2`.
+- `[:ex_atlas, :fly, :deploy, :line]` (one per non-empty output line) +
+  `[:ex_atlas, :fly, :deploy, :exit]` (one per deploy termination) from
+  `Deploy.stream_deploy/3`. Line content is deliberately excluded — Fly
+  build output can contain bearer tokens.
+
+See `guides/telemetry.md` for the full event reference.
+
+### Added — Shared TokenStorage conformance suite
+
+- `ExAtlas.Fly.TokenStorageConformance` — a `use`-able ExUnit macro that
+  any `TokenStorage` implementation can adopt to inherit the full
+  `get/put/delete` contract coverage across `:cached` and `:manual`
+  keys. Mirrors the existing `ExAtlas.Test.ProviderConformance` pattern.
+- `Memory` and `Dets` both run under the shared suite now, so any
+  future adapter (Redis, Postgres, vault) can prove parity with one
+  `use` line.
+
 ## v0.3.0 — unreleased
 
 ### Changed — Fly token / streamer return contracts
