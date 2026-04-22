@@ -238,7 +238,7 @@ defmodule ExAtlas.Fly.Tokens.Server do
         state.cmd_fn.("fly", ["tokens", "create", "readonly"], stderr_to_stdout: true)
       end)
 
-    case Task.yield(task, state.cli_timeout_ms) || Task.shutdown(task) do
+    case Task.yield(task, state.cli_timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, {token_output, 0}} ->
         token = String.trim(token_output)
 
