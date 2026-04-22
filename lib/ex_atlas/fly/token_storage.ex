@@ -2,8 +2,8 @@ defmodule ExAtlas.Fly.TokenStorage do
   @moduledoc """
   Behaviour for durable Fly token storage.
 
-  `ExAtlas.Fly.Tokens.Server` uses a `TokenStorage` implementation to persist
-  tokens across VM restarts. The default implementation is
+  Each `ExAtlas.Fly.Tokens.AppServer` uses a `TokenStorage` implementation to
+  persist tokens across VM restarts. The default implementation is
   `ExAtlas.Fly.TokenStorage.Dets`, a zero-config DETS-backed table. Hosts can
   swap in their own implementation (e.g. a DB-backed adapter) by setting
   `config :ex_atlas, :fly, token_storage: MyApp.FlyTokenStorage`.
