@@ -48,47 +48,55 @@ defmodule ExAtlas.Fly.Logs.Streamer do
   @doc """
   Subscribes the calling pid to log events for `app_name`, starting a Streamer
   if one isn't already running.
+
+  Returns `{:error, :no_streamer}` when neither a running Streamer nor the
+  means to start one (registry + dynamic_sup) is available — this was
+  previously a silent `:ok` that delivered no messages. `ExAtlas.Fly.subscribe_logs/3`
+  always plumbs both, so the error branch is primarily a programmer-error
+  guard for direct callers / test utilities.
   """
-  @spec subscribe(String.t(), String.t(), keyword()) :: :ok
+  @spec subscribe(String.t(), String.t(), keyword()) :: :ok | {:error, :no_streamer}
   def subscribe(app_name, project_dir, opts \\ []) do
     Dispatcher.subscribe("ex_atlas_fly_logs:#{app_name}")
 
     registry = Keyword.get(opts, :registry)
     dynamic_sup = Keyword.get(opts, :dynamic_sup)
 
-    streamer_pid =
-      cond do
-        is_nil(registry) ->
-          nil
+    case resolve_streamer_pid(app_name, project_dir, registry, dynamic_sup) do
+      {:ok, pid} ->
+        subscribe_pid(pid, self())
+        :ok
 
-        true ->
-          case Registry.lookup(registry, app_name) do
-            [{pid, _}] ->
-              pid
+      :none ->
+        {:error, :no_streamer}
+    end
+  end
 
-            [] when not is_nil(dynamic_sup) ->
-              {:ok, pid} =
-                DynamicSupervisor.start_child(
-                  dynamic_sup,
-                  {__MODULE__,
-                   [
-                     app_name: app_name,
-                     project_dir: project_dir,
-                     registry: registry,
-                     dynamic_sup: dynamic_sup
-                   ]}
-                )
+  defp resolve_streamer_pid(_app_name, _project_dir, nil, _dynamic_sup), do: :none
 
-              pid
+  defp resolve_streamer_pid(app_name, project_dir, registry, dynamic_sup) do
+    case Registry.lookup(registry, app_name) do
+      [{pid, _}] ->
+        {:ok, pid}
 
-            _ ->
-              nil
-          end
-      end
+      [] when not is_nil(dynamic_sup) ->
+        {:ok, pid} =
+          DynamicSupervisor.start_child(
+            dynamic_sup,
+            {__MODULE__,
+             [
+               app_name: app_name,
+               project_dir: project_dir,
+               registry: registry,
+               dynamic_sup: dynamic_sup
+             ]}
+          )
 
-    if streamer_pid, do: subscribe_pid(streamer_pid, self())
+        {:ok, pid}
 
-    :ok
+      _ ->
+        :none
+    end
   end
 
   @doc "Register `subscriber_pid` as a subscriber of `streamer_pid`."
