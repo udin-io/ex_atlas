@@ -274,4 +274,74 @@ defmodule ExAtlas.Fly.Logs.ClientTest do
       assert Client.next_start_time(entries) == nil
     end
   end
+
+  describe "telemetry (N6b)" do
+    @fetch_event [:ex_atlas, :fly, :logs, :fetch]
+
+    defp attach_fetch_telemetry(id) do
+      test_pid = self()
+
+      handler = fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end
+
+      :telemetry.attach_many(
+        id,
+        [@fetch_event ++ [:start], @fetch_event ++ [:stop], @fetch_event ++ [:exception]],
+        handler,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+    end
+
+    test "emits :start + :stop with count and status=:ok on success" do
+      attach_fetch_telemetry("fetch-ok-#{System.unique_integer([:positive])}")
+
+      body = @valid_ndjson_line <> "\n" <> @valid_ndjson_line2
+      http_client = fn _url, _headers -> {:ok, 200, body} end
+
+      assert {:ok, entries} =
+               Client.fetch_logs("myapp", "tok", http_client: http_client)
+
+      start_event = @fetch_event ++ [:start]
+      stop_event = @fetch_event ++ [:stop]
+
+      assert_receive {:telemetry, ^start_event, _measurements, %{app: "myapp"}}, 500
+      assert_receive {:telemetry, ^stop_event, %{duration: _}, meta}, 500
+      assert meta.app == "myapp"
+      assert meta.status == :ok
+      assert meta.count == length(entries)
+    end
+
+    test "emits :stop with status={:error, _} and count=0 on HTTP error" do
+      attach_fetch_telemetry("fetch-http-err-#{System.unique_integer([:positive])}")
+
+      http_client = fn _url, _headers -> {:ok, 500, "boom"} end
+
+      assert {:error, _} =
+               Client.fetch_logs("myapp", "tok", http_client: http_client)
+
+      stop_event = @fetch_event ++ [:stop]
+
+      assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
+      assert match?({:error, _}, meta.status)
+      assert meta.count == 0
+    end
+
+    test "emits :stop with status={:error, _} on transport error" do
+      attach_fetch_telemetry("fetch-transport-err-#{System.unique_integer([:positive])}")
+
+      http_client = fn _url, _headers -> {:error, :timeout} end
+
+      assert {:error, :timeout} =
+               Client.fetch_logs("myapp", "tok", http_client: http_client)
+
+      stop_event = @fetch_event ++ [:stop]
+
+      assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
+      assert meta.status == {:error, :timeout}
+      assert meta.count == 0
+    end
+  end
 end
