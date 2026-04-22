@@ -137,6 +137,85 @@ defmodule ExAtlas.Fly.DeployTest do
       assert {:error, :invalid_deploy_dir} =
                Deploy.stream_deploy(dir, "nonexistent_subdir", "ticket-123")
     end
+
+    test "does not leak timer messages after activity timeout", %{test_dir: dir} do
+      # Fake fly that writes nothing and sleeps — will trip the activity timeout.
+      abs_dir = Path.expand(dir)
+      fake_fly = Path.join(abs_dir, "fly")
+
+      File.write!(fake_fly, """
+      #!/bin/sh
+      sleep 10
+      """)
+
+      File.chmod!(fake_fly, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{abs_dir}:#{original_path}")
+      on_exit(fn -> System.put_env("PATH", original_path) end)
+
+      assert {:error, {:fly_error, :timeout, _}} =
+               Deploy.stream_deploy(abs_dir, abs_dir, "ticket-activity-timeout",
+                 activity_timeout_ms: 50,
+                 max_timeout_ms: 5_000
+               )
+
+      # The absolute-timer message must NOT survive in the caller mailbox
+      # after the activity-timeout branch fires and cleans up.
+      refute_received {:deploy_activity_timeout, _}
+      refute_received {:deploy_absolute_timeout, _}
+    end
+
+    test "does not leak timer messages after absolute timeout", %{test_dir: dir} do
+      # Fake fly that writes continuously (resets activity timer) — will trip the absolute timeout.
+      abs_dir = Path.expand(dir)
+      fake_fly = Path.join(abs_dir, "fly")
+
+      File.write!(fake_fly, """
+      #!/bin/sh
+      while true; do echo keepalive; sleep 0.05; done
+      """)
+
+      File.chmod!(fake_fly, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{abs_dir}:#{original_path}")
+      on_exit(fn -> System.put_env("PATH", original_path) end)
+
+      assert {:error, {:fly_error, :timeout, _}} =
+               Deploy.stream_deploy(abs_dir, abs_dir, "ticket-absolute-timeout",
+                 activity_timeout_ms: 5_000,
+                 max_timeout_ms: 200
+               )
+
+      refute_received {:deploy_activity_timeout, _}
+      refute_received {:deploy_absolute_timeout, _}
+    end
+
+    test "does not leak timer messages into the caller mailbox", %{test_dir: dir} do
+      # Create a fake `fly` executable that prints a line and exits 0,
+      # then prepend its dir to PATH so System.find_executable/1 picks it up.
+      abs_dir = Path.expand(dir)
+      fake_fly = Path.join(abs_dir, "fly")
+
+      File.write!(fake_fly, """
+      #!/bin/sh
+      echo "fake deploy ok"
+      exit 0
+      """)
+
+      File.chmod!(fake_fly, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{abs_dir}:#{original_path}")
+      on_exit(fn -> System.put_env("PATH", original_path) end)
+
+      assert {:ok, _output} = Deploy.stream_deploy(abs_dir, abs_dir, "ticket-mailbox")
+
+      # After the call returns, no deploy timer messages should remain.
+      refute_received {:deploy_activity_timeout, _}
+      refute_received {:deploy_absolute_timeout, _}
+    end
   end
 
   describe "deploy/2" do

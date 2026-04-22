@@ -100,13 +100,18 @@ defmodule ExAtlas.Fly.Deploy do
 
   Two timers guard the deploy:
 
-    * Activity timer (5 min) — resets on each chunk. Fires if the deploy
-      stalls (e.g. builder hang).
-    * Absolute timer (30 min) — never resets. Caps total deploy time.
+    * Activity timer (default 5 min) — resets on each chunk. Fires if the
+      deploy stalls (e.g. builder hang).
+    * Absolute timer (default 30 min) — never resets. Caps total deploy time.
+
+  ## Options
+
+    * `:activity_timeout_ms` — override the per-chunk inactivity timeout.
+    * `:max_timeout_ms` — override the absolute deploy timeout.
   """
-  @spec stream_deploy(String.t(), String.t(), String.t()) ::
+  @spec stream_deploy(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
-  def stream_deploy(project_path, fly_toml_dir, ticket_id) do
+  def stream_deploy(project_path, fly_toml_dir, ticket_id, opts \\ []) do
     deploy_dir = resolve_dir(project_path, fly_toml_dir)
 
     unless File.dir?(deploy_dir) do
@@ -120,6 +125,9 @@ defmodule ExAtlas.Fly.Deploy do
           {:error, {:fly_error, :not_found, "fly executable not found in PATH"}}
 
         fly_executable ->
+          activity_timeout = Keyword.get(opts, :activity_timeout_ms, @fly_activity_timeout_ms)
+          max_timeout = Keyword.get(opts, :max_timeout_ms, @fly_max_timeout_ms)
+
           port =
             Port.open({:spawn_executable, fly_executable}, [
               :binary,
@@ -130,16 +138,18 @@ defmodule ExAtlas.Fly.Deploy do
             ])
 
           activity_ref =
-            Process.send_after(self(), {:deploy_activity_timeout, port}, @fly_activity_timeout_ms)
+            Process.send_after(self(), {:deploy_activity_timeout, port}, activity_timeout)
 
           absolute_ref =
-            Process.send_after(self(), {:deploy_absolute_timeout, port}, @fly_max_timeout_ms)
+            Process.send_after(self(), {:deploy_absolute_timeout, port}, max_timeout)
 
-          {result, final_activity_ref} =
-            collect_port_output(port, ticket_id, [], activity_ref, absolute_ref)
+          timers = %{activity: activity_ref, absolute: absolute_ref, port: port}
 
-          cancel_and_flush(final_activity_ref, {:deploy_activity_timeout, port})
-          cancel_and_flush(absolute_ref, {:deploy_absolute_timeout, port})
+          {result, final_timers} =
+            collect_port_output(port, ticket_id, [], timers, activity_timeout)
+
+          cancel_and_flush(final_timers.activity, {:deploy_activity_timeout, port})
+          cancel_and_flush(final_timers.absolute, {:deploy_absolute_timeout, port})
 
           result
       end
@@ -156,7 +166,7 @@ defmodule ExAtlas.Fly.Deploy do
     end
   end
 
-  defp collect_port_output(port, ticket_id, acc, activity_ref, absolute_ref) do
+  defp collect_port_output(port, ticket_id, acc, timers, activity_timeout) do
     receive do
       {^port, {:data, data}} ->
         data
@@ -170,44 +180,50 @@ defmodule ExAtlas.Fly.Deploy do
           end
         end)
 
-        cancel_and_flush(activity_ref, {:deploy_activity_timeout, port})
+        cancel_and_flush(timers.activity, {:deploy_activity_timeout, port})
 
         new_activity_ref =
-          Process.send_after(self(), {:deploy_activity_timeout, port}, @fly_activity_timeout_ms)
+          Process.send_after(self(), {:deploy_activity_timeout, port}, activity_timeout)
 
-        collect_port_output(port, ticket_id, [data | acc], new_activity_ref, absolute_ref)
+        collect_port_output(
+          port,
+          ticket_id,
+          [data | acc],
+          %{timers | activity: new_activity_ref},
+          activity_timeout
+        )
 
       {^port, {:exit_status, 0}} ->
-        output = acc |> Enum.reverse() |> IO.iodata_to_binary()
+        output = iodata_to_string(acc)
         Logger.debug("[ExAtlas.Fly.Deploy] Streaming deploy succeeded")
-        {{:ok, output}, activity_ref}
+        {{:ok, output}, timers}
 
       {^port, {:exit_status, exit_code}} ->
-        output = acc |> Enum.reverse() |> IO.iodata_to_binary()
+        output = iodata_to_string(acc)
         Logger.error("[ExAtlas.Fly.Deploy] Streaming deploy failed (exit #{exit_code})")
-        {{:error, {:fly_error, exit_code, output}}, activity_ref}
+        {{:error, {:fly_error, exit_code, output}}, timers}
 
       {:deploy_activity_timeout, ^port} ->
         safe_port_close(port)
-        output = acc |> Enum.reverse() |> IO.iodata_to_binary()
+        cancel_and_flush(timers.absolute, {:deploy_absolute_timeout, port})
+        output = iodata_to_string(acc)
 
         Logger.error(
-          "[ExAtlas.Fly.Deploy] Streaming deploy stalled (no output for #{@fly_activity_timeout_ms}ms)"
+          "[ExAtlas.Fly.Deploy] Streaming deploy stalled (no output for #{activity_timeout}ms)"
         )
 
-        {{:error, {:fly_error, :timeout, output}}, activity_ref}
+        {{:error, {:fly_error, :timeout, output}}, %{timers | activity: nil, absolute: nil}}
 
       {:deploy_absolute_timeout, ^port} ->
         safe_port_close(port)
-        output = acc |> Enum.reverse() |> IO.iodata_to_binary()
-
-        Logger.error(
-          "[ExAtlas.Fly.Deploy] Streaming deploy hit absolute timeout (#{@fly_max_timeout_ms}ms)"
-        )
-
-        {{:error, {:fly_error, :timeout, output}}, activity_ref}
+        cancel_and_flush(timers.activity, {:deploy_activity_timeout, port})
+        output = iodata_to_string(acc)
+        Logger.error("[ExAtlas.Fly.Deploy] Streaming deploy hit absolute timeout")
+        {{:error, {:fly_error, :timeout, output}}, %{timers | activity: nil, absolute: nil}}
     end
   end
+
+  defp iodata_to_string(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp safe_port_close(port) do
     Port.close(port)
@@ -215,7 +231,21 @@ defmodule ExAtlas.Fly.Deploy do
     ArgumentError -> :ok
   end
 
-  defp cancel_and_flush(ref, message) do
+  # nil ref = already cancelled/consumed by a sibling branch — still drain
+  # any delivered-but-unconsumed message so it does not leak into the caller's
+  # mailbox.
+  defp cancel_and_flush(nil, message) do
+    receive do
+      ^message -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp cancel_and_flush(ref, message) when is_reference(ref) do
+    # Process.cancel_timer/1 returns:
+    #   - integer (ms remaining) when the timer was still pending — no message queued
+    #   - false when the timer already fired — the message MAY be in the mailbox
     case Process.cancel_timer(ref) do
       false ->
         receive do
@@ -224,7 +254,7 @@ defmodule ExAtlas.Fly.Deploy do
           0 -> :ok
         end
 
-      _ ->
+      _remaining_ms ->
         :ok
     end
   end
