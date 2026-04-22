@@ -226,6 +226,28 @@ defmodule ExAtlas.Fly.Logs.StreamerTest do
     end
   end
 
+  describe "subscribe/3 silent-failure path (M3)" do
+    test "returns {:error, :no_streamer} when no registry is provided" do
+      # No :registry opt — the cond falls through the is_nil(registry) branch.
+      # Old behavior: silently :ok with no messages ever arriving.
+      assert {:error, :no_streamer} =
+               Streamer.subscribe("some-app", "/tmp/test", [])
+    end
+
+    test "returns {:error, :no_streamer} when registry lookup misses and no dynamic_sup" do
+      # Registry is set but has no entry for this app, and no dynamic_sup was
+      # passed — there is nothing to start the streamer.
+      registry = StreamerSupervisor.registry_name()
+
+      assert {:error, :no_streamer} =
+               Streamer.subscribe(
+                 "unregistered-app-#{System.unique_integer([:positive])}",
+                 "/tmp/test",
+                 registry: registry
+               )
+    end
+  end
+
   describe "error handling" do
     test "handles fetch errors without crashing" do
       test_pid = self()
