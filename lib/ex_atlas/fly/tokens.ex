@@ -29,6 +29,11 @@ defmodule ExAtlas.Fly.Tokens do
     * `app` — the Fly app name.
     * `source` — which link in the chain produced the token
       (`:ets` / `:storage` / `:config` / `:cli` / `:manual` / `:none`).
+    * `acquirer` — either `:facade` (pure ETS fast-path hit; no AppServer
+      mailbox round-trip) or `:app_server` (slow-path resolution or coalesced
+      cache hit on the AppServer side). The ratio of `:facade` to
+      `:app_server` is a direct measure of how effective the cross-process
+      ETS fast path is.
 
   See `guides/telemetry.md` for the full reference.
   """
@@ -47,8 +52,8 @@ defmodule ExAtlas.Fly.Tokens do
       @acquire_event,
       %{app: app_name},
       fn ->
-        {result, source} = do_get(app_name)
-        {result, %{app: app_name, source: source}}
+        {result, source, acquirer} = do_get(app_name)
+        {result, %{app: app_name, source: source, acquirer: acquirer}}
       end
     )
   end
@@ -60,7 +65,8 @@ defmodule ExAtlas.Fly.Tokens do
 
     case ets_lookup(table, app_name, now) do
       {:ok, token} ->
-        {{:ok, token}, :ets}
+        # Pure fast-path hit — never touched the AppServer mailbox.
+        {{:ok, token}, :ets, :facade}
 
       :miss ->
         slow_path(app_name, names)
@@ -75,11 +81,14 @@ defmodule ExAtlas.Fly.Tokens do
            app_server_defaults: names.app_server_defaults
          ) do
       {:ok, pid} ->
+        # The AppServer returns {result, source}. Source of :ets here means
+        # the mailbox re-check found the cache filled by a concurrent caller —
+        # that's the coalescing signal, still emitted from :app_server.
         {result, source} = AppServer.acquire(pid)
-        {result, source}
+        {result, source, :app_server}
 
       {:error, _} = err ->
-        {err, :none}
+        {err, :none, :app_server}
     end
   end
 

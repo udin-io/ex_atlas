@@ -346,7 +346,8 @@ defmodule ExAtlas.Fly.TokensTest do
       on_exit(fn -> :telemetry.detach(handler_id) end)
     end
 
-    test "emits :start and :stop with source=:cli when CLI acquires a fresh token", context do
+    test "emits :start and :stop with source=:cli + acquirer=:app_server on fresh acquire",
+         context do
       attach_telemetry("token-cli-#{context.unique}", [
         @acquire_event ++ [:start],
         @acquire_event ++ [:stop]
@@ -364,16 +365,18 @@ defmodule ExAtlas.Fly.TokensTest do
       assert_receive {:telemetry, ^stop_event, %{duration: _}, meta}, 500
       assert meta.app == @app_name
       assert meta.source == :cli
+      assert meta.acquirer == :app_server
     end
 
-    test "emits :stop with source=:ets on cache hit", context do
+    test "emits :stop with source=:ets + acquirer=:facade on fast-path cache hit", context do
       cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
       start_tokens_trio(context, cmd_fn: cmd_fn)
 
       # Prime the cache.
       assert {:ok, @token} = Tokens.get(@app_name)
 
-      # Now attach and fetch — must hit ETS.
+      # Now attach and fetch — must hit ETS in the facade, without touching
+      # the AppServer mailbox. That's what :acquirer == :facade proves.
       attach_telemetry("token-ets-#{context.unique}", [@acquire_event ++ [:stop]])
 
       assert {:ok, @token} = Tokens.get(@app_name)
@@ -381,6 +384,7 @@ defmodule ExAtlas.Fly.TokensTest do
       stop_event = @acquire_event ++ [:stop]
       assert_receive {:telemetry, ^stop_event, _measurements, meta}, 500
       assert meta.source == :ets
+      assert meta.acquirer == :facade
     end
 
     test "emits :stop with source=:config when config file resolves", context do
