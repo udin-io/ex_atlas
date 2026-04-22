@@ -77,6 +77,7 @@ defmodule ExAtlas.Fly.Tokens do
     case Supervisor.resolve_app_server(app_name,
            registry: names.registry,
            dynamic_sup: names.dynamic_sup,
+           task_sup: names.task_sup,
            ets_table: names.ets_table,
            app_server_defaults: names.app_server_defaults
          ) do
@@ -125,6 +126,7 @@ defmodule ExAtlas.Fly.Tokens do
     case Supervisor.resolve_app_server(app_name,
            registry: names.registry,
            dynamic_sup: names.dynamic_sup,
+           task_sup: names.task_sup,
            ets_table: names.ets_table,
            app_server_defaults: names.app_server_defaults
          ) do
@@ -163,6 +165,7 @@ defmodule ExAtlas.Fly.Tokens do
       registry: Map.get(overrides, :registry, Supervisor.registry_name()),
       dynamic_sup: Map.get(overrides, :dynamic_sup, Supervisor.dynamic_supervisor_name()),
       ets_owner: Map.get(overrides, :ets_owner, ETSOwner),
+      task_sup: Map.get(overrides, :task_sup, Supervisor.task_supervisor_name()),
       ets_table: Map.get(overrides, :ets_table, Supervisor.ets_table_name()),
       app_server_defaults: Map.get(overrides, :app_server_defaults, [])
     }

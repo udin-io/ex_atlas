@@ -35,6 +35,7 @@ defmodule ExAtlas.Fly.TokensTest do
       registry: :"tokens_registry_#{unique}",
       ets_owner: :"tokens_ets_owner_#{unique}",
       dynamic_sup: :"tokens_dyn_sup_#{unique}",
+      task_sup: :"tokens_task_sup_#{unique}",
       ets_table: :"tokens_ets_#{unique}"
     }
 
@@ -64,6 +65,7 @@ defmodule ExAtlas.Fly.TokensTest do
       registry: context.names.registry,
       dynamic_sup: context.names.dynamic_sup,
       ets_owner: context.names.ets_owner,
+      task_sup: context.names.task_sup,
       ets_table: context.names.ets_table,
       app_server_defaults: app_server_defaults
     })
@@ -83,6 +85,7 @@ defmodule ExAtlas.Fly.TokensTest do
            registry: context.names.registry,
            ets_owner: context.names.ets_owner,
            dynamic_sup: context.names.dynamic_sup,
+           task_sup: context.names.task_sup,
            ets_table: context.names.ets_table
          ]},
         id: context.names.supervisor
@@ -425,6 +428,10 @@ defmodule ExAtlas.Fly.TokensTest do
       log =
         capture_log(fn ->
           assert {:ok, @token} = Tokens.get(@app_name)
+          # Persist runs in a Task under the per-test Task.Supervisor —
+          # wait until it finishes so its :error log lands inside the
+          # capture_log window.
+          await_task_sup_drain(context)
         end)
 
       # Error-level log (not merely warning) so operators catch silent data loss.
@@ -444,6 +451,7 @@ defmodule ExAtlas.Fly.TokensTest do
       log =
         capture_log(fn ->
           assert {:ok, @token} = Tokens.get(@app_name)
+          await_task_sup_drain(context)
         end)
 
       assert log =~ "[error]"
@@ -543,6 +551,7 @@ defmodule ExAtlas.Fly.TokensTest do
         registry: context.names.registry,
         dynamic_sup: context.names.dynamic_sup,
         ets_owner: context.names.ets_owner,
+        task_sup: context.names.task_sup,
         ets_table: context.names.ets_table,
         app_server_defaults: [
           cmd_fn: fn _, _, _ ->
@@ -594,6 +603,15 @@ defmodule ExAtlas.Fly.TokensTest do
     end
   end
 
+  # Wait for the per-test Task.Supervisor to have zero children — used by
+  # persist-failure tests to ensure the async persist task has completed
+  # (and emitted its :error log) before capture_log/1 returns.
+  defp await_task_sup_drain(context) do
+    wait_until(fn ->
+      Task.Supervisor.children(context.names.task_sup) == []
+    end)
+  end
+
   # Polls `fun` every 20ms up to ~1s. Fails the test on timeout.
   defp wait_until(fun) do
     Enum.reduce_while(1..50, :timeout, fn _, acc ->
@@ -610,6 +628,78 @@ defmodule ExAtlas.Fly.TokensTest do
     end
   end
 
+  describe "H3 async persist (proof of fix)" do
+    # A slow-put storage that reports the put call but blocks for `delay_ms`
+    # before returning. Used to show that the AppServer reply is not gated
+    # on the storage write.
+    defmodule SlowStorage do
+      @behaviour ExAtlas.Fly.TokenStorage
+
+      @impl true
+      def child_spec(_opts),
+        do: %{id: __MODULE__, start: {__MODULE__, :start_link, []}, type: :worker}
+
+      def start_link, do: Agent.start_link(fn -> nil end, name: __MODULE__)
+
+      @impl true
+      def get(_, _), do: :error
+
+      @impl true
+      def put(app, _key, _record) do
+        delay = Application.get_env(:ex_atlas, :slow_storage_delay_ms, 300)
+        test_pid = Application.get_env(:ex_atlas, :slow_storage_test_pid)
+        if test_pid, do: send(test_pid, {:slow_put_started, app})
+        Process.sleep(delay)
+        if test_pid, do: send(test_pid, {:slow_put_finished, app})
+        :ok
+      end
+
+      @impl true
+      def delete(_, _), do: :ok
+    end
+
+    test "AppServer replies before storage put completes (cached path)", context do
+      # Tell SlowStorage to report its start/finish to us.
+      Application.put_env(:ex_atlas, :slow_storage_delay_ms, 300)
+      Application.put_env(:ex_atlas, :slow_storage_test_pid, self())
+
+      on_exit(fn ->
+        Application.delete_env(:ex_atlas, :slow_storage_delay_ms)
+        Application.delete_env(:ex_atlas, :slow_storage_test_pid)
+      end)
+
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn, storage_mod: SlowStorage)
+
+      # Measure how long Tokens.get takes. With async persist the reply is
+      # gated only on ETS write + cmd_fn, NOT on the 300ms storage put.
+      {elapsed_us, {:ok, @token}} = :timer.tc(fn -> Tokens.get(@app_name) end)
+      elapsed_ms = div(elapsed_us, 1_000)
+
+      # Budget: storage put sleeps 300ms. Async persist should return well
+      # under that. Generous slack (200ms) absorbs CI / loaded-machine noise
+      # while still catching a regression to synchronous persist.
+      assert elapsed_ms < 200,
+             "Expected async persist (<200ms), got #{elapsed_ms}ms. " <>
+               "Synchronous persist would be ≥300ms."
+
+      # The slow put was still started — confirm it ran in the background.
+      assert_receive {:slow_put_started, @app_name}, 500
+      # And eventually finishes.
+      assert_receive {:slow_put_finished, @app_name}, 2_000
+    end
+
+    test "set_manual remains synchronous (caller still sees {:error, _} on failure)", context do
+      # Manual-token persist MUST stay sync — manual tokens are not
+      # re-acquirable and the caller has to know if persist failed.
+      start_tokens_trio(context, storage_mod: Raising)
+
+      assert {:error, {:persist_failed, _reason}} =
+               Tokens.set_manual(@app_name, "some-manual-token")
+    end
+  end
+
   describe "AppServer direct (internal behavior)" do
     # A sanity check that AppServer's own public API works when called directly —
     # used rarely (test backdoors, diagnostics) but part of the module's
@@ -623,6 +713,7 @@ defmodule ExAtlas.Fly.TokensTest do
         TokensSupervisor.resolve_app_server(@app_name,
           registry: context.names.registry,
           dynamic_sup: context.names.dynamic_sup,
+          task_sup: context.names.task_sup,
           ets_table: context.names.ets_table,
           app_server_defaults: [
             cmd_fn: cmd_fn,

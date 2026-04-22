@@ -33,6 +33,8 @@ defmodule ExAtlas.Fly.Tokens.Supervisor do
     * `:ets_owner` — ETSOwner name (default `ExAtlas.Fly.Tokens.ETSOwner`).
     * `:dynamic_sup` — DynamicSupervisor name
       (default `ExAtlas.Fly.Tokens.DynamicSupervisor`).
+    * `:task_sup` — `Task.Supervisor` name used by AppServers to offload
+      blocking persist writes (default `ExAtlas.Fly.Tokens.TaskSupervisor`).
     * `:ets_table` — ETS table name (default `:ex_atlas_fly_tokens`).
     * `:app_server_defaults` — keyword passed into every AppServer
       (`cmd_fn`, `config_file_fn`, `storage_mod`, `ttl_seconds`,
@@ -46,6 +48,7 @@ defmodule ExAtlas.Fly.Tokens.Supervisor do
   @default_registry ExAtlas.Fly.Tokens.Registry
   @default_ets_owner ExAtlas.Fly.Tokens.ETSOwner
   @default_dynamic_sup ExAtlas.Fly.Tokens.DynamicSupervisor
+  @default_task_sup ExAtlas.Fly.Tokens.TaskSupervisor
   @default_ets_table :ex_atlas_fly_tokens
 
   def start_link(opts \\ []) do
@@ -58,11 +61,13 @@ defmodule ExAtlas.Fly.Tokens.Supervisor do
     registry = Keyword.get(opts, :registry, @default_registry)
     ets_owner = Keyword.get(opts, :ets_owner, @default_ets_owner)
     dynamic_sup = Keyword.get(opts, :dynamic_sup, @default_dynamic_sup)
+    task_sup = Keyword.get(opts, :task_sup, @default_task_sup)
     ets_table = Keyword.get(opts, :ets_table, @default_ets_table)
 
     children = [
       {Registry, keys: :unique, name: registry},
       {ETSOwner, name: ets_owner, table_name: ets_table},
+      {Task.Supervisor, name: task_sup},
       {DynamicSupervisor,
        name: dynamic_sup, strategy: :one_for_one, max_restarts: 20, max_seconds: 60}
     ]
@@ -81,6 +86,7 @@ defmodule ExAtlas.Fly.Tokens.Supervisor do
   def resolve_app_server(app_name, opts \\ []) do
     registry = Keyword.get(opts, :registry, @default_registry)
     dynamic_sup = Keyword.get(opts, :dynamic_sup, @default_dynamic_sup)
+    task_sup = Keyword.get(opts, :task_sup, @default_task_sup)
     ets_table = Keyword.get(opts, :ets_table, @default_ets_table)
     defaults = Keyword.get(opts, :app_server_defaults, [])
 
@@ -93,6 +99,7 @@ defmodule ExAtlas.Fly.Tokens.Supervisor do
           Keyword.merge(defaults,
             app_name: app_name,
             registry: registry,
+            task_sup: task_sup,
             table_name: ets_table
           )
 
@@ -120,6 +127,9 @@ defmodule ExAtlas.Fly.Tokens.Supervisor do
 
   @doc false
   def dynamic_supervisor_name, do: @default_dynamic_sup
+
+  @doc false
+  def task_supervisor_name, do: @default_task_sup
 
   @doc false
   def ets_table_name, do: @default_ets_table
