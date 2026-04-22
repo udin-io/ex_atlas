@@ -32,13 +32,32 @@ latency, and resolution failures.
 
 **`:stop` metadata:**
 
-| Key      | Type   | Value                                                                                   |
-| -------- | ------ | --------------------------------------------------------------------------------------- |
-| `app`    | string | Fly app name                                                                            |
-| `source` | atom   | `:ets` / `:storage` / `:config` / `:cli` / `:manual` / `:none` (resolution failed) |
+| Key        | Type   | Value                                                                                  |
+| ---------- | ------ | -------------------------------------------------------------------------------------- |
+| `app`      | string | Fly app name                                                                           |
+| `source`   | atom   | `:ets` / `:storage` / `:config` / `:cli` / `:manual` / `:none` (resolution failed)     |
+| `acquirer` | atom   | `:facade` (cross-process ETS fast-path hit) / `:app_server` (slow path or coalesced)   |
 
 Measurements follow the standard `:telemetry.span/3` shape (`system_time`
 on `:start`, `duration` + `monotonic_time` on `:stop`).
+
+### Reading `source` + `acquirer` together
+
+- `source: :ets, acquirer: :facade` — pure fast-path cache hit. No mailbox
+  round-trip. This is what you want for the vast majority of requests once
+  caches are warm.
+- `source: :ets, acquirer: :app_server` — **coalescing success**. The caller
+  entered the AppServer mailbox, and by the time `handle_call` ran, a
+  concurrent first-mover had already filled ETS. Mostly seen during
+  cold-start thundering herds; proves the per-app serialization is coalescing
+  CLI calls.
+- `source: :cli, acquirer: :app_server` — first-in-line caller doing the
+  actual `fly tokens create readonly` work. One of these per app per cold
+  start (plus expiries).
+- `source: :storage, acquirer: :app_server` — ETS empty but DETS storage
+  had a valid token. Expect a burst of these right after VM restart.
+- `source: :none, acquirer: :app_server` — full resolution chain miss.
+  Worth alerting on if sustained.
 
 ### `[:ex_atlas, :fly, :logs, :fetch]` (span)
 
