@@ -50,6 +50,18 @@ if Code.ensure_loaded?(Igniter) do
       • Run `mix ex_atlas.upgrade` after updating the dep in the future.
       • Fly ops: see `ExAtlas.Fly` or the guide at https://hexdocs.pm/atlas/fly.html.
       • Disable the Fly sub-tree with `config :ex_atlas, :fly, enabled: false`.
+
+      For containerized deploys (Mix releases) where the priv dir is
+      read-only, override `storage_path` at runtime in `config/runtime.exs`:
+
+          if System.get_env("ATLAS_FLY_STORAGE_PATH") do
+            config :ex_atlas, :fly,
+              storage_path: System.get_env("ATLAS_FLY_STORAGE_PATH")
+          end
+
+      ExAtlas will fall back to `System.tmp_dir!/0` if the configured
+      path is not writable, so a missing env var won't break boot — but
+      tokens will not survive container restarts in that case.
       """)
     end
 

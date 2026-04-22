@@ -88,6 +88,28 @@ defmodule ExAtlas.Fly.DeployTest do
 
       assert [{"good-app", _}] = Deploy.discover_apps(dir)
     end
+
+    test "max_depth: 2 descends into apps/<name>/fly.toml monorepo layout", %{test_dir: dir} do
+      apps_dir = Path.join([dir, "apps", "api"])
+      File.mkdir_p!(apps_dir)
+      File.write!(Path.join(apps_dir, "fly.toml"), "app = \"nested-api\"\n")
+
+      # Default (max_depth: 1) doesn't find it.
+      assert Deploy.discover_apps(dir) == []
+
+      # max_depth: 2 does.
+      assert [{"nested-api", _}] = Deploy.discover_apps(dir, max_depth: 2)
+    end
+
+    test "max_depth: 0 only looks at the root dir", %{test_dir: dir} do
+      File.write!(Path.join(dir, "fly.toml"), "app = \"root-only\"\n")
+
+      sub = Path.join(dir, "api")
+      File.mkdir_p!(sub)
+      File.write!(Path.join(sub, "fly.toml"), "app = \"subapp\"\n")
+
+      assert [{"root-only", _}] = Deploy.discover_apps(dir, max_depth: 0)
+    end
   end
 
   describe "parse_app_name/1" do
@@ -124,6 +146,17 @@ defmodule ExAtlas.Fly.DeployTest do
       """
 
       assert Deploy.parse_app_name(content) == {:ok, "production-app"}
+    end
+
+    test "rejects quoted value with internal whitespace (L3)" do
+      # Pre-L3 fix: returned {:ok, "my"} because the regex stopped at the
+      # first whitespace inside the quotes. Fly app names cannot contain
+      # whitespace, so the honest answer is :error.
+      assert Deploy.parse_app_name(~s(app = "my app")) == :error
+    end
+
+    test "ignores trailing comment on unquoted line (L3)" do
+      assert Deploy.parse_app_name("app = my-app  # inline comment") == {:ok, "my-app"}
     end
   end
 
@@ -319,6 +352,22 @@ defmodule ExAtlas.Fly.DeployTest do
     test "returns error for invalid deploy directory" do
       assert {:error, :invalid_deploy_dir} =
                Deploy.deploy("/nonexistent/path", "/nonexistent/path")
+    end
+
+    test "returns {:error, {:fly_error, :not_found, _}} when fly is not on PATH (M5)",
+         %{test_dir: dir} do
+      # Point PATH at a dir with no `fly` binary. Pre-M5 this path raised
+      # ErlangError from System.cmd; post-M5 it mirrors stream_deploy/3
+      # and returns a structured error tuple.
+      abs_dir = Path.expand(dir)
+      empty_path = Path.join(abs_dir, "empty_path")
+      File.mkdir_p!(empty_path)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", empty_path)
+      on_exit(fn -> System.put_env("PATH", original_path) end)
+
+      assert {:error, {:fly_error, :not_found, _}} = Deploy.deploy(abs_dir, abs_dir)
     end
   end
 end

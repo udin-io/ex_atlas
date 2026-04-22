@@ -51,4 +51,61 @@ defmodule ExAtlas.Fly.DispatcherTest do
       assert log =~ "dispatcher"
     end
   end
+
+  describe "subscribe_with_backpressure/2 (E6)" do
+    test "sends {:ex_atlas_fly_backpressure_evict, topic} when queue exceeds threshold" do
+      Application.put_env(:ex_atlas, :fly, dispatcher: :registry)
+
+      topic = "bp-topic-#{System.unique_integer([:positive])}"
+
+      test_pid = self()
+
+      # Spawn a subscriber that accumulates messages but never processes them.
+      # It forwards any eviction signal back to the test pid.
+      subscriber =
+        spawn(fn ->
+          Dispatcher.subscribe_with_backpressure(topic, threshold: 5, poll_ms: 50)
+          # Tell the test we're ready.
+          send(test_pid, :subscriber_ready)
+          # Do nothing but wait for the eviction sentinel.
+          receive do
+            {:ex_atlas_fly_backpressure_evict, ^topic} = msg ->
+              send(test_pid, {:evicted, msg})
+          end
+        end)
+
+      assert_receive :subscriber_ready, 1_000
+
+      # Flood the topic so the subscriber's mailbox exceeds the threshold.
+      for i <- 1..20, do: Dispatcher.dispatch(topic, {:msg, i})
+
+      assert_receive {:evicted, {:ex_atlas_fly_backpressure_evict, ^topic}}, 2_000
+
+      # Clean up — kill the subscriber so the watchdog can exit.
+      Process.exit(subscriber, :kill)
+    end
+
+    test "watchdog exits silently when subscriber dies before eviction" do
+      Application.put_env(:ex_atlas, :fly, dispatcher: :registry)
+      topic = "bp-clean-exit-#{System.unique_integer([:positive])}"
+
+      test_pid = self()
+
+      subscriber =
+        spawn(fn ->
+          Dispatcher.subscribe_with_backpressure(topic, threshold: 1_000_000, poll_ms: 20)
+          send(test_pid, :subscriber_ready)
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive :subscriber_ready, 1_000
+      Process.exit(subscriber, :kill)
+
+      # No eviction message expected; watchdog should clean up via :DOWN.
+      refute_receive {:evicted, _}, 200
+    end
+  end
 end

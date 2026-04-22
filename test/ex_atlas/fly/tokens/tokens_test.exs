@@ -628,6 +628,193 @@ defmodule ExAtlas.Fly.TokensTest do
     end
   end
 
+  describe "soft-expiry refresh (E7)" do
+    test "proactively re-resolves cache before expiry (fires without a caller)" do
+      unique = System.unique_integer([:positive])
+
+      names = %{
+        supervisor: :"e7_sup_#{unique}",
+        registry: :"e7_reg_#{unique}",
+        ets_owner: :"e7_eo_#{unique}",
+        dynamic_sup: :"e7_ds_#{unique}",
+        task_sup: :"e7_ts_#{unique}",
+        ets_table: :"e7_table_#{unique}"
+      }
+
+      # Memory is already started by the top-level setup.
+      test_pid = self()
+
+      call_count = :counters.new(1, [:atomics])
+
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts ->
+        :counters.add(call_count, 1, 1)
+        send(test_pid, {:cli_called, :counters.get(call_count, 1)})
+        {@token <> "-#{:counters.get(call_count, 1)}", 0}
+      end
+
+      previous = Application.get_env(:ex_atlas, :fly_tokens_names)
+
+      Application.put_env(:ex_atlas, :fly_tokens_names, %{
+        registry: names.registry,
+        dynamic_sup: names.dynamic_sup,
+        ets_owner: names.ets_owner,
+        task_sup: names.task_sup,
+        ets_table: names.ets_table,
+        app_server_defaults: [
+          cmd_fn: cmd_fn,
+          config_file_fn: fn -> :miss end,
+          storage_mod: Memory,
+          cli_timeout_ms: 500,
+          # TTL 2s, soft-expiry lead 1s → refresh timer fires at t+1s.
+          ttl_seconds: 2,
+          soft_expiry_lead_seconds: 1
+        ]
+      })
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:ex_atlas, :fly_tokens_names)
+          _ -> Application.put_env(:ex_atlas, :fly_tokens_names, previous)
+        end
+      end)
+
+      start_supervised!(
+        {TokensSupervisor,
+         [
+           name: names.supervisor,
+           registry: names.registry,
+           ets_owner: names.ets_owner,
+           dynamic_sup: names.dynamic_sup,
+           task_sup: names.task_sup,
+           ets_table: names.ets_table
+         ]}
+      )
+
+      app = "e7-app-#{unique}"
+
+      # First acquire → CLI runs, :cached written to Memory + ETS.
+      assert {:ok, _token1} = Tokens.get(app)
+      assert_receive {:cli_called, 1}, 1_000
+
+      # Invalidate storage (but NOT ETS) so the scheduled soft-expiry will
+      # fall through to CLI when it fires. The ETS entry will be deleted
+      # by the handle_info itself.
+      Memory.delete(app, :cached)
+
+      # Wait for soft-expiry (1s after first acquire) to fire.
+      # CLI should be invoked a second time (ETS gone after handle_info
+      # deletes it, storage gone because we just deleted, config_file :miss
+      # → CLI path).
+      assert_receive {:cli_called, 2}, 2_000
+    end
+  end
+
+  describe "Tokens.refresh/1 (E5)" do
+    test "invalidates ETS and returns a fresh token via the resolution chain", context do
+      # The spec of refresh/1: after refresh, the returned token is the
+      # result of running the full resolve_token chain with ETS pre-cleared.
+      # If storage has a valid cached token, refresh returns it (source:
+      # :storage); if storage is empty, the CLI is called.
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn, storage_mod: Memory)
+
+      assert {:ok, @token} = Tokens.get(@app_name)
+
+      # Ensure async persist to Memory completed, otherwise refresh might
+      # race with it and see an empty storage → CLI source.
+      await_task_sup_drain(context)
+
+      # Refresh after storage was populated: ETS cleared, storage hit.
+      assert {:ok, @token} = Tokens.refresh(@app_name)
+
+      # Subsequent get hits ETS (re-filled by the :storage branch in refresh).
+      assert {:ok, @token} = Tokens.get(@app_name)
+    end
+
+    test "emits telemetry acquirer=:app_server and valid source", context do
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+      start_tokens_trio(context, cmd_fn: cmd_fn)
+
+      # Prime (writes to Memory via async persist) and then attach so we only
+      # catch the refresh event.
+      assert {:ok, @token} = Tokens.get(@app_name)
+      await_task_sup_drain(context)
+
+      test_pid = self()
+
+      :telemetry.attach(
+        "refresh-#{context.unique}",
+        [:ex_atlas, :fly, :token, :acquire, :stop],
+        fn _e, m, meta, _ -> send(test_pid, {:stop, m, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("refresh-#{context.unique}") end)
+
+      assert {:ok, _} = Tokens.refresh(@app_name)
+
+      assert_receive {:stop, _, meta}, 500
+      assert meta.app == @app_name
+      assert meta.acquirer == :app_server
+      # Source is whatever the chain produced — storage (if seeded) or cli.
+      assert meta.source in [:storage, :cli]
+    end
+  end
+
+  describe "config M8/M9 (init-time resolution)" do
+    test "fly_config_file_enabled snapshot is taken at AppServer init", context do
+      # AppServer resolves :fly_config_file_enabled once at its init, not on
+      # every handle_call. That means changing the env AFTER the AppServer
+      # has started does NOT affect the already-initialized process.
+      #
+      # Validate by: set env=false → make first Tokens.get (AppServer inits,
+      # captures false) → flip env=true at runtime → next get still behaves
+      # as if config file is disabled.
+      previous = Application.get_env(:ex_atlas, :fly, [])
+
+      try do
+        Application.put_env(
+          :ex_atlas,
+          :fly,
+          Keyword.put(previous, :fly_config_file_enabled, false)
+        )
+
+        call_count = :counters.new(1, [:atomics])
+
+        config_file_fn = fn ->
+          :counters.add(call_count, 1, 1)
+          {:ok, "from-config-file"}
+        end
+
+        cmd_fn = fn _, _, _ -> {@token, 0} end
+
+        start_tokens_trio(context, config_file_fn: config_file_fn, cmd_fn: cmd_fn)
+
+        # First get → AppServer lazy-starts with config_file_enabled: false.
+        # config_file_fn is skipped, cmd_fn runs → :cli source.
+        assert {:ok, @token} = Tokens.get(@app_name)
+        assert :counters.get(call_count, 1) == 0
+
+        # Flip env at runtime — the existing AppServer already snapshotted.
+        Application.put_env(
+          :ex_atlas,
+          :fly,
+          Keyword.put(previous, :fly_config_file_enabled, true)
+        )
+
+        # Invalidate ETS + storage to force a fresh resolve path.
+        :ok = Tokens.invalidate(@app_name)
+
+        assert {:ok, _} = Tokens.get(@app_name)
+        # Still zero — snapshot is honored despite the runtime env flip.
+        assert :counters.get(call_count, 1) == 0
+      after
+        Application.put_env(:ex_atlas, :fly, previous)
+      end
+    end
+  end
+
   describe "H3 async persist (proof of fix)" do
     # A slow-put storage that reports the put call but blocks for `delay_ms`
     # before returning. Used to show that the AppServer reply is not gated

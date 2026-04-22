@@ -65,7 +65,6 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
   @impl GenServer
   def init(opts) do
     dir = resolve_storage_dir(opts)
-    File.mkdir_p!(dir)
     # Tokens are bearer credentials — restrict the dir so another local user
     # cannot read the DETS files. No-op on Windows; harmless if already set.
     _ = File.chmod(dir, 0o700)
@@ -166,28 +165,40 @@ defmodule ExAtlas.Fly.TokenStorage.Dets do
     end
   end
 
+  # M6: attempt mkdir for whichever path was resolved; fall back to a
+  # writable tmp_dir for ANY path (explicit or default) if the primary
+  # mkdir fails. Previously only the `default_dir/0` branch had the
+  # fallback, so a user who explicitly configured a read-only storage
+  # path (e.g. locked-down CI filesystem) crashed init/1 and took down
+  # the entire Fly sub-tree.
   defp resolve_storage_dir(opts) do
-    cond do
-      path = Keyword.get(opts, :storage_path) ->
-        path
+    primary =
+      cond do
+        path = Keyword.get(opts, :storage_path) -> path
+        path = Application.get_env(:ex_atlas, :fly, [])[:storage_path] -> path
+        true -> Application.app_dir(:ex_atlas, "priv/ex_atlas_fly")
+      end
 
-      path = Application.get_env(:ex_atlas, :fly, [])[:storage_path] ->
-        path
+    ensure_writable(primary) || tmp_fallback(primary)
+  end
 
-      true ->
-        default_dir()
+  defp ensure_writable(dir) do
+    case File.mkdir_p(dir) do
+      :ok -> dir
+      {:error, _} -> nil
     end
   end
 
-  defp default_dir do
-    priv = Application.app_dir(:ex_atlas, "priv/ex_atlas_fly")
+  defp tmp_fallback(attempted) do
+    fallback = Path.join(System.tmp_dir!(), "ex_atlas_fly")
 
-    case File.mkdir_p(priv) do
-      :ok ->
-        priv
+    Logger.warning(
+      "[ExAtlas.Fly.TokenStorage.Dets] storage path not writable; falling back to tmp_dir",
+      attempted: attempted,
+      fallback: fallback
+    )
 
-      {:error, _} ->
-        Path.join(System.tmp_dir!(), "atlas_fly")
-    end
+    File.mkdir_p!(fallback)
+    fallback
   end
 end
