@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.1 — unreleased
+
+### Changed — Async token persist (closes audit H3)
+
+- `ExAtlas.Fly.Tokens.AppServer` now offloads cached-token storage
+  writes to a supervised `Task` under a new
+  `ExAtlas.Fly.Tokens.TaskSupervisor` child. The AppServer's
+  `handle_call` replies as soon as ETS is updated; `:dets.sync`
+  happens in the background.
+- Net effect: a slow storage write for one app no longer blocks that
+  app's own subsequent token requests (and never blocked other apps',
+  post-E1). Callers get the token with latency gated on ETS + cmd_fn
+  only. Audit finding H3.
+- **Manual-token persist stays synchronous.** Manual tokens are not
+  re-acquirable, so `ExAtlas.Fly.Tokens.set_manual/2` still returns
+  `{:error, {:persist_failed, reason}}` when storage raises — the
+  caller must know if persist failed.
+- Persist failures on the cached path continue to log at `:error`
+  level with `{app, reason}` metadata, now emitted from the task
+  rather than the mailbox (contract preserved, emission point
+  moved).
+
+### Added
+
+- `ExAtlas.Fly.Tokens.TaskSupervisor` is a new child of
+  `ExAtlas.Fly.Tokens.Supervisor`, ordered after `ETSOwner` and
+  before the `DynamicSupervisor`. Tests can inject a custom name
+  via `:task_sup` on `Tokens.Supervisor.start_link/1`.
+
 ## v0.4.0 — unreleased
 
 ### Changed — Per-app Fly tokens (audit E1; closes H3, H4)

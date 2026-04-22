@@ -20,6 +20,9 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
 
     * `:app_name` (required) — the Fly app this server tracks.
     * `:registry` (required) — the `Registry` name used for `{:via, ...}` naming.
+    * `:task_sup` — `Task.Supervisor` name used to offload non-blocking
+      persist writes. Optional; when omitted, persist runs inline (synchronous)
+      which is fine for tests without a Task.Supervisor in scope.
     * `:table_name` — override the ETS table to write into.
     * `:cmd_fn` — replaces `System.cmd/3`.
     * `:config_file_fn` — replaces the `~/.fly/config.yml` reader.
@@ -72,6 +75,7 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
   def init(opts) do
     app_name = Keyword.fetch!(opts, :app_name)
     table_name = Keyword.get(opts, :table_name, @default_table)
+    task_sup = Keyword.get(opts, :task_sup)
     cmd_fn = Keyword.get(opts, :cmd_fn, &System.cmd/3)
     config_file_fn = Keyword.get(opts, :config_file_fn, &default_config_file_fn/0)
     storage_mod = Keyword.get(opts, :storage_mod, resolve_storage_mod())
@@ -82,6 +86,7 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
      %{
        app_name: app_name,
        table_name: table_name,
+       task_sup: task_sup,
        cmd_fn: cmd_fn,
        config_file_fn: config_file_fn,
        storage_mod: storage_mod,
@@ -193,7 +198,7 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
         {:ok, token} when is_binary(token) and token != "" ->
           expires_at = System.system_time(:second) + state.ttl_seconds
           cache_token(state.table_name, state.app_name, token, expires_at)
-          persist(state.storage_mod, state.app_name, token, expires_at)
+          persist_async(state, token, expires_at)
           {{:ok, token}, :config}
 
         _ ->
@@ -236,7 +241,7 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
         if token != "" do
           expires_at = System.system_time(:second) + state.ttl_seconds
           cache_token(state.table_name, state.app_name, token, expires_at)
-          persist(state.storage_mod, state.app_name, token, expires_at)
+          persist_async(state, token, expires_at)
           {{:ok, token}, :cli}
         else
           Logger.warning(
@@ -275,11 +280,36 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
     :ets.insert(table_name, {app_name, token, expires_at})
   end
 
-  # A persist failure means VM restart will lose the cached token. The caller
-  # still gets a working token (ETS is authoritative for the current session),
-  # but the event must be loud enough for operators to notice — :error level
-  # with structured metadata.
-  defp persist(storage_mod, app_name, token, expires_at) do
+  # Offload the cached-token persist write to a supervised Task so the
+  # AppServer mailbox is not blocked on :dets.sync (can take tens of ms per
+  # write). The caller already has a working token in ETS; durable storage
+  # is a best-effort survival aid for VM restart.
+  #
+  # On failure, log at :error level — same contract as the synchronous
+  # predecessor, just emitted from the task rather than the mailbox. A VM
+  # crash in the gap between ETS write and storage sync loses only the
+  # cached entry; manual tokens never go through this path (see set_manual
+  # handle_call, which stays synchronous because manual tokens are not
+  # re-acquirable and the caller must know if persist failed).
+  #
+  # When `state.task_sup` is nil (tests without a task supervisor in scope),
+  # fall back to synchronous persist so the old behavior is preserved.
+  defp persist_async(%{task_sup: nil} = state, token, expires_at) do
+    persist_sync(state.storage_mod, state.app_name, token, expires_at)
+  end
+
+  defp persist_async(state, token, expires_at) do
+    app_name = state.app_name
+    storage_mod = state.storage_mod
+
+    Task.Supervisor.start_child(state.task_sup, fn ->
+      persist_sync(storage_mod, app_name, token, expires_at)
+    end)
+
+    :ok
+  end
+
+  defp persist_sync(storage_mod, app_name, token, expires_at) do
     storage_mod.put(app_name, :cached, %{token: token, expires_at: expires_at})
     :ok
   rescue
