@@ -1,4 +1,6 @@
 defmodule ExAtlas.Fly.Dispatcher do
+  require Logger
+
   @moduledoc """
   Framework-agnostic broadcast for Fly log and deploy events.
 
@@ -103,7 +105,27 @@ defmodule ExAtlas.Fly.Dispatcher do
         :ok
 
       {:mfa, {mod, fun, extra}} ->
-        apply(mod, fun, [topic, message | extra])
+        # A host-supplied MFA must never take down the caller (most often the
+        # log Streamer, whose death drops the pagination cursor). Rescue and
+        # log loudly so misconfigured routing is operator-visible.
+        try do
+          apply(mod, fun, [topic, message | extra])
+        rescue
+          e ->
+            Logger.error(
+              "[ExAtlas.Fly.Dispatcher] :mfa dispatcher raised; " <>
+                "topic=#{inspect(topic)} mfa=#{inspect({mod, fun, length(extra) + 2})} " <>
+                "reason=#{Exception.message(e)}"
+            )
+        catch
+          kind, payload ->
+            Logger.error(
+              "[ExAtlas.Fly.Dispatcher] :mfa dispatcher threw; " <>
+                "topic=#{inspect(topic)} mfa=#{inspect({mod, fun, length(extra) + 2})} " <>
+                "kind=#{inspect(kind)} payload=#{inspect(payload)}"
+            )
+        end
+
         :ok
     end
   end
