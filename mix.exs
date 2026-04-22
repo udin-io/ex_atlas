@@ -1,7 +1,7 @@
 defmodule Atlas.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0-dev"
   @source_url "https://github.com/udin-io/atlas"
 
   def project do
@@ -37,6 +37,7 @@ defmodule Atlas.MixProject do
       {:nimble_options, "~> 1.1"},
       {:telemetry, "~> 1.3"},
       {:plug_crypto, "~> 2.1"},
+      {:igniter, "~> 0.6", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
       {:phoenix_live_dashboard, "~> 0.8", optional: true},
       {:phoenix_live_view, "~> 1.0", optional: true},
@@ -49,10 +50,10 @@ defmodule Atlas.MixProject do
 
   defp description do
     """
-    A composable, pluggable Elixir SDK for managing GPU/compute resources across
-    cloud providers (RunPod, Fly.io Machines, Lambda Labs, Vast.ai). Ship pods,
-    run serverless inference, and orchestrate transient per-user GPU sessions
-    with built-in preshared-key auth and opt-in OTP supervision.
+    Pluggable Elixir SDK for infrastructure management: multi-cloud GPU/CPU
+    compute (RunPod, Fly.io Machines, Lambda Labs, Vast.ai) plus Fly.io
+    platform ops (deploys, log streaming, token lifecycle). Igniter installer,
+    opt-in OTP supervision, preshared-key auth.
     """
   end
 
@@ -61,6 +62,8 @@ defmodule Atlas.MixProject do
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
       files: ~w(lib guides .formatter.exs mix.exs README.md LICENSE CHANGELOG.md),
+      # Igniter looks up installers by name convention: `mix atlas.install` is
+      # autodiscovered from `Mix.Tasks.Atlas.Install`. No extra manifest needed.
       maintainers: ["Peter Shoukry"]
     ]
   end
@@ -72,6 +75,7 @@ defmodule Atlas.MixProject do
         "README.md",
         "CHANGELOG.md",
         "guides/getting_started.md",
+        "guides/fly.md",
         "guides/transient_pods.md",
         "guides/writing_a_provider.md",
         "guides/telemetry.md",
@@ -99,6 +103,19 @@ defmodule Atlas.MixProject do
           Atlas.Providers.Fly,
           Atlas.Providers.LambdaLabs,
           Atlas.Providers.Vast
+        ],
+        "Fly platform ops": [
+          Atlas.Fly,
+          Atlas.Fly.Deploy,
+          Atlas.Fly.Dispatcher,
+          Atlas.Fly.Tokens,
+          Atlas.Fly.Tokens.Server,
+          Atlas.Fly.TokenStorage,
+          Atlas.Fly.TokenStorage.Dets,
+          Atlas.Fly.Logs.Client,
+          Atlas.Fly.Logs.LogEntry,
+          Atlas.Fly.Logs.Streamer,
+          Atlas.Fly.Logs.StreamerSupervisor
         ],
         Auth: [Atlas.Auth.Token, Atlas.Auth.SignedUrl],
         "LiveDashboard integration": [Atlas.LiveDashboard.ComputePage],

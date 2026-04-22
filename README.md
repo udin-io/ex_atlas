@@ -4,16 +4,26 @@
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/atlas)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-A composable, pluggable Elixir SDK for managing GPU and CPU compute across
-cloud providers. Spawn pods, run serverless inference, and orchestrate
-transient per-user GPU sessions with a single API — swap providers by
-changing one option.
+A composable, pluggable Elixir SDK for **infrastructure management**.
+Two concerns under one roof:
+
+1. **GPU / CPU compute across cloud providers.** Spawn pods, run serverless
+   inference, orchestrate transient per-user GPU sessions. Swap providers by
+   changing one option.
+2. **Fly.io platform operations.** First-class deploys, log streaming, and
+   token lifecycle — independent of the compute pipeline. See
+   [`Atlas.Fly`](lib/atlas/fly.ex) and the [Fly guide](guides/fly.md).
 
 - **One contract, many providers.** `Atlas.Provider` is a behaviour; swap
   `:runpod`, `:fly`, `:lambda_labs`, `:vast`, or your own module without
   changing call sites.
-- **Batteries-included orchestration.** Opt-in `Registry` + `DynamicSupervisor`
+- **Fly.io platform ops.** `Atlas.Fly.*` handles `fly deploy` streaming,
+  log tailing, and the full token resolution chain
+  (ETS → DETS → `~/.fly/config.yml` → `fly tokens create`). Works without
+  Phoenix.
+- **Batteries-included orchestration.** `Registry` + `DynamicSupervisor`
   + `Phoenix.PubSub` + reaper for the "per-user transient pod" pattern.
+- **Igniter installer.** `mix igniter.install atlas` wires everything up.
 - **Built for the S3-style handoff.** `Atlas.Auth` mints bearer tokens and
   S3-style HMAC-signed URLs so your browser can talk directly to a pod without
   the Phoenix app proxying every frame.
@@ -29,6 +39,7 @@ changing one option.
 
 - [Installation](#installation)
 - [Architecture at a glance](#architecture-at-a-glance)
+- [Quick start — Fly.io platform ops](#quick-start--flyio-platform-ops)
 - [Quick start — transient per-user GPU pod](#quick-start--transient-per-user-gpu-pod)
 - [Quick start — serverless inference](#quick-start--serverless-inference)
 - [Swapping providers](#swapping-providers)
@@ -53,15 +64,25 @@ changing one option.
 
 ## Installation
 
-Add `atlas` to your `deps` in `mix.exs`:
+The one-liner — uses the [Igniter](https://hex.pm/packages/igniter) installer
+to add the dep, write sensible config, and create storage directories:
+
+```bash
+mix igniter.install atlas
+```
+
+Or add manually to `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:atlas, "~> 0.1"}
+    {:atlas, "~> 0.2"}
   ]
 end
 ```
+
+…then run `mix atlas.install` once to wire config defaults, or configure
+things yourself (see [Configuration](#configuration)).
 
 For the optional orchestrator + LiveDashboard features, also include:
 
@@ -72,6 +93,18 @@ For the optional orchestrator + LiveDashboard features, also include:
 
 Atlas declares both as `optional: true`, so they are not pulled into pure
 library consumers.
+
+### Upgrading
+
+To upgrade atlas and run any version-specific migrations:
+
+```bash
+mix deps.update atlas
+mix atlas.upgrade
+```
+
+The upgrade task is idempotent and runs only the steps needed between your
+previous and current atlas version.
 
 ## Architecture at a glance
 
@@ -108,6 +141,63 @@ library consumers.
 │  Live-refreshing table · per-row Touch/Stop/Terminate                 │
 └───────────────────────────────────────────────────────────────────────┘
 ```
+
+## Quick start — Fly.io platform ops
+
+Atlas gives you a clean Elixir API over `fly deploy`, the Fly Machines log API,
+and Fly token lifecycle. Works with or without Phoenix.
+
+### Discover apps
+
+```elixir
+Atlas.Fly.discover_apps("/path/to/project")
+# => [{"my-api", "/path/to/project"}, {"my-web", "/path/to/project/web"}]
+```
+
+### Tail logs
+
+```elixir
+Atlas.Fly.subscribe_logs("my-api", "/path/to/project")
+
+# In the subscriber:
+def handle_info({:atlas_fly_logs, "my-api", entries}, state) do
+  # entries :: [Atlas.Fly.Logs.LogEntry.t()]
+  ...
+end
+```
+
+A single streamer runs per app regardless of subscriber count, and stops once
+all subscribers disconnect. Automatic 401 retry is built in.
+
+### Stream a deploy
+
+```elixir
+Atlas.Fly.subscribe_deploy(ticket_id)
+Task.start(fn ->
+  Atlas.Fly.stream_deploy(project_path, "web", ticket_id)
+end)
+
+def handle_info({:atlas_fly_deploy, ^ticket_id, line}, state) do
+  ...
+end
+```
+
+Deploys are guarded by a 5 min activity timer (resets on output) and a 30 min
+absolute cap.
+
+### Tokens
+
+`Atlas.Fly.Tokens` resolves tokens via ETS → DETS (durable) → `~/.fly/config.yml`
+→ `fly tokens create readonly` → manual override. You usually don't call it
+directly — the log client uses it transparently — but you can:
+
+```elixir
+{:ok, token} = Atlas.Fly.Tokens.get("my-api")
+Atlas.Fly.Tokens.invalidate("my-api")
+Atlas.Fly.Tokens.set_manual("my-api", "fo1_...")
+```
+
+Full docs: [Fly guide](guides/fly.md).
 
 ## Quick start — transient per-user GPU pod
 
