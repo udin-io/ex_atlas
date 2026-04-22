@@ -89,7 +89,13 @@ defmodule ExAtlas.Fly.Tokens.Server do
     ttl = Keyword.get(opts, :ttl_seconds, @default_ttl_seconds)
     cli_timeout = Keyword.get(opts, :cli_timeout_ms, cli_timeout_ms())
 
-    table = :ets.new(table_name, [:set, :protected, :named_table])
+    # If a previous owner crashed without running terminate/2, the named
+    # table may still exist. Reclaim it rather than crashing on :ets.new.
+    table =
+      case :ets.whereis(table_name) do
+        :undefined -> :ets.new(table_name, [:set, :protected, :named_table])
+        existing -> existing
+      end
 
     {:ok,
      %{
@@ -144,6 +150,17 @@ defmodule ExAtlas.Fly.Tokens.Server do
 
   def handle_call(:get_table_name, _from, state) do
     {:reply, state.table_name, state}
+  end
+
+  @impl GenServer
+  def terminate(_reason, state) do
+    # Clean up the named ETS table so a supervisor restart does not
+    # ArgumentError on :ets.new in init/1 and burn the restart budget.
+    if :ets.whereis(state.table_name) != :undefined do
+      :ets.delete(state.table_name)
+    end
+
+    :ok
   end
 
   # ── Private ──
@@ -231,7 +248,10 @@ defmodule ExAtlas.Fly.Tokens.Server do
           persist(state.storage_mod, app_name, token, expires_at)
           {:ok, token}
         else
-          Logger.warning("[ExAtlas.Fly.Tokens] `fly tokens create` returned empty output for #{app_name}")
+          Logger.warning(
+            "[ExAtlas.Fly.Tokens] `fly tokens create` returned empty output for #{app_name}"
+          )
+
           :miss
         end
 
@@ -266,7 +286,9 @@ defmodule ExAtlas.Fly.Tokens.Server do
     storage_mod.put(app_name, :cached, %{token: token, expires_at: expires_at})
   rescue
     e ->
-      Logger.warning("[ExAtlas.Fly.Tokens] Failed to persist token for #{app_name}: #{inspect(e)}")
+      Logger.warning(
+        "[ExAtlas.Fly.Tokens] Failed to persist token for #{app_name}: #{inspect(e)}"
+      )
   end
 
   defp resolve_storage_mod do
