@@ -457,6 +457,155 @@ defmodule ExAtlas.Fly.TokensTest do
     end
   end
 
+  describe "E1 per-app split (proof of fix)" do
+    test "concurrent get for two apps runs CLIs in parallel", context do
+      # Each CLI call sleeps 300ms. If the pre-E1 serialized model still
+      # reigned, two apps' get calls would take ≥ 600ms. Per-app split
+      # lets them run in parallel, so elapsed should be well under 500ms.
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts ->
+        Process.sleep(300)
+        {@token, 0}
+      end
+
+      # Generous server-side budget so the 300ms CLI sleep fits comfortably.
+      start_tokens_trio(context, cmd_fn: cmd_fn, cli_timeout_ms: 5_000)
+
+      {elapsed_us, _results} =
+        :timer.tc(fn ->
+          t1 = Task.async(fn -> Tokens.get("app-one-#{context.unique}") end)
+          t2 = Task.async(fn -> Tokens.get("app-two-#{context.unique}") end)
+          Task.await_many([t1, t2], 5_000)
+        end)
+
+      elapsed_ms = div(elapsed_us, 1_000)
+
+      assert elapsed_ms < 500,
+             "Expected parallel CLI acquisition (<500ms), took #{elapsed_ms}ms. " <>
+               "Serialized behavior (pre-E1) would be ≥600ms."
+    end
+
+    test "concurrent get for same app calls CLI exactly once", context do
+      call_count = :counters.new(1, [:atomics])
+
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts ->
+        :counters.add(call_count, 1, 1)
+        # Small sleep so later callers pile into the same mailbox.
+        Process.sleep(100)
+        {@token, 0}
+      end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn, cli_timeout_ms: 5_000)
+
+      app = "same-app-#{context.unique}"
+
+      tasks = for _ <- 1..10, do: Task.async(fn -> Tokens.get(app) end)
+      results = Task.await_many(tasks, 5_000)
+
+      assert Enum.all?(results, &match?({:ok, @token}, &1))
+
+      # Exactly one CLI call proves coalescing works — the second through
+      # tenth callers pile into the same AppServer mailbox, then re-check
+      # ETS (filled by the first) in handle_call.
+      assert :counters.get(call_count, 1) == 1
+    end
+
+    test "AppServer crash preserves cached token in ETS", context do
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn)
+
+      # Prime the cache.
+      assert {:ok, @token} = Tokens.get(@app_name)
+
+      pid = TokensSupervisor.whereis_app_server(@app_name, registry: context.names.registry)
+      refute is_nil(pid)
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+
+      # Wait until DynamicSupervisor has re-started the AppServer.
+      wait_until(fn ->
+        new_pid =
+          TokensSupervisor.whereis_app_server(@app_name, registry: context.names.registry)
+
+        is_pid(new_pid) and new_pid != pid
+      end)
+
+      # ETS is owned by ETSOwner, which did NOT crash — cached token survives.
+      # A subsequent get resolves from ETS without hitting the cmd_fn, which
+      # we prove by supplying a cmd_fn that now raises.
+      Application.put_env(:ex_atlas, :fly_tokens_names, %{
+        registry: context.names.registry,
+        dynamic_sup: context.names.dynamic_sup,
+        ets_owner: context.names.ets_owner,
+        ets_table: context.names.ets_table,
+        app_server_defaults: [
+          cmd_fn: fn _, _, _ ->
+            raise "CLI should not be called; ETS should still have the token"
+          end,
+          config_file_fn: fn -> :miss end,
+          storage_mod: Memory,
+          cli_timeout_ms: 500
+        ]
+      })
+
+      assert {:ok, @token} = Tokens.get(@app_name)
+    end
+
+    test "ETSOwner crash wipes ETS but AppServers recover on next get", context do
+      cmd_fn = fn "fly", ["tokens", "create", "readonly"], _opts -> {@token, 0} end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn)
+
+      # Prime the cache.
+      assert {:ok, @token} = Tokens.get(@app_name)
+      assert [_] = :ets.lookup(context.names.ets_table, @app_name)
+
+      # Also seed storage so recovery has a :storage source path rather than
+      # needing the (still-configured) CLI.
+      expires_at = System.system_time(:second) + @ttl_seconds
+      Memory.put(@app_name, :cached, %{token: @token, expires_at: expires_at})
+
+      ets_owner = Process.whereis(context.names.ets_owner)
+      refute is_nil(ets_owner)
+
+      ref = Process.monitor(ets_owner)
+      Process.exit(ets_owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^ets_owner, _}, 1_000
+
+      # :rest_for_one rebuilds ETSOwner AND the DynamicSupervisor (wiping all
+      # AppServers). Wait until the new ETSOwner is up with a fresh table.
+      wait_until(fn ->
+        owner = Process.whereis(context.names.ets_owner)
+        is_pid(owner) and :ets.whereis(context.names.ets_table) != :undefined
+      end)
+
+      # Table is fresh — nothing in it.
+      assert :ets.lookup(context.names.ets_table, @app_name) == []
+
+      # Next get fills the cache from Memory storage (not from CLI, because
+      # Memory still has the seeded entry).
+      assert {:ok, @token} = Tokens.get(@app_name)
+    end
+  end
+
+  # Polls `fun` every 20ms up to ~1s. Fails the test on timeout.
+  defp wait_until(fun) do
+    Enum.reduce_while(1..50, :timeout, fn _, acc ->
+      if fun.() do
+        {:halt, :ok}
+      else
+        Process.sleep(20)
+        {:cont, acc}
+      end
+    end)
+    |> case do
+      :ok -> :ok
+      :timeout -> flunk("wait_until timed out")
+    end
+  end
+
   describe "AppServer direct (internal behavior)" do
     # A sanity check that AppServer's own public API works when called directly —
     # used rarely (test backdoors, diagnostics) but part of the module's
