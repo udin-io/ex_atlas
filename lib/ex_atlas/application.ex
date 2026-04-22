@@ -52,7 +52,7 @@ defmodule ExAtlas.Application do
       _ ->
         storage_mod = Keyword.get(fly_config, :token_storage, ExAtlas.Fly.TokenStorage.Dets)
 
-        [{storage_mod, fly_config}, Tokens.Server, StreamerSupervisor] ++
+        [{storage_mod, fly_config}, Tokens.Supervisor, StreamerSupervisor] ++
           dispatcher_child()
     end
   end
