@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and Atlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.2.0-dev — unreleased
+
+### Added — Fly.io platform operations
+
+- `Atlas.Fly` top-level facade for Fly.io platform ops:
+  `discover_apps/1`, `deploy/2`, `stream_deploy/3`, `subscribe_logs/3`,
+  `unsubscribe_logs/1`, `subscribe_deploy/1`, `unsubscribe_deploy/1`.
+- `Atlas.Fly.Deploy` — `fly deploy --remote-only` with 15 min timeout
+  (`deploy/2`) and Port-based streaming (`stream_deploy/3`) with a
+  5 min activity timer and 30 min absolute cap. Dispatches
+  `{:atlas_fly_deploy, ticket_id, line}` on each line.
+- `Atlas.Fly.Logs.Client` — `Req`-backed client for the Fly Machines
+  log API (NDJSON, cursor pagination, automatic 401 retry).
+- `Atlas.Fly.Logs.Streamer` + `StreamerSupervisor` — per-app GenServer
+  that polls the log API every 2 s, dispatches
+  `{:atlas_fly_logs, app, entries}`, and stops once all subscribers
+  have disconnected (monitor-based).
+- `Atlas.Fly.Tokens` + `Atlas.Fly.Tokens.Server` — cache-first token
+  resolver. Order: ETS → `TokenStorage` → `~/.fly/config.yml` →
+  `fly tokens create readonly` → manual override.
+- `Atlas.Fly.TokenStorage` — pluggable behaviour for durable token
+  persistence. Default impl `Atlas.Fly.TokenStorage.Dets` is
+  zero-config and survives VM restarts.
+- `Atlas.Fly.Dispatcher` — framework-agnostic broadcast. Modes:
+  `:registry` (default, zero-dep), `:phoenix_pubsub` (when host uses
+  Phoenix), or `{:mfa, {m, f, a}}` custom routing.
+- `Atlas.Application` now supervises the Fly sub-tree by default.
+  Disable with `config :atlas, :fly, enabled: false`.
+
+### Added — Igniter installer
+
+- `mix atlas.install` — adds sensible `config :atlas, :fly` defaults,
+  creates the DETS storage directory, wires `phoenix_pubsub` when
+  available.
+- `mix atlas.upgrade` — runs per-version upgraders (no-op for 0.1.x
+  → 0.2.0; reserved for future migrations).
+
+### Changed
+
+- Description and package scope broadened from "GPU/compute SDK" to
+  "infrastructure SDK".
+- `Atlas.Application`'s Fly sub-tree boots by default. The existing
+  orchestrator sub-tree is still opt-in via `start_orchestrator: true`.
+
 ## v0.1.0 — unreleased
 
 Initial public release.
