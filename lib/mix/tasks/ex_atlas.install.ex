@@ -120,7 +120,20 @@ if Code.ensure_loaded?(Igniter) do
         end)
       end)
     rescue
-      _ -> igniter
+      e ->
+        # The previous implementation swallowed every exception, so an
+        # installer that failed to update .gitignore still reported success
+        # and the user could end up committing DETS token files. Surface
+        # the failure as an Igniter notice so it is visible in the install
+        # output, and tell the user what to add manually.
+        Igniter.add_notice(igniter, """
+        ExAtlas could not update .gitignore automatically: #{Exception.message(e)}
+
+        Please add the following to your .gitignore manually:
+
+            # ExAtlas DETS token cache
+            priv/ex_atlas_fly/*.dets
+        """)
     end
   end
 else
