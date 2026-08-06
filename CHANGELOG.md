@@ -10,6 +10,17 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Closes all remaining audit items. Library is now at feature parity with
 the audit recommendations.
 
+### Fixed
+
+- **Provider-specific options reach the provider ctx** (#20) —
+  `ExAtlas.Config.build_ctx/2` only kept `:provider`, `:api_key`,
+  `:base_url` and `:req_options` and dropped everything else, so the
+  documented `ExAtlas.get_job(id, provider: :runpod, endpoint: "abc123")`
+  (and `cancel_job/2`, `stream_job/2`) could never succeed — RunPod reads
+  `:endpoint` from the ctx and returned a `:validation` error every time.
+  Remaining options are now passed through to the ctx verbatim; the four
+  options ExAtlas resolves itself still win.
+
 ### Added
 
 - **`ExAtlas.Fly.Supervisor`** (E3) — top-level supervisor for the Fly
