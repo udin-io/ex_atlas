@@ -47,6 +47,10 @@ defmodule ExAtlas.Config do
     vast: "VAST_API_KEY"
   }
 
+  # Options ExAtlas resolves itself; everything else is provider-specific and
+  # passed through to the ctx verbatim.
+  @resolved_opts [:provider, :api_key, :base_url, :req_options]
+
   @type opts :: keyword()
 
   @doc "Pop `:provider` from opts and return `{provider_atom_or_module, remaining_opts}`."
@@ -72,16 +76,28 @@ defmodule ExAtlas.Config do
   @doc """
   Build the ctx map passed to every provider callback.
 
-  Resolves the API key and any Req overrides in one place.
+  Resolves the API key and any Req overrides in one place. Every remaining
+  option is passed through untouched so provider-specific options reach the
+  provider — `ExAtlas.get_job/2` and friends take no request struct, so
+  `endpoint:` can only travel to `ExAtlas.Providers.RunPod` through the ctx:
+
+      ExAtlas.get_job("job-1", provider: :runpod, endpoint: "abc123")
+      # => ctx is %{provider: :runpod, api_key: ..., endpoint: "abc123", ...}
+
+  The keys ExAtlas resolves itself (`:provider`, `:api_key`, `:base_url`,
+  `:req_options`) always win over the pass-through values.
   """
   @spec build_ctx(atom() | module(), opts()) :: ExAtlas.Provider.ctx()
   def build_ctx(provider, opts) do
-    %{
+    opts
+    |> Keyword.drop(@resolved_opts)
+    |> Map.new()
+    |> Map.merge(%{
       provider: provider,
       api_key: resolve_api_key(provider, opts),
       base_url: Keyword.get(opts, :base_url),
       req_options: Keyword.get(opts, :req_options, [])
-    }
+    })
   end
 
   @doc "Resolve the module that implements `ExAtlas.Provider` for a given provider atom."

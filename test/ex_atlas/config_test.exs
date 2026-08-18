@@ -39,6 +39,28 @@ defmodule ExAtlas.ConfigTest do
     assert ctx.api_key == "from-config"
   end
 
+  test "build_ctx threads provider-specific opts (e.g. :endpoint) into the ctx" do
+    ctx = Config.build_ctx(:runpod, api_key: "k", endpoint: "abc123", job_endpoint: "def456")
+
+    assert ctx.endpoint == "abc123"
+    assert ctx.job_endpoint == "def456"
+  end
+
+  test "build_ctx keeps the resolved api_key, base_url and req_options authoritative" do
+    ctx =
+      Config.build_ctx(:runpod,
+        api_key: "k",
+        base_url: "http://example.test",
+        req_options: [receive_timeout: 1],
+        endpoint: "abc123"
+      )
+
+    assert ctx.api_key == "k"
+    assert ctx.base_url == "http://example.test"
+    assert ctx.req_options == [receive_timeout: 1]
+    assert ctx.endpoint == "abc123"
+  end
+
   test "provider_module maps atoms to modules" do
     assert Config.provider_module(:runpod) == ExAtlas.Providers.RunPod
     assert Config.provider_module(:mock) == ExAtlas.Providers.Mock

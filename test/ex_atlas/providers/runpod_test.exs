@@ -134,4 +134,73 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert gpu.stock == :high
     end
   end
+
+  describe "serverless jobs through the top-level API" do
+    setup %{bypass: bypass, ctx_opts: opts} do
+      # `Client.runtime/2` always targets api.runpod.ai; route it at Bypass the
+      # same way the GraphQL test does.
+      job_opts =
+        Keyword.merge(opts,
+          endpoint: "abc123",
+          req_options: [base_url: "http://localhost:#{bypass.port}"]
+        )
+
+      {:ok, job_opts: job_opts}
+    end
+
+    test "get_job/2 carries :endpoint through to the runtime API", %{
+      bypass: bypass,
+      job_opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/status/job_1", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"id" => "job_1", "status" => "COMPLETED", "output" => %{"ok" => true}})
+        )
+      end)
+
+      assert {:ok, job} = ExAtlas.get_job("job_1", opts)
+      assert job.id == "job_1"
+      assert job.status == :completed
+      assert job.endpoint == "abc123"
+    end
+
+    test "cancel_job/2 carries :endpoint through to the runtime API", %{
+      bypass: bypass,
+      job_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/cancel/job_1", fn conn ->
+        Plug.Conn.resp(conn, 200, "{}")
+      end)
+
+      assert :ok = ExAtlas.cancel_job("job_1", opts)
+    end
+
+    test "stream_job/2 carries :endpoint through to the runtime API", %{
+      bypass: bypass,
+      job_opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/stream/job_1", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"status" => "COMPLETED", "stream" => [%{"output" => "chunk-1"}]})
+        )
+      end)
+
+      chunks = "job_1" |> ExAtlas.stream_job(opts) |> Enum.take(1)
+
+      assert chunks == [%{"output" => "chunk-1"}]
+    end
+
+    test "get_job/2 still reports a validation error when no endpoint is given", %{
+      job_opts: opts
+    } do
+      assert {:error, %ExAtlas.Error{kind: :validation}} =
+               ExAtlas.get_job("job_1", Keyword.delete(opts, :endpoint))
+    end
+  end
 end
