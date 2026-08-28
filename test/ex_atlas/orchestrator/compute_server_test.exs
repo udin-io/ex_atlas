@@ -49,7 +49,8 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
   end
 
   test "idle timeout triggers termination" do
-    if Code.ensure_loaded?(Phoenix.PubSub), do: Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:")
+    if Code.ensure_loaded?(Phoenix.PubSub),
+      do: Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:")
 
     {:ok, pid, compute} =
       ExAtlas.Orchestrator.spawn(
