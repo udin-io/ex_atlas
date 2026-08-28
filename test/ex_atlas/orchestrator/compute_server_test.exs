@@ -179,6 +179,99 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  describe "on_failure: {:respawn, max_attempts}" do
+    setup do
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        spot: true,
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: 30,
+        on_failure: {:respawn, 1}
+      ]
+
+      {:ok, base: base}
+    end
+
+    test "a preempted pod is replaced and the session follows the new id", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(old_id)
+
+      assert_receive {:atlas_compute, ^old_id, {:status, :preempted}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:respawned, replacement}}, 2_000
+
+      refute replacement.id == old_id
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+
+      assert {:ok, %{compute: %{id: new_id}}} = ExAtlas.Orchestrator.info(replacement.id)
+      assert new_id == replacement.id
+      assert {:error, :not_tracked} = ExAtlas.Orchestrator.info(old_id)
+      assert replacement.id in ExAtlas.Orchestrator.list_ids()
+    end
+
+    test "the replacement is torn down with the session", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      :ok = Mock.forget(compute.id)
+
+      assert_receive {:atlas_compute, _, {:respawned, replacement}}, 2_000
+
+      ref = Process.monitor(pid)
+      :ok = ExAtlas.Orchestrator.stop_tracked(replacement.id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(replacement.id, provider: :mock)
+    end
+
+    test "the session ends once the respawn budget is spent", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(compute.id)
+      assert_receive {:atlas_compute, _, {:respawned, replacement}}, 2_000
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(replacement.id))
+      new_id = replacement.id
+      :ok = Mock.forget(new_id)
+
+      assert_receive {:atlas_compute, ^new_id, {:status, :preempted}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a crash-looping image is not respawned", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      # An image that failed on this host will fail on the next one too, so
+      # there is nothing to recover by renting more capacity.
+      :ok = Mock.set_status(id, :failed)
+
+      assert_receive {:atlas_compute, ^id, {:status, :failed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "without on_failure a preempted pod just ends the session", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(Keyword.delete(base, :on_failure))
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+    end
+  end
+
   describe "upstream status polling when the provider API is failing" do
     setup do
       bypass = Bypass.open()

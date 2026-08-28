@@ -34,6 +34,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   nothing else. Tearing a live GPU down because one request to the provider
   failed would be far more expensive than noticing its death a minute late.
 
+  With `on_failure: {:respawn, max_attempts}` the server replaces a *preempted*
+  resource instead of stopping: it spawns a fresh one from the same opts,
+  re-keys itself in the registry under the new id, and broadcasts
+  `{:respawned, compute}` on the old topic so subscribers can follow. That
+  suits checkpoint-based batch work on spot capacity.
+
+  Preemption is the only cause worth retrying, and the option is narrow on
+  purpose. A resource that was stopped or terminated was ended by someone; an
+  image that `:failed` on this host will fail on the next one, so respawning it
+  just crash-loops on a meter.
+
   Per project conventions, callback bodies never wrap logic in `try/rescue` —
   if a provider API raises, we let the server crash and the supervisor
   handles restart policy. The `terminate/2` callback handles upstream teardown.
@@ -52,6 +63,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # the same window the Reaper already works on.
   @default_status_poll_ms 60 * 1_000
 
+  # The only death we can both identify and usefully retry. See the moduledoc.
+  @respawnable [:preempted]
+
   @type state :: %{
           compute: ExAtlas.Spec.Compute.t(),
           opts: keyword(),
@@ -60,6 +74,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           status_poll_ms: pos_integer() | nil,
           poll_failures: non_neg_integer(),
           upstream_present?: boolean(),
+          respawn_limit: non_neg_integer(),
+          respawns: non_neg_integer(),
           last_activity_ms: integer(),
           user_id: term() | nil
         }
@@ -99,6 +115,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       status_poll_ms: poll_interval(opts),
       poll_failures: 0,
       upstream_present?: true,
+      respawn_limit: respawn_limit(opts),
+      respawns: 0,
       last_activity_ms: now_ms(),
       user_id: Keyword.get(opts, :user_id)
     }
@@ -171,7 +189,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp apply_observation({:dead, reason, upstream}, state) do
     Events.broadcast(state.compute.id, {:status, reason})
-    {:stop, :normal, %{state | upstream_present?: not is_nil(upstream)}}
+    state = %{state | upstream_present?: not is_nil(upstream)}
+
+    if respawn?(reason, state) do
+      respawn(state, reason)
+    else
+      {:stop, :normal, state}
+    end
   end
 
   # `get_compute/2` can't return the auth handle — it was minted locally at
@@ -184,6 +208,40 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
 
     %{state | compute: upstream}
+  end
+
+  # --- respawn ---
+
+  defp respawn?(reason, state),
+    do: reason in @respawnable and state.respawns < state.respawn_limit
+
+  defp respawn(state, reason) do
+    old_id = state.compute.id
+
+    case ExAtlas.spawn_compute(state.opts) do
+      {:ok, replacement} ->
+        :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
+        {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
+
+        Events.broadcast(old_id, {:respawned, replacement})
+        Events.broadcast(replacement.id, {:status, replacement.status})
+
+        state = %{
+          state
+          | compute: replacement,
+            respawns: state.respawns + 1,
+            poll_failures: 0,
+            upstream_present?: true,
+            last_activity_ms: now_ms()
+        }
+
+        schedule_status_poll(state)
+        {:noreply, state}
+
+      {:error, error} ->
+        Events.broadcast(old_id, {:respawn_failed, {reason, error}})
+        {:stop, :normal, state}
+    end
   end
 
   # --- teardown ---
@@ -211,6 +269,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     case Keyword.get(opts, :status_poll_ms, @default_status_poll_ms) do
       ms when is_integer(ms) and ms > 0 -> ms
       falsy when falsy in [false, nil] -> nil
+    end
+  end
+
+  defp respawn_limit(opts) do
+    case Keyword.get(opts, :on_failure, :stop) do
+      {:respawn, max} when is_integer(max) and max >= 0 -> max
+      :stop -> 0
     end
   end
 
