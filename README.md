@@ -497,19 +497,91 @@ under `ExAtlas.Orchestrator.ComputeSupervisor` that:
 3. Tracks `:last_activity_ms` and compares against `:idle_ttl_ms` on every
    heartbeat tick. If idle, the server stops normally and the upstream
    resource is destroyed.
+4. Polls the provider every `:status_poll_ms` and reports what it finds, so a
+   resource that died on the cloud's side is noticed rather than assumed away.
+
+### Upstream status polling
+
+The heartbeat answers "does anyone still want this?"; it cannot answer "is it
+still there?". A pod can die without you asking — a host fails, an image
+crash-loops, spot capacity is reclaimed — and until the tracker asks the
+provider, subscribers go on believing the session is healthy and the meter
+goes on running.
+
+So the `ComputeServer` runs a second, independent clock. Every
+`:status_poll_ms` (default 60s) it calls `get_compute/2` and broadcasts the
+result: a status change while the resource is alive, or the cause of death
+followed by a normal shutdown.
+
+```elixir
+ExAtlas.Orchestrator.spawn(
+  gpu: :h100,
+  image: "ghcr.io/me/trainer:latest",
+  spot: true,
+  status_poll_ms: 30_000,          # false to disable polling entirely
+  on_failure: {:respawn, 3}        # replace preempted pods, up to 3 times
+)
+```
+
+| Option              | Default  | Meaning                                          |
+| ------------------- | -------- | ------------------------------------------------ |
+| `:status_poll_ms`   | `60_000` | Poll interval; `false` disables polling          |
+| `:on_failure`       | `:stop`  | Or `{:respawn, max_attempts}` for spot workloads  |
+
+The interval is separate from `:heartbeat_ms` on purpose: one is paced by your
+users' activity, the other by what your provider's API tolerates. RunPod's
+management API publishes no rate limits at all, which is why the default is
+unhurried and why polls back off exponentially (with jitter, so a fleet of
+trackers doesn't poll in lockstep) while the provider is failing.
+
+**A failed poll is not a death.** Only a `404` means the resource is gone.
+A 500, a rate limit, a socket error, a malformed body, even a bad API key
+come back as `{:poll_failed, error}` — the poller backs off and the session
+continues. Tearing down a live GPU because one request failed is far more
+expensive than noticing a death a minute late.
+
+**Preemption is inferred, not reported.** No provider publishes a "you were
+outbid" signal — RunPod's REST API has no preemption field, event or status,
+and its `desiredStatus` is only `RUNNING | EXITED | TERMINATED`. So a resource
+you spawned with `spot: true` that stops, is terminated, or vanishes without
+you asking is reported as `{:status, :preempted}`. On-demand resources keep
+the literal reason (`:stopped`, `:terminated`, `:vanished`).
+
+With `on_failure: {:respawn, n}` a preempted resource is replaced from the
+same opts rather than ending the session: the tracker re-keys itself under the
+new id and emits `{:respawned, compute}` on the *old* topic, which is how a
+LiveView learns the new URL and token. Only preemption is retried — a stopped
+or terminated resource was ended by someone, and an image that `:failed` here
+will fail on the next host too.
+
+`ExAtlas.Orchestrator.UpstreamStatus` is the primitive underneath, usable on
+its own if you want the classification without a tracker process:
+
+```elixir
+ExAtlas.Orchestrator.UpstreamStatus.observe(pod_id, provider: :runpod, spot: true)
+# {:alive, %ExAtlas.Spec.Compute{}}
+# {:dead, :preempted, nil}
+# {:poll_failed, %ExAtlas.Error{}}
+```
 
 ### PubSub events
 
 Every state change is broadcast over `ExAtlas.PubSub` on the topic
 `"compute:<id>"` as `{:atlas_compute, id, event}`:
 
-| Event                          | Emitted when                                        |
-| ------------------------------ | --------------------------------------------------- |
-| `{:status, :running}`          | `ComputeServer` starts                              |
-| `{:heartbeat, monotonic_ms}`   | Heartbeat tick (no idle timeout)                    |
-| `{:terminating, reason}`       | Server is about to shut down                        |
-| `{:status, :terminated}`       | Upstream provider confirmed termination             |
-| `{:terminate_failed, error}`   | Upstream `terminate` call returned an error         |
+| Event                            | Emitted when                                      |
+| -------------------------------- | ------------------------------------------------- |
+| `{:status, :running}`            | `ComputeServer` starts                            |
+| `{:heartbeat, monotonic_ms}`     | Heartbeat tick (no idle timeout)                  |
+| `{:status, status}`              | A status poll saw the upstream status change      |
+| `{:status, :preempted}`          | A `spot: true` resource was reclaimed             |
+| `{:status, :failed \| :stopped \| :vanished}` | Poll found the resource dead        |
+| `{:poll_failed, error}`          | A status poll couldn't reach the provider         |
+| `{:respawned, compute}`          | Preempted resource replaced (sent on the old id)  |
+| `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned               |
+| `{:terminating, reason}`         | Server is about to shut down                      |
+| `{:status, :terminated}`         | Upstream provider confirmed termination           |
+| `{:terminate_failed, error}`     | Upstream `terminate` call returned an error       |
 
 Subscribe in a LiveView:
 
@@ -533,6 +605,12 @@ and:
 
 The prefix is a **safety switch** so ExAtlas never touches pods created by
 other tools on the same cloud account. Set it to `""` to disable.
+
+The Reaper and the status poller look in opposite directions and don't
+overlap: the Reaper asks "is anything running that nothing is tracking?"
+(provider → local), while each tracker asks "is the thing I track still
+alive?" (local → provider). Between them, a resource can neither outlive its
+tracker nor be believed alive after it dies.
 
 ## Phoenix LiveDashboard integration
 
@@ -733,6 +811,12 @@ env var.
 **Q: `get_job/2` returns `{:error, :validation, message: "requires :endpoint"}`**
 RunPod's serverless API is scoped to an endpoint id. Pass it:
 `ExAtlas.get_job(job.id, provider: :runpod, endpoint: "abc123")`.
+
+**Q: My pod died on RunPod but my app never noticed.**
+Upstream polling is on by default (`:status_poll_ms`, 60s). If you set it to
+`false`, nothing asks the provider anything and the session only ends on idle
+TTL. Note that a `{:poll_failed, _}` event means the *poll* failed, not the
+pod — check that event before assuming the resource is gone.
 
 **Q: My LiveDashboard ExAtlas tab is empty.**
 Either the orchestrator isn't running, or nothing has been spawned with

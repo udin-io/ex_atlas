@@ -166,6 +166,70 @@ sends a `:ping` every 30 seconds and users normally stay active,
    idle timer fires regardless of what's talking to it.
 3. **Provider API hiccups.** `terminate/2` errors are logged and broadcast
    as `{:terminate_failed, error}` but don't cause the server to hang.
+4. **The pod dying without telling you.** Every `:status_poll_ms` the
+   `ComputeServer` asks the provider whether the pod is still there, so a
+   host failure, a crash-looping image or a reclaimed spot instance ends the
+   session with a real reason instead of leaving the UI showing a pod that
+   no longer exists.
+
+## When the pod dies underneath you
+
+The idle timer measures your users; it says nothing about the cloud. Handle
+the upstream events too, or a dead pod stays "connected" in the UI until the
+idle TTL finally fires:
+
+```elixir
+# Anything the poller reports as dead ends the session.
+def handle_info({:atlas_compute, _id, {:status, status}}, socket)
+    when status in [:failed, :stopped, :vanished, :preempted] do
+  {:noreply,
+   socket
+   |> put_flash(:error, "Your GPU session ended unexpectedly (#{status}).")
+   |> redirect(to: ~p"/")}
+end
+
+# The poll failed, not the pod. Say "reconnecting", don't end the session.
+def handle_info({:atlas_compute, _id, {:poll_failed, _error}}, socket) do
+  {:noreply, assign(socket, provider_reachable?: false)}
+end
+```
+
+`:preempted` only ever appears for pods you spawned with `spot: true`. RunPod
+publishes no preemption signal — no field, no event, no status — so ExAtlas
+infers it: an interruptible pod that stopped or vanished without you asking
+was almost certainly reclaimed. Treat it as a strong hint, not a fact.
+
+### Spot capacity for unattended work
+
+Interactive sessions should not run on spot: the user is sitting there, and
+the replacement pod has a different URL and token. For batch work that
+checkpoints, opt into replacement:
+
+```elixir
+ExAtlas.Orchestrator.spawn(
+  gpu: :h100,
+  image: "ghcr.io/me/trainer:latest",
+  spot: true,
+  status_poll_ms: 30_000,
+  on_failure: {:respawn, 3},
+  name: "atlas-train-" <> run_id
+)
+```
+
+The tracking process survives the swap and re-keys itself under the new pod
+id, so `touch/1`, `info/1` and teardown keep working. Subscribers get
+`{:respawned, compute}` on the *original* topic — that message carries the new
+id, ports and token, and is your cue to `subscribe` to the new topic if you
+follow sessions by id.
+
+### Choosing a poll interval
+
+RunPod's management API documents no rate limits whatsoever, so the 60s
+default is deliberately conservative — one request per pod per minute. Go
+faster (10–30s) when a minute of wasted GPU time matters more than request
+volume; remember the cost scales with the number of live pods, not with the
+interval alone. Polls back off exponentially while the provider is erroring,
+so an outage doesn't turn into a retry storm.
 
 ## Pitfalls
 
