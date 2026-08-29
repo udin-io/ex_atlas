@@ -50,6 +50,12 @@ defmodule ExAtlas.Orchestrator do
 
   alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor}
 
+  # A task with no wall-clock cap is the billing trap this whole feature exists
+  # to close, so `run_task/1` supplies one rather than letting a caller create
+  # an unbounded meter by omission. Both are overridable per call.
+  @default_task_max_runtime_ms 60 * 60 * 1_000
+  @default_task_ready_timeout_ms 15 * 60 * 1_000
+
   @doc """
   Spawn a compute resource under supervision.
 
@@ -57,7 +63,8 @@ defmodule ExAtlas.Orchestrator do
   `compute` is the `ExAtlas.Spec.Compute` normally returned by `ExAtlas.spawn_compute/1`.
 
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
-  `:on_failure`, `:user_id`) are validated *before* the provider is called, so
+  `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`, `:user_id`)
+  are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
   nothing tracking it.
@@ -90,6 +97,89 @@ defmodule ExAtlas.Orchestrator do
     end
   end
 
+  @doc """
+  Run a container to completion, then destroy it and report what happened.
+
+  A thin wrapper over `spawn/1` with `mode: :task`, for the batch shape:
+  "run this image with this command until it exits, then tell me the outcome
+  and stop the meter."
+
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          provider: :runpod,
+          gpu: :rtx_4090,
+          image: "ghcr.io/acme/trainer:latest",
+          command: ["/app/train.sh"],
+          name: "atlas-task-\#{run.id}",
+          max_runtime_ms: :timer.minutes(90)
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
+
+  Subscribers get one of three task events before the usual
+  `{:terminating, _}` / `{:status, :terminated}` pair:
+
+    * `{:task, :completed}`
+    * `{:task, :timed_out}`
+    * `{:task, {:failed, reason}}` — `:never_ready`, `:preempted`,
+      `:terminated`, `:failed`
+
+  ## `:completed` does not mean "succeeded"
+
+  It means **the container ended and the resource is gone**. The
+  self-termination wrapper traps `EXIT`, so a crashed command cleans up exactly
+  like a successful one and both reach the orchestrator as the same 404; the
+  exit code dies with the pod, and RunPod's REST API offers no way to read it
+  back. If you need to distinguish success from failure, have the container
+  report it — write a status file to a network volume, call your own webhook —
+  before it exits.
+
+  ## Two mechanisms, both required
+
+  RunPod reports no container state at all, so a pod whose command has exited
+  keeps answering `desiredStatus: "RUNNING"` and keeps billing. Self-termination
+  (`:self_terminate`, on by default whenever `:command` is set) is the only
+  thing that produces a normal-exit signal. `:max_runtime_ms` is the only cover
+  for the cases where nothing in the container can run: a SIGKILL or OOM kill,
+  a hung process, an image that never pulled, `self_terminate: false`. Neither
+  alone is sufficient, so both are on by default.
+
+  ## Defaults this adds on top of `spawn/1`
+
+    * `mode: :task` — always, it is what the function means.
+    * `max_runtime_ms:` 60 minutes, if you did not say. There is no way to
+      disable it here: an unattended task with no cap is the trap.
+    * `ready_timeout_ms:` 15 minutes, if you did not say. Applies only while
+      the resource is still `:provisioning`, and only when the status poller
+      is running.
+
+  Note that `:max_runtime_ms` is wall clock **from spawn**, not compute time
+  and not time since `:running` — image-pull time counts against it, because
+  it counts against your bill. It also carries across an `on_failure:
+  {:respawn, n}` replacement rather than resetting, so a preempted task cannot
+  spend a multiple of the budget you asked for.
+
+  ## Spot tasks
+
+  With `spot: true` a disappearing resource is reported as `:preempted`
+  (`ExAtlas.Orchestrator.UpstreamStatus` infers preemption; no provider signals
+  it). A self-terminating container also makes the resource disappear, so on
+  spot capacity the two are **indistinguishable from the API**: a task that
+  finished can be read as preempted and, with `on_failure: {:respawn, n}`,
+  re-run. Use respawn for spot tasks only where re-running is harmless —
+  checkpoint-resuming training, which is what the option was added for — and
+  note the carried deadline bounds the total spend either way.
+  """
+  @spec run_task(keyword()) ::
+          {:ok, pid(), ExAtlas.Spec.Compute.t()} | {:error, term()}
+  def run_task(opts) do
+    opts
+    |> Keyword.put(:mode, :task)
+    |> Keyword.put_new(:max_runtime_ms, @default_task_max_runtime_ms)
+    |> Keyword.put_new(:ready_timeout_ms, @default_task_ready_timeout_ms)
+    |> __MODULE__.spawn()
+  end
+
   @doc "Record activity so the idle-reaper keeps the resource alive."
   @spec touch(String.t()) :: :ok | {:error, :not_tracked}
   def touch(id) do
@@ -99,7 +189,13 @@ defmodule ExAtlas.Orchestrator do
     end
   end
 
-  @doc "Fetch the latest tracked state for a resource."
+  @doc """
+  Fetch the latest tracked state for a resource.
+
+  The map holds `:compute`, `:user_id`, `:idle_ttl_ms`, `:last_activity_ms`,
+  `:mode`, and `:max_runtime_remaining_ms` — milliseconds left on a task's
+  `:max_runtime_ms` deadline, or `nil` when there is no deadline.
+  """
   @spec info(String.t()) :: {:ok, map()} | {:error, :not_tracked}
   def info(id) do
     case lookup(id) do

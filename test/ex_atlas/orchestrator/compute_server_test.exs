@@ -780,4 +780,59 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
     end
   end
+
+  describe "run_task/1" do
+    test "runs a command to completion and reports the outcome" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          provider: :mock,
+          gpu: :h100,
+          image: "ghcr.io/acme/trainer:latest",
+          command: ["/app/train.sh"],
+          name: "atlas-task-42",
+          status_poll_ms: 10,
+          max_runtime_ms: 60_000
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      assert {:ok, %{mode: :task}} = ExAtlas.Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "always has a deadline, even when the caller forgets to ask for one" do
+      # An unattended task with no wall-clock cap is the billing trap this
+      # whole feature exists to close, so the wrapper supplies one.
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          command: ["/app/train.sh"],
+          status_poll_ms: false
+        )
+
+      assert {:ok, info} = ExAtlas.Orchestrator.info(compute.id)
+      assert is_integer(info.max_runtime_remaining_ms)
+      assert info.max_runtime_remaining_ms > 0
+    end
+
+    test "validates its options before renting anything" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.run_task(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 max_runtime_ms: -1
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
 end
