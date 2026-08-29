@@ -56,7 +56,8 @@ defmodule ExAtlas.Providers.Stub do
 
       @impl true
       def stream_job(_id, _ctx),
-        do: Stream.map([{:error, ExAtlas.Error.new(:unsupported, provider: @provider_atom)}], & &1)
+        do:
+          Stream.map([{:error, ExAtlas.Error.new(:unsupported, provider: @provider_atom)}], & &1)
 
       @impl true
       def list_gpu_types(_ctx), do: not_implemented(:list_gpu_types)

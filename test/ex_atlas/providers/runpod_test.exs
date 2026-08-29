@@ -58,6 +58,37 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
+  describe "get_compute/2" do
+    test "GETs /pods/:id and normalizes", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"id" => "pod_abc", "desiredStatus" => "RUNNING"})
+        )
+      end)
+
+      assert {:ok, compute} = ExAtlas.get_compute("pod_abc", opts)
+      assert compute.id == "pod_abc"
+      assert compute.status == :running
+    end
+
+    test "a 200 whose body is not a pod object is a :provider error, not a crash", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(200, "null")
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, provider: :runpod}} =
+               ExAtlas.get_compute("pod_abc", opts)
+    end
+  end
+
   describe "terminate/2" do
     test "DELETEs /pods/:id", %{bypass: bypass, ctx_opts: opts} do
       Bypass.expect_once(bypass, "DELETE", "/pods/pod_abc", fn conn ->

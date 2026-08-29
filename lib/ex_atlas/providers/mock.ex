@@ -60,6 +60,29 @@ defmodule ExAtlas.Providers.Mock do
     :ok
   end
 
+  @doc """
+  Force a tracked resource into `status`.
+
+  Lets a test drive the state transitions a real cloud makes on its own — a
+  crash-looping image (`:failed`), a container that exited (`:stopped`) — so
+  code that reacts to upstream status can be exercised without the network.
+  """
+  @spec set_status(String.t(), Spec.Compute.status()) :: :ok | {:error, ExAtlas.Error.t()}
+  def set_status(id, status), do: update_status(id, status)
+
+  @doc """
+  Drop a resource from the store entirely, so it 404s like a pod that was
+  deleted upstream or a spot instance that was preempted out from under you.
+
+  Idempotent: forgetting an unknown id is still `:ok`.
+  """
+  @spec forget(String.t()) :: :ok
+  def forget(id) do
+    ensure_started()
+    :ets.delete(@table, {:compute, id})
+    :ok
+  end
+
   @impl true
   def capabilities,
     do: [:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks]

@@ -12,6 +12,13 @@ the audit recommendations.
 
 ### Fixed
 
+- **A malformed pod body no longer raises** (#24) —
+  `ExAtlas.Providers.RunPod.get_compute/2` piped the response body straight
+  into a translator guarded on `is_map/1`, so a 200 carrying `null` raised a
+  `FunctionClauseError` at the call site. It now returns an
+  `%ExAtlas.Error{kind: :provider}`, which matters because the status poller
+  runs this call in a loop inside a GenServer.
+
 - **Provider-specific options reach the provider ctx** (#20) —
   `ExAtlas.Config.build_ctx/2` only kept `:provider`, `:api_key`,
   `:base_url` and `:req_options` and dropped everything else, so the
@@ -22,6 +29,45 @@ the audit recommendations.
   options ExAtlas resolves itself still win.
 
 ### Added
+
+- **Upstream status polling** (#24) — the `ComputeServer` heartbeat only ever
+  compared local timestamps, so a pod that died on the provider's side (host
+  failure, crash-looping image, spot preemption) was never noticed:
+  subscribers kept believing the session was healthy until the idle TTL fired
+  and ExAtlas tried to terminate something long gone. Each tracker now runs a
+  second, independent clock — `:status_poll_ms`, default `60_000`, `false` to
+  disable — that calls `get_compute/2`, broadcasts upstream status changes
+  while the resource is alive, and broadcasts the cause of death before
+  stopping.
+
+  - New `{:status, :failed | :stopped | :vanished | :preempted}` and
+    `{:poll_failed, error}` events. **A failed poll is not a death**: only a
+    404 means the resource is gone, so 5xx, rate limits, socket errors,
+    malformed bodies and bad API keys back the poller off instead of ending
+    the session.
+  - `:preempted` is *inferred* — no provider publishes a preemption signal —
+    for resources spawned with `spot: true` that stop, are terminated, or
+    vanish unbidden.
+  - Optional `on_failure: {:respawn, max_attempts}` replaces a preempted
+    resource from the same opts, terminating the old one if the provider still
+    has it, re-keying the tracker under the new id and emitting
+    `{:respawned, new_id}` on the old topic. The id travels alone — the
+    replacement's URL and bearer token are read back with
+    `ExAtlas.Orchestrator.info/1` rather than broadcast.
+  - The poll itself runs in a supervised task rather than in the tracker's
+    callback, so a slow or hanging provider can't delay `touch/1`, `info/1` or
+    — the expensive one — teardown, which has to win the race to issue its
+    `DELETE`. Raises on the poll path are reported as `{:poll_failed, _}` too:
+    the tracker never tears a resource down on uncertainty.
+  - `:reap_grace_ms` (default: one reap interval) keeps the Reaper off
+    resources too young to have a tracker yet — every resource is created
+    upstream before it is registered.
+  - Tracking options are validated at the `ExAtlas.Orchestrator.spawn/1`
+    boundary, before the provider is asked for anything.
+  - `ExAtlas.Orchestrator.UpstreamStatus` exposes the classification and the
+    jittered/backing-off poll schedule as a standalone primitive.
+  - `ExAtlas.Providers.Mock.set_status/2` and `forget/1` let consumers
+    simulate upstream deaths in their own tests.
 
 - **`ExAtlas.Fly.Supervisor`** (E3) — top-level supervisor for the Fly
   sub-tree, exposed as a `child_spec/1` so hosts can embed ExAtlas under

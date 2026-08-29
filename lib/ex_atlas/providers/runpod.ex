@@ -82,8 +82,23 @@ defmodule ExAtlas.Providers.RunPod do
 
   @impl true
   def get_compute(id, ctx) do
-    with {:ok, pod} <- Pods.get(ctx, id) do
-      {:ok, Translate.pod_to_compute(pod)}
+    # A 200 whose body isn't a pod object (RunPod has been seen to answer
+    # `null` for a pod mid-teardown) must not blow up the caller — status
+    # pollers run this in a loop and a raise there kills their process.
+    case Pods.get(ctx, id) do
+      {:ok, pod} when is_map(pod) ->
+        {:ok, Translate.pod_to_compute(pod)}
+
+      {:ok, other} ->
+        {:error,
+         ExAtlas.Error.new(:provider,
+           provider: :runpod,
+           message: "unexpected body for GET /pods/#{id}",
+           raw: other
+         )}
+
+      {:error, _} = err ->
+        err
     end
   end
 
