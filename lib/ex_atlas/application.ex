@@ -5,8 +5,9 @@ defmodule ExAtlas.Application do
   ExAtlas spins up two independent sub-trees, each gated by configuration:
 
     * **Orchestrator** (opt-in via `config :ex_atlas, start_orchestrator: true`) —
-      boots a `Registry`, a `DynamicSupervisor`, optional `Phoenix.PubSub`,
-      and the `Reaper` that periodically reconciles tracked compute resources.
+      boots a `Registry`, a `Task.Supervisor` for the trackers' status polls,
+      a `DynamicSupervisor`, optional `Phoenix.PubSub`, and the `Reaper` that
+      periodically reconciles tracked compute resources.
 
     * **Fly platform ops** (default on, disable via
       `config :ex_atlas, :fly, enabled: false`) — boots the token storage, token
@@ -17,7 +18,7 @@ defmodule ExAtlas.Application do
   """
   use Application
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeSupervisor, Reaper}
+  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor, Reaper}
 
   @impl true
   def start(_type, _args) do
@@ -30,6 +31,7 @@ defmodule ExAtlas.Application do
     if Application.get_env(:ex_atlas, :start_orchestrator, false) do
       base = [
         {Registry, keys: :unique, name: ComputeRegistry},
+        {Task.Supervisor, name: ComputeServer.task_supervisor_name()},
         {DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one}
       ]
 

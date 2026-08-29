@@ -1,8 +1,9 @@
 defmodule ExAtlas.Orchestrator.ComputeServerTest do
   use ExUnit.Case, async: false
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeSupervisor, Events}
+  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor, Events}
   alias ExAtlas.Providers.Mock
+  alias ExAtlas.Test.FaultyProvider
 
   setup do
     Application.put_env(:ex_atlas, :start_orchestrator, true)
@@ -10,6 +11,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     Mock.reset()
 
     start_supervised!({Registry, keys: :unique, name: ComputeRegistry})
+    start_supervised!({Task.Supervisor, name: ComputeServer.task_supervisor_name()})
     start_supervised!({DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one})
 
     if Code.ensure_loaded?(Phoenix.PubSub) do
@@ -388,6 +390,53 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       # Nothing tracks it, so it must not survive the failure.
       assert {:ok, [%{status: :terminated}]} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
+
+  # Hold a poll open, then assert the tracker still answers. The alternative —
+  # a poll done inline in the callback — parks the mailbox for as long as the
+  # provider takes (up to ~120s of Req retries).
+  defp block_a_poll(base) do
+    {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+    FaultyProvider.arm(:get_compute, {:block, self()})
+    assert_receive {:blocked, :get_compute, _task}, 2_000
+    {pid, compute}
+  end
+
+  describe "a poll the provider never answers" do
+    setup do
+      FaultyProvider.reset()
+      on_exit(&FaultyProvider.reset/0)
+
+      base = [
+        provider: FaultyProvider,
+        gpu: :h100,
+        image: "x",
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: 10
+      ]
+
+      {:ok, base: base}
+    end
+
+    test "does not delay teardown, so the resource is still deleted", %{base: base} do
+      {pid, compute} = block_a_poll(base)
+
+      ref = Process.monitor(pid)
+      :ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "does not delay info/1 or touch/1", %{base: base} do
+      {_pid, compute} = block_a_poll(base)
+
+      assert {:ok, before} = ExAtlas.Orchestrator.info(compute.id)
+      assert :ok = ExAtlas.Orchestrator.touch(compute.id)
+      assert {:ok, touched} = ExAtlas.Orchestrator.info(compute.id)
+      assert touched.last_activity_ms >= before.last_activity_ms
     end
   end
 end

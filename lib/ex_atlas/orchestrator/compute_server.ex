@@ -25,6 +25,21 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   API will tolerate. Set `status_poll_ms: false` to opt out of upstream polling
   entirely.
 
+  ## The poll never runs in the callback
+
+  `get_compute/2` is an HTTP call against someone else's cloud, and the
+  provider clients allow retries: a single RunPod poll can hold a process for
+  around two minutes. So the poll runs in a task under
+  `ExAtlas.Orchestrator.TaskSupervisor` and its result arrives as a message.
+  Doing it inline parked the mailbox for the duration — `info/1` timed out,
+  `touch/1` was silently delayed, and worst of all a teardown request queued
+  behind the poll was brutal-killed by the supervisor's shutdown timer before
+  `terminate/2` could issue the `DELETE`, leaving the resource billing with
+  nothing left to reclaim it but the Reaper.
+
+  An in-flight poll is killed on teardown, and a result that arrives after we
+  stopped caring is ignored.
+
   ## Reacting to upstream death
 
   A poll that comes back dead broadcasts the cause (`{:status, :preempted}`,
@@ -54,6 +69,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   alias ExAtlas.Orchestrator.{ComputeRegistry, Events, UpstreamStatus}
 
+  @task_supervisor ExAtlas.Orchestrator.TaskSupervisor
+
   @default_idle_ttl_ms 30 * 60 * 1_000
   @default_heartbeat_interval_ms 60 * 1_000
 
@@ -65,6 +82,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # The only death we can both identify and usefully retry. See the moduledoc.
   @respawnable [:preempted]
+
+  # A poll is a background health check, not a user-facing request. The
+  # provider clients are tuned for the latter — RunPod's is 30s per attempt
+  # with three transient retries — which is far too long to leave a poll
+  # outstanding when the answer is only ever "still there?".
+  @poll_req_options [receive_timeout: 5_000, retry: false]
+
+  # Backstop for a poll that ignores its own timeout (a wedged connect, a
+  # provider module that blocks). Without it a stuck task would stall polling
+  # for this resource forever, since the next poll is only scheduled once the
+  # current one lands.
+  @poll_task_timeout_ms 10_000
+
+  # Teardown does one `DELETE` against the provider and must be allowed to
+  # finish it: the DynamicSupervisor default of 5s brutal-kills the tracker
+  # first, and a resource nobody deleted bills until the Reaper notices.
+  @shutdown_timeout_ms 30_000
 
   # The tracking options, as opposed to the `ExAtlas.Spec.ComputeRequest` and
   # provider-config options that share the same keyword list. Validated at the
@@ -93,6 +127,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           idle_ttl_ms: pos_integer(),
           heartbeat_ms: pos_integer(),
           status_poll_ms: pos_integer() | nil,
+          poll_task: Task.t() | nil,
           poll_failures: non_neg_integer(),
           upstream_present?: boolean(),
           respawn_limit: non_neg_integer(),
@@ -112,6 +147,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       id: {:compute_server, compute.id},
       start: {__MODULE__, :start_link, [{compute, opts}]},
       restart: :transient,
+      shutdown: @shutdown_timeout_ms,
       type: :worker
     }
   end
@@ -153,6 +189,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       idle_ttl_ms: tracking[:idle_ttl_ms],
       heartbeat_ms: tracking[:heartbeat_ms],
       status_poll_ms: poll_interval(tracking[:status_poll_ms]),
+      poll_task: nil,
       poll_failures: 0,
       upstream_present?: true,
       respawn_limit: respawn_limit(tracking[:on_failure]),
@@ -191,14 +228,47 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
-  def handle_info(:status_poll, state) do
-    state.compute.id
-    |> UpstreamStatus.observe(state.opts)
-    |> apply_observation(state)
+  def handle_info(:status_poll, %{poll_task: nil} = state) do
+    case start_poll(state) do
+      {:ok, task} ->
+        Process.send_after(self(), {:poll_timeout, task.ref}, @poll_task_timeout_ms)
+        {:noreply, %{state | poll_task: task}}
+
+      :error ->
+        apply_observation({:poll_failed, :no_task_supervisor}, state)
+    end
   end
+
+  # A poll is already in flight. Don't stack a second request on a provider
+  # that is evidently struggling, and don't schedule anything either — the
+  # in-flight poll schedules its successor when it lands.
+  def handle_info(:status_poll, state), do: {:noreply, state}
+
+  def handle_info({:poll_timeout, ref}, %{poll_task: %Task{ref: ref} = task} = state) do
+    Task.shutdown(task, :brutal_kill)
+    apply_observation({:poll_failed, :timeout}, %{state | poll_task: nil})
+  end
+
+  def handle_info({ref, observation}, %{poll_task: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    apply_observation(observation, %{state | poll_task: nil})
+  end
+
+  # The poll task died — a raise on the poll path, e.g. a key that resolves to
+  # nil or a body the translator can't read. We could not tell whether the
+  # resource is alive, and uncertainty is never a reason to tear one down.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{poll_task: %Task{ref: ref}} = state) do
+    apply_observation({:poll_failed, reason}, %{state | poll_task: nil})
+  end
+
+  # Late replies from a poll we already gave up on, and anything else. Because
+  # this server traps exits, an unmatched message would run `terminate/2` and
+  # DELETE a perfectly healthy resource.
+  def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(reason, state) do
+    cancel_poll(state)
     Events.broadcast(state.compute.id, {:terminating, reason})
 
     if state.upstream_present? do
@@ -292,6 +362,38 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:error, err} -> Events.broadcast(state.compute.id, {:terminate_failed, err})
     end
   end
+
+  # --- polling ---
+
+  @doc "Name of the `Task.Supervisor` that runs the status polls."
+  @spec task_supervisor_name() :: atom()
+  def task_supervisor_name, do: @task_supervisor
+
+  # The poll runs in a supervised, unlinked task so a provider that takes
+  # two minutes to answer cannot park this mailbox — `touch/1` and `info/1`
+  # keep working, and teardown wins the race for the resource.
+  defp start_poll(state) do
+    if Process.whereis(@task_supervisor) do
+      id = state.compute.id
+      opts = poll_opts(state.opts)
+
+      {:ok,
+       Task.Supervisor.async_nolink(@task_supervisor, fn -> UpstreamStatus.observe(id, opts) end)}
+    else
+      :error
+    end
+  end
+
+  defp poll_opts(opts) do
+    Keyword.put(
+      opts,
+      :req_options,
+      Keyword.merge(@poll_req_options, Keyword.get(opts, :req_options, []))
+    )
+  end
+
+  defp cancel_poll(%{poll_task: nil}), do: :ok
+  defp cancel_poll(%{poll_task: task}), do: Task.shutdown(task, :brutal_kill)
 
   # --- scheduling ---
 
