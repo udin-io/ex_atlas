@@ -26,6 +26,12 @@ defmodule ExAtlas.Orchestrator.Events do
       a live credential on a PubSub topic.
     * `{:respawn_failed, {reason, error}}` — the replacement could not be
       spawned; the server is shutting down.
+    * `{:task, outcome}` — a `mode: :task` session ended, and this is what
+      happened: `:completed`, `:timed_out`, or `{:failed, reason}`. Sent
+      *before* the `{:terminating, _}` / `{:status, :terminated}` pair, so a
+      subscriber that ignores task events still sees a correct lifecycle.
+      `:completed` means the container ended and the resource is gone — not
+      that the work succeeded; see `ExAtlas.Orchestrator.run_task/1`.
     * `{:terminating, reason}` — server is shutting down.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 
