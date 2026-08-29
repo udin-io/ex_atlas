@@ -288,6 +288,27 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
 
+    test "a crashed tracker is not restarted onto the resource it replaced", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _replacement}}, 2_000
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+
+      # A restart replays the original `{compute, opts}` — the id that was
+      # already replaced, and `respawns: 0`, so the budget resets and the
+      # tracker polls a resource that no longer exists.
+      _ = :sys.get_state(Process.whereis(ComputeSupervisor))
+
+      assert %{active: 0} = DynamicSupervisor.count_children(ComputeSupervisor)
+      assert {:error, :not_tracked} = ExAtlas.Orchestrator.info(old_id)
+    end
+
     test "a crash-looping image is not respawned", %{base: base} do
       {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))

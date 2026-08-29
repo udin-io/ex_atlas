@@ -40,6 +40,21 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   An in-flight poll is killed on teardown, and a result that arrives after we
   stopped caring is ignored.
 
+  ## Why a crashed tracker is not restarted
+
+  The child spec is `restart: :temporary`. A restart replays the original
+  `{compute, opts}`, and those go stale the moment anything moves: after a
+  respawn the tracker holds a different id, and after any non-brutal crash
+  `terminate/2` has already deleted the resource — so a restarted tracker
+  polls something that no longer exists, and with `on_failure` its respawn
+  budget is back to zero, letting it rent more replacements than
+  `max_attempts` allows.
+
+  Nothing is lost by not restarting: `terminate/2` runs on a crash and takes
+  the resource with it, and a brutal kill (which skips `terminate/2`) leaves
+  an orphan, which is precisely what `ExAtlas.Orchestrator.Reaper` exists to
+  reclaim.
+
   ## Reacting to upstream death
 
   A poll that comes back dead broadcasts the cause (`{:status, :preempted}`,
@@ -154,7 +169,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     %{
       id: {:compute_server, compute.id},
       start: {__MODULE__, :start_link, [{compute, opts}]},
-      restart: :transient,
+      restart: :temporary,
       shutdown: @shutdown_timeout_ms,
       type: :worker
     }
