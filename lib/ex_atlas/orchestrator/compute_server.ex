@@ -61,9 +61,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   image that `:failed` on this host will fail on the next one, so respawning it
   just crash-loops on a meter.
 
-  Per project conventions, callback bodies never wrap logic in `try/rescue` —
-  if a provider API raises, we let the server crash and the supervisor
-  handles restart policy. The `terminate/2` callback handles upstream teardown.
+  Per project conventions, callback bodies never wrap logic in `try/rescue`.
+  The poll needs no rescue anyway: it runs in its own task, so a provider that
+  raises — `Client.fetch_key!/1` on a key that resolves to nil, a translator
+  on a body it cannot read — arrives here as a `:DOWN` and is reported as
+  `{:poll_failed, reason}` like any other failure. That matters because this
+  server traps exits: a raise in the callback would run `terminate/2` and
+  DELETE a resource we never established was dead, which is the opposite of
+  the rule above. For the same reason `handle_info/2` has a catch-all, so a
+  stray message cannot destroy a live resource either.
   """
 
   use GenServer

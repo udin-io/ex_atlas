@@ -463,6 +463,54 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     {pid, compute}
   end
 
+  describe "a poll that blows up" do
+    setup do
+      FaultyProvider.reset()
+      on_exit(&FaultyProvider.reset/0)
+
+      base = [
+        provider: FaultyProvider,
+        gpu: :h100,
+        image: "x",
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: 10
+      ]
+
+      {:ok, base: base}
+    end
+
+    test "a raise is reported like any other failed poll", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      # `Client.fetch_key!/1` raises on a key that resolves to nil, and a
+      # malformed body can still raise in a translator. Neither is evidence
+      # that the resource died — but a raise in the callback would run
+      # `terminate/2` and DELETE it.
+      FaultyProvider.arm(:get_compute, :raise)
+
+      assert_receive {:atlas_compute, ^id, {:poll_failed, _reason}}, 2_000
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a stray message cannot end the session", %{base: base} do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(Keyword.put(base, :status_poll_ms, false))
+      ref = Process.monitor(pid)
+
+      send(pid, :a_message_from_somewhere_else)
+
+      # The call is handled after the stray message, so a reply proves the
+      # server survived it.
+      assert {:ok, _} = ExAtlas.Orchestrator.info(compute.id)
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
   describe "a poll the provider never answers" do
     setup do
       FaultyProvider.reset()
