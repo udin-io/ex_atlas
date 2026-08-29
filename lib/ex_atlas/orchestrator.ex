@@ -55,6 +55,12 @@ defmodule ExAtlas.Orchestrator do
 
   Returns `{:ok, pid, compute}` where `pid` is the tracking `GenServer` and
   `compute` is the `ExAtlas.Spec.Compute` normally returned by `ExAtlas.spawn_compute/1`.
+
+  The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
+  `:on_failure`, `:user_id`) are validated *before* the provider is called, so
+  a typo costs nothing: an unvalidated option that only blew up in the
+  tracker's `init/1` would leave the resource running — and billing — with
+  nothing tracking it.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}
@@ -62,14 +68,25 @@ defmodule ExAtlas.Orchestrator do
   def spawn(opts) do
     ensure_running!()
 
-    with {:ok, compute} <- ExAtlas.spawn_compute(opts) do
-      {:ok, pid} =
-        DynamicSupervisor.start_child(
-          ComputeSupervisor,
-          {ComputeServer, {compute, opts}}
-        )
+    with {:ok, _tracking} <- ComputeServer.validate_opts(opts),
+         {:ok, compute} <- ExAtlas.spawn_compute(opts) do
+      track(compute, opts)
+    end
+  end
 
-      {:ok, pid, compute}
+  defp track(compute, opts) do
+    case DynamicSupervisor.start_child(ComputeSupervisor, {ComputeServer, {compute, opts}}) do
+      {:ok, pid} ->
+        {:ok, pid, compute}
+
+      {:ok, pid, _info} ->
+        {:ok, pid, compute}
+
+      {:error, reason} ->
+        # The resource exists upstream but nothing will ever track it, so it
+        # would bill until the Reaper noticed. Take it down with the tracker.
+        _ = ExAtlas.terminate(compute.id, opts)
+        {:error, {:tracker_start_failed, reason}}
     end
   end
 

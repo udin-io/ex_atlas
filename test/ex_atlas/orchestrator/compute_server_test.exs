@@ -338,4 +338,56 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert third - second > second - first
     end
   end
+
+  describe "option validation" do
+    test "a non-positive :status_poll_ms is refused before anything is rented" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 status_poll_ms: 0
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a stringly-typed :status_poll_ms is refused" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 status_poll_ms: "30000"
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "`on_failure: :respawn` — the plausible typo — is refused" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 on_failure: :respawn
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a tracker that cannot start takes its resource down with it" do
+      stop_supervised!(ComputeSupervisor)
+
+      start_supervised!(
+        {DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one, max_children: 0}
+      )
+
+      assert {:error, {:tracker_start_failed, :max_children}} =
+               ExAtlas.Orchestrator.spawn(provider: :mock, gpu: :h100, image: "x")
+
+      # Nothing tracks it, so it must not survive the failure.
+      assert {:ok, [%{status: :terminated}]} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
 end

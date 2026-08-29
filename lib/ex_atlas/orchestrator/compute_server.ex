@@ -66,6 +66,27 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # The only death we can both identify and usefully retry. See the moduledoc.
   @respawnable [:preempted]
 
+  # The tracking options, as opposed to the `ExAtlas.Spec.ComputeRequest` and
+  # provider-config options that share the same keyword list. Validated at the
+  # `ExAtlas.Orchestrator.spawn/1` boundary — *before* the provider is asked to
+  # rent anything — so a typo can never leave a live resource behind an
+  # `init/1` that refuses to start.
+  @schema [
+    idle_ttl_ms: [type: :pos_integer, default: @default_idle_ttl_ms],
+    heartbeat_ms: [type: :pos_integer, default: @default_heartbeat_interval_ms],
+    status_poll_ms: [
+      type: {:or, [:pos_integer, {:in, [false]}]},
+      default: @default_status_poll_ms
+    ],
+    on_failure: [
+      type: {:or, [{:in, [:stop]}, {:tuple, [{:in, [:respawn]}, :non_neg_integer]}]},
+      default: :stop
+    ],
+    user_id: [type: :any, default: nil]
+  ]
+
+  @option_keys Keyword.keys(@schema)
+
   @type state :: %{
           compute: ExAtlas.Spec.Compute.t(),
           opts: keyword(),
@@ -95,6 +116,21 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     }
   end
 
+  @doc """
+  Validate the tracking options out of a spawn keyword list.
+
+  `ExAtlas.Orchestrator.spawn/1` calls this before the provider call so a bad
+  `:status_poll_ms` or a mistyped `:on_failure` is a plain `{:error, _}` rather
+  than an `init/1` crash on top of a resource that is already running (and
+  billing) upstream. Keys that belong to `ExAtlas.Spec.ComputeRequest` or to
+  the provider config are ignored here — each is validated by its own owner.
+  """
+  @spec validate_opts(keyword()) ::
+          {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
+  def validate_opts(opts) do
+    opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema)
+  end
+
   @doc "Bump last-activity so the idle reaper waits another `idle_ttl_ms`."
   def touch(pid), do: GenServer.cast(pid, :touch)
 
@@ -107,18 +143,22 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def init({compute, opts}) do
     Process.flag(:trap_exit, true)
 
+    # Already validated by `ExAtlas.Orchestrator.spawn/1`; re-run so a directly
+    # started tracker gets the same defaults and the same clear failure.
+    tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
+
     state = %{
       compute: compute,
       opts: opts,
-      idle_ttl_ms: Keyword.get(opts, :idle_ttl_ms, @default_idle_ttl_ms),
-      heartbeat_ms: Keyword.get(opts, :heartbeat_ms, @default_heartbeat_interval_ms),
-      status_poll_ms: poll_interval(opts),
+      idle_ttl_ms: tracking[:idle_ttl_ms],
+      heartbeat_ms: tracking[:heartbeat_ms],
+      status_poll_ms: poll_interval(tracking[:status_poll_ms]),
       poll_failures: 0,
       upstream_present?: true,
-      respawn_limit: respawn_limit(opts),
+      respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
       last_activity_ms: now_ms(),
-      user_id: Keyword.get(opts, :user_id)
+      user_id: tracking[:user_id]
     }
 
     Events.broadcast(compute.id, {:status, compute.status})
@@ -265,19 +305,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # --- opts ---
 
-  defp poll_interval(opts) do
-    case Keyword.get(opts, :status_poll_ms, @default_status_poll_ms) do
-      ms when is_integer(ms) and ms > 0 -> ms
-      falsy when falsy in [false, nil] -> nil
-    end
-  end
+  defp poll_interval(false), do: nil
+  defp poll_interval(ms) when is_integer(ms) and ms > 0, do: ms
 
-  defp respawn_limit(opts) do
-    case Keyword.get(opts, :on_failure, :stop) do
-      {:respawn, max} when is_integer(max) and max >= 0 -> max
-      :stop -> 0
-    end
-  end
+  defp respawn_limit(:stop), do: 0
+  defp respawn_limit({:respawn, max}), do: max
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 end
