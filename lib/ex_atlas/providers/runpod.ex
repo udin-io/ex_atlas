@@ -20,7 +20,7 @@ defmodule ExAtlas.Providers.RunPod do
   RunPod reports the following capability atoms:
 
       [:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp,
-       :symmetric_ports, :webhooks, :global_networking]
+       :symmetric_ports, :webhooks, :global_networking, :self_terminate]
 
   ## Spawn example
 
@@ -67,7 +67,8 @@ defmodule ExAtlas.Providers.RunPod do
       :raw_tcp,
       :symmetric_ports,
       :webhooks,
-      :global_networking
+      :global_networking,
+      :self_terminate
     ]
   end
 

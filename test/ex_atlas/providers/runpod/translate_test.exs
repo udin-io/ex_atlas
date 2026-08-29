@@ -31,6 +31,93 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert body["cloudType"] == "SECURE"
     end
 
+    test "no :command leaves dockerStartCmd unset so the image's own CMD runs" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      refute Map.has_key?(body, "dockerStartCmd")
+    end
+
+    test "self_terminate: false sends the command through verbatim" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["/app/train.sh", "--epochs", "3"],
+          self_terminate: false
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["dockerStartCmd"] == ["/app/train.sh", "--epochs", "3"]
+    end
+
+    @tag :tmp_dir
+    test "the self-terminating wrapper runs the command, then DELETEs the pod", %{tmp_dir: tmp} do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["sh", "-c", "echo ran > #{tmp}/ran"]
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp)
+
+      assert File.read!(Path.join(tmp, "ran")) == "ran\n"
+      assert log =~ "-X DELETE"
+      assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
+      assert log =~ "Authorization: Bearer pod-scoped-key"
+    end
+
+    @tag :tmp_dir
+    test "the pod is deleted even when the command exits non-zero", %{tmp_dir: tmp} do
+      # A crashed trainer that left the pod up would bill until the
+      # `:max_runtime_ms` backstop fired, which is the trap this exists to
+      # close. `trap ... EXIT` fires on any shell exit, not just a clean one.
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", command: ["sh", "-c", "exit 3"])
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {3, log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
+    end
+
+    @tag :tmp_dir
+    test "command arguments survive the shell wrapper intact", %{tmp_dir: tmp} do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["sh", "-c", "printf '%s' \"$1\" > #{tmp}/arg", "sh", "it's a $PATH; rm -rf /"]
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {0, _log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert File.read!(Path.join(tmp, "arg")) == "it's a $PATH; rm -rf /"
+    end
+
+    # Run a generated `dockerStartCmd` for real, with a `curl` shim ahead of
+    # everything else on PATH so the self-termination request is recorded
+    # rather than sent. Returns `{exit_status, curl_log}`.
+    defp run_start_cmd(["sh", "-c", script], tmp) do
+      shim = Path.join(tmp, "curl")
+      log = Path.join(tmp, "curl.log")
+      File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\n")
+      File.chmod!(shim, 0o755)
+
+      {_out, status} =
+        System.cmd("sh", ["-c", script],
+          stderr_to_stdout: true,
+          env: [
+            {"PATH", tmp <> ":" <> System.get_env("PATH", "/usr/bin:/bin")},
+            {"RUNPOD_POD_ID", "pod_abc"},
+            {"RUNPOD_API_KEY", "pod-scoped-key"}
+          ]
+        )
+
+      {status, File.read!(log)}
+    end
+
     test "mints a bearer token when auth: :bearer" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", auth: :bearer)
       {body, auth} = Translate.compute_request_to_pod_create(req)

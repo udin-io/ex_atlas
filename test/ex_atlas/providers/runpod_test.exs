@@ -20,6 +20,7 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert :serverless in caps
       assert :http_proxy in caps
       assert :spot in caps
+      assert :self_terminate in caps
     end
   end
 

@@ -9,6 +9,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   """
 
   alias ExAtlas.Auth.Token, as: AuthToken
+  alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Spec
 
   @doc """
@@ -39,7 +40,8 @@ defmodule ExAtlas.Providers.RunPod.Translate do
         "volumeInGb" => req.volume_gb,
         "networkVolumeId" => req.network_volume_id,
         "templateId" => req.template_id,
-        "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints)
+        "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints),
+        "dockerStartCmd" => docker_start_cmd(req)
       }
       |> Map.merge(stringify(req.provider_opts))
       |> drop_nils()
@@ -120,6 +122,52 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   defp format_port({port, :http}), do: "#{port}/http"
   defp format_port({port, :tcp}), do: "#{port}/tcp"
+
+  # --- start command + self-termination ---
+
+  # RunPod treats an absent and an empty `dockerStartCmd` alike: the image's own
+  # CMD runs. Wrapping an empty command would fire the trap immediately and
+  # delete the pod before anything ran, so both mean "leave it unset".
+  defp docker_start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
+  defp docker_start_cmd(%Spec.ComputeRequest{command: []}), do: nil
+  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false}), do: cmd
+
+  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd}),
+    do: ["sh", "-c", self_terminating(cmd)]
+
+  # A pod whose start command has exited does not stop: RunPod's REST v1 `Pod`
+  # schema carries no container state — no `runtime`, no `currentStatus`, no
+  # exit code — and `desiredStatus` is a *desired* state that changes only when
+  # somebody asks. So the pod keeps reporting `RUNNING` and keeps billing, and
+  # no amount of polling `GET /pods/:id` can tell that the work is done.
+  #
+  # The only party that knows the container ended is the container. RunPod
+  # injects `RUNPOD_POD_ID` and a pod-scoped `RUNPOD_API_KEY` into every
+  # container, so it can delete itself with no secret of ours travelling to the
+  # pod. `trap … EXIT INT TERM` means a crash and a signal clean up too, not
+  # just a clean exit.
+  #
+  # `curl` rather than `runpodctl`: curl is in nearly every base image and
+  # runpodctl in nearly none. An image with neither wants
+  # `self_terminate: false` and the orchestrator's `:max_runtime_ms` backstop.
+  #
+  # What this cannot cover: SIGKILL, the OOM killer, and a wedged process —
+  # nothing runs in the container at all in those cases. That is precisely the
+  # set `ExAtlas.Orchestrator.run_task/1`'s deadline exists for, which is why
+  # the two mechanisms are both required rather than alternatives.
+  defp self_terminating(command) do
+    url = "#{Client.management_url()}/pods/$RUNPOD_POD_ID"
+
+    "atlas_self_terminate() { curl -sS -X DELETE " <>
+      "-H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\"; }; " <>
+      "trap atlas_self_terminate EXIT INT TERM; " <> shell_join(command)
+  end
+
+  defp shell_join(command), do: command |> Enum.map_join(" ", &shell_quote/1)
+
+  # Single-quote everything and escape embedded single quotes the POSIX way, so
+  # a command argument can never be read as shell syntax by the wrapper.
+  defp shell_quote(arg), do: "'" <> String.replace(arg, "'", "'\\''") <> "'"
 
   defp atomize_for_runpod_env(env) when is_map(env),
     do: Enum.map(env, fn {k, v} -> %{"key" => to_string(k), "value" => to_string(v)} end)

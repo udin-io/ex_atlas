@@ -5,6 +5,28 @@ defmodule ExAtlas.Spec.ComputeRequest do
   Fields that a given provider doesn't natively support are simply ignored by
   that provider's translator. Fields unique to a provider can be passed through
   `:provider_opts`.
+
+  ## Running a command to completion
+
+  `:command` overrides the image's start command (RunPod's `dockerStartCmd`),
+  which is how you run batch work rather than a long-lived service:
+
+      command: ["/app/train.sh", "--epochs", "3"]
+
+  `:self_terminate` (default `true`, and only meaningful alongside `:command`)
+  asks the provider's translator to wrap that command in a shell that destroys
+  the resource once it ends — on a clean exit, a non-zero exit, or a signal.
+
+  It defaults to on because the alternative is a bill. RunPod's REST API
+  exposes no container state at all: when `dockerStartCmd` exits the pod stays
+  `desiredStatus: "RUNNING"`, the GPU stays reserved, and nothing polling the
+  API can tell the difference. Self-termination is the only thing that turns a
+  finished container into an observable event.
+
+  Set `self_terminate: false` for an image with no shell or no `curl`, or when
+  you want to keep the resource up for inspection after the command ends. Then
+  the only thing that will ever stop it is
+  `ExAtlas.Orchestrator.run_task/1`'s `:max_runtime_ms`, or you.
   """
 
   @enforce_keys [:gpu]
@@ -23,6 +45,8 @@ defmodule ExAtlas.Spec.ComputeRequest do
             template_id: nil,
             auth: :none,
             idle_ttl_ms: nil,
+            command: nil,
+            self_terminate: true,
             provider_opts: %{}
 
   @type port_spec :: {pos_integer(), :http | :tcp}
@@ -45,6 +69,8 @@ defmodule ExAtlas.Spec.ComputeRequest do
           template_id: String.t() | nil,
           auth: auth_scheme(),
           idle_ttl_ms: pos_integer() | nil,
+          command: [String.t()] | nil,
+          self_terminate: boolean(),
           provider_opts: map()
         }
 
@@ -64,6 +90,8 @@ defmodule ExAtlas.Spec.ComputeRequest do
     template_id: [type: {:or, [:string, nil]}, default: nil],
     auth: [type: {:in, [:none, :bearer, :signed_url]}, default: :none],
     idle_ttl_ms: [type: {:or, [:pos_integer, nil]}, default: nil],
+    command: [type: {:or, [{:list, :string}, nil]}, default: nil],
+    self_terminate: [type: :boolean, default: true],
     provider_opts: [type: :map, default: %{}]
   ]
 
