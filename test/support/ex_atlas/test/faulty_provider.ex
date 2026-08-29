@@ -20,6 +20,10 @@ defmodule ExAtlas.Test.FaultyProvider do
     * `{:block, pid}` — send `{:blocked, callback, self()}` to `pid` and wait
       for `:release` before delegating. Lets a test hold a call open with no
       sleeps and no timing assumptions.
+    * `{:block_after, pid}` — the same, but *after* delegating: the provider
+      has already done the work and the caller has not seen the answer yet.
+      That is the window in which a resource exists upstream with nothing
+      tracking it locally.
     * `:raise` — raise, the way `Client.fetch_key!/1` does on a missing key.
     * `{:error, error}` — return `{:error, error}`.
   """
@@ -85,6 +89,14 @@ defmodule ExAtlas.Test.FaultyProvider do
 
         receive do
           :release -> delegate.()
+        end
+
+      {:block_after, pid} ->
+        result = delegate.()
+        send(pid, {:blocked, callback, self()})
+
+        receive do
+          :release -> result
         end
 
       :raise ->

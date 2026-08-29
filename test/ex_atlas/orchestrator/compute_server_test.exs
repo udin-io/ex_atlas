@@ -1,30 +1,11 @@
 defmodule ExAtlas.Orchestrator.ComputeServerTest do
   use ExUnit.Case, async: false
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor, Events}
+  alias ExAtlas.Orchestrator.{ComputeSupervisor, Events}
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.FaultyProvider
 
-  setup do
-    Application.put_env(:ex_atlas, :start_orchestrator, true)
-    Application.put_env(:ex_atlas, :default_provider, :mock)
-    Mock.reset()
-
-    start_supervised!({Registry, keys: :unique, name: ComputeRegistry})
-    start_supervised!({Task.Supervisor, name: ComputeServer.task_supervisor_name()})
-    start_supervised!({DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one})
-
-    if Code.ensure_loaded?(Phoenix.PubSub) do
-      start_supervised!({Phoenix.PubSub, name: ExAtlas.PubSub})
-    end
-
-    on_exit(fn ->
-      Application.delete_env(:ex_atlas, :start_orchestrator)
-      Application.delete_env(:ex_atlas, :default_provider)
-    end)
-
-    :ok
-  end
+  setup do: ExAtlas.Test.Orchestrator.start!()
 
   test "spawn → touch → terminate teardown calls provider terminate" do
     {:ok, pid, compute} =
