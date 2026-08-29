@@ -51,9 +51,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   With `on_failure: {:respawn, max_attempts}` the server replaces a *preempted*
   resource instead of stopping: it spawns a fresh one from the same opts,
-  re-keys itself in the registry under the new id, and broadcasts
-  `{:respawned, compute}` on the old topic so subscribers can follow. That
-  suits checkpoint-based batch work on spot capacity.
+  terminates the old one if the provider still has it, re-keys itself in the
+  registry under the new id, and broadcasts `{:respawned, compute}` on the old
+  topic so subscribers can follow. That suits checkpoint-based batch work on
+  spot capacity.
 
   Preemption is the only cause worth retrying, and the option is narrow on
   purpose. A resource that was stopped or terminated was ended by someone; an
@@ -330,6 +331,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     case ExAtlas.spawn_compute(state.opts) do
       {:ok, replacement} ->
+        release_old(state)
         :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
         {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
 
@@ -353,6 +355,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         {:stop, :normal, state}
     end
   end
+
+  # A death does not always mean the resource is gone. A reclaimed spot pod
+  # reads as `desiredStatus: EXITED` — dead to us, still present upstream,
+  # still billable, and invisible to the Reaper, which lists only running
+  # resources. The failed-respawn branch already stops (and so terminates it
+  # via `terminate/2`); the success branch must delete it explicitly, or a
+  # long-running spot session leaks one carcass per preemption.
+  defp release_old(%{upstream_present?: false}), do: :ok
+  defp release_old(state), do: terminate_upstream(state)
 
   # --- teardown ---
 

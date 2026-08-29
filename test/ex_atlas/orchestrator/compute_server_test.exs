@@ -217,6 +217,34 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert replacement.id in ExAtlas.Orchestrator.list_ids()
     end
 
+    test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do
+      {:ok, _pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      # A reclaimed spot pod reads as `desiredStatus: EXITED` — dead to us but
+      # still present upstream, still billable, and invisible to the Reaper,
+      # which only lists resources with `status: :running`. Every other respawn
+      # test forgets the pod instead, which is the nil-upstream path.
+      :ok = Mock.set_status(old_id, :stopped)
+
+      assert_receive {:atlas_compute, ^old_id, {:status, :preempted}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _replacement}}, 2_000
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(old_id, provider: :mock)
+    end
+
+    test "a replacement for a pod the provider forgot deletes nothing", %{base: base} do
+      {:ok, _pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      :ok = Mock.forget(old_id)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _replacement}}, 2_000
+      refute_received {:atlas_compute, ^old_id, {:terminate_failed, _}}
+    end
+
     test "the replacement is torn down with the session", %{base: base} do
       {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
