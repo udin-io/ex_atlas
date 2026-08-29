@@ -154,6 +154,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           heartbeat_ms: pos_integer(),
           status_poll_ms: pos_integer() | nil,
           poll_task: Task.t() | nil,
+          poll_timeout: reference() | nil,
           poll_failures: non_neg_integer(),
           upstream_deletable?: boolean(),
           respawn_limit: non_neg_integer(),
@@ -216,6 +217,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       heartbeat_ms: tracking[:heartbeat_ms],
       status_poll_ms: poll_interval(tracking[:status_poll_ms]),
       poll_task: nil,
+      poll_timeout: nil,
       poll_failures: 0,
       upstream_deletable?: true,
       respawn_limit: respawn_limit(tracking[:on_failure]),
@@ -257,8 +259,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def handle_info(:status_poll, %{poll_task: nil} = state) do
     case start_poll(state) do
       {:ok, task} ->
-        Process.send_after(self(), {:poll_timeout, task.ref}, @poll_task_timeout_ms)
-        {:noreply, %{state | poll_task: task}}
+        timer = Process.send_after(self(), {:poll_timeout, task.ref}, @poll_task_timeout_ms)
+        {:noreply, %{state | poll_task: task, poll_timeout: timer}}
 
       :error ->
         apply_observation({:poll_failed, :no_task_supervisor}, state)
@@ -272,19 +274,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   def handle_info({:poll_timeout, ref}, %{poll_task: %Task{ref: ref} = task} = state) do
     Task.shutdown(task, :brutal_kill)
-    apply_observation({:poll_failed, :timeout}, %{state | poll_task: nil})
+    apply_observation({:poll_failed, :timeout}, clear_poll(state))
   end
 
   def handle_info({ref, observation}, %{poll_task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
-    apply_observation(observation, %{state | poll_task: nil})
+    apply_observation(observation, clear_poll(state))
   end
 
   # The poll task died — a raise on the poll path, e.g. a key that resolves to
   # nil or a body the translator can't read. We could not tell whether the
   # resource is alive, and uncertainty is never a reason to tear one down.
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{poll_task: %Task{ref: ref}} = state) do
-    apply_observation({:poll_failed, reason}, %{state | poll_task: nil})
+    apply_observation({:poll_failed, reason}, clear_poll(state))
   end
 
   # Late replies from a poll we already gave up on, and anything else. Because
@@ -438,6 +440,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       :req_options,
       Keyword.merge(@poll_req_options, Keyword.get(opts, :req_options, []))
     )
+  end
+
+  # Drop the backstop timer with the poll it was guarding, so a landed poll
+  # doesn't leave a stray message to be swept up by the catch-all later.
+  defp clear_poll(%{poll_timeout: timer} = state) do
+    if timer, do: Process.cancel_timer(timer)
+    %{state | poll_task: nil, poll_timeout: nil}
   end
 
   defp cancel_poll(%{poll_task: nil}), do: :ok
