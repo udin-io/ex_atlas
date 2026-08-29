@@ -161,7 +161,9 @@ sends a `:ping` every 30 seconds and users normally stay active,
 
 1. **Node crashes.** When the Phoenix node restarts, the Reaper finds
    orphan pods (live on RunPod, not tracked locally, name prefix matches)
-   and terminates them within `:reap_interval_ms`.
+   and terminates them within `:reap_interval_ms` — once they are past
+   `:reap_grace_ms`, which spares resources whose tracker is still being
+   registered.
 2. **LiveView disconnect without clean shutdown.** The `ComputeServer`'s
    idle timer fires regardless of what's talking to it.
 3. **Provider API hiccups.** `terminate/2` errors are logged and broadcast

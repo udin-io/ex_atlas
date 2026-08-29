@@ -324,7 +324,8 @@ config :ex_atlas, :fly,         api_key: System.get_env("FLY_API_TOKEN")
 config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY")
 config :ex_atlas, :vast,        api_key: System.get_env("VAST_API_KEY")
 
-# Start the orchestrator (Registry + DynamicSupervisor + PubSub + Reaper).
+# Start the orchestrator (Registry + Task.Supervisor + DynamicSupervisor +
+# PubSub + Reaper).
 # When false (default), ExAtlas boots no processes.
 config :ex_atlas, start_orchestrator: true
 
@@ -332,7 +333,8 @@ config :ex_atlas, start_orchestrator: true
 config :ex_atlas, :orchestrator,
   reap_interval_ms: 60_000,
   reap_providers: [:runpod],
-  reap_name_prefix: "atlas-"     # safety switch: only reap resources ExAtlas spawned
+  reap_name_prefix: "atlas-",    # safety switch: only reap resources ExAtlas spawned
+  reap_grace_ms: 60_000          # spare resources too young to have a tracker yet
 ```
 
 **Default environment variable names** used when nothing else is set:
@@ -572,19 +574,21 @@ ExAtlas.Orchestrator.UpstreamStatus.observe(pod_id, provider: :runpod, spot: tru
 Every state change is broadcast over `ExAtlas.PubSub` on the topic
 `"compute:<id>"` as `{:atlas_compute, id, event}`:
 
-| Event                            | Emitted when                                      |
-| -------------------------------- | ------------------------------------------------- |
-| `{:status, status}`              | `ComputeServer` starts, with the resource's status |
-| `{:heartbeat, monotonic_ms}`     | Heartbeat tick (no idle timeout)                  |
-| `{:status, status}`              | A status poll saw the upstream status change      |
-| `{:status, :preempted}`          | A `spot: true` resource was reclaimed             |
-| `{:status, :failed \| :stopped \| :vanished}` | Poll found the resource dead        |
-| `{:poll_failed, error}`          | A status poll couldn't reach the provider         |
-| `{:respawned, new_id}`           | Preempted resource replaced (sent on the old id)  |
-| `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned               |
-| `{:terminating, reason}`         | Server is about to shut down                      |
-| `{:status, :terminated}`         | Upstream provider confirmed termination           |
-| `{:terminate_failed, error}`     | Upstream `terminate` call returned an error       |
+| Event                                | Emitted when                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------------------ |
+| `{:status, status}`                  | `ComputeServer` starts (whatever the resource's status is), and on every upstream status change |
+| `{:heartbeat, monotonic_ms}`         | Heartbeat tick (no idle timeout)                                               |
+| `{:status, :preempted}`              | A `spot: true` resource was reclaimed                                          |
+| `{:status, :failed \| :stopped \| :vanished}` | A poll found the resource dead                                       |
+| `{:poll_failed, error}`              | A status poll couldn't reach the provider, or blew up trying                    |
+| `{:respawned, new_id}`               | Preempted resource replaced (sent on the old id)                               |
+| `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned                                                |
+| `{:terminating, reason}`             | Server is about to shut down                                                   |
+| `{:status, :terminated}`             | Upstream provider confirmed termination, or had nothing left to terminate       |
+| `{:terminate_failed, error}`         | Upstream `terminate` call returned an error                                    |
+
+`{:terminating, _}` followed by `{:status, :terminated}` is the end-of-session
+signal; no individual status is.
 
 Subscribe in a LiveView:
 
@@ -604,7 +608,7 @@ and:
 1. Lists each configured provider's running resources.
 2. Compares against the resources tracked by the local `ComputeRegistry`.
 3. Terminates any orphan whose `:name` starts with `:reap_name_prefix`
-   (default `"atlas-"`).
+   (default `"atlas-"`) and that is older than `:reap_grace_ms`.
 
 The prefix is a **safety switch** so ExAtlas never touches pods created by
 other tools on the same cloud account. Set it to `""` to disable.
