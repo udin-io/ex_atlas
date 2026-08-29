@@ -109,6 +109,17 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       assert Translate.pod_to_compute(pod).created_at == nil
     end
+
+    test "a desiredStatus outside the enum reads as :provisioning, never as dead" do
+      # The enum is RUNNING | EXITED | TERMINATED. Anything else is a pod we
+      # cannot classify, and `UpstreamStatus` counts :provisioning as alive —
+      # the same "uncertainty never tears a resource down" rule the poller runs
+      # on.
+      assert Translate.pod_to_compute(%{"id" => "abc"}).status == :provisioning
+
+      assert Translate.pod_to_compute(%{"id" => "abc", "desiredStatus" => "FAILED"}).status ==
+               :provisioning
+    end
   end
 
   describe "job_response_to_job/2" do

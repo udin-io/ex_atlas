@@ -124,10 +124,17 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp atomize_for_runpod_env(env) when is_map(env),
     do: Enum.map(env, fn {k, v} -> %{"key" => to_string(k), "value" => to_string(v)} end)
 
+  # RunPod's `desiredStatus` enum is exactly RUNNING | EXITED | TERMINATED —
+  # and it is a *desired* state, so it changes only when somebody asks. Nothing
+  # in REST v1 reports container state, which is why a pod whose
+  # `dockerStartCmd` has exited still reads as RUNNING.
+  #
+  # A value outside the enum falls through to `:provisioning` on purpose: an
+  # unclassifiable pod is not a dead one, and `UpstreamStatus` counts
+  # `:provisioning` as alive rather than tearing the resource down.
   defp pod_status(%{"desiredStatus" => "RUNNING"}), do: :running
   defp pod_status(%{"desiredStatus" => "EXITED"}), do: :stopped
   defp pod_status(%{"desiredStatus" => "TERMINATED"}), do: :terminated
-  defp pod_status(%{"desiredStatus" => "FAILED"}), do: :failed
   defp pod_status(_), do: :provisioning
 
   defp pod_ports(%{"portMappings" => mappings}) when is_list(mappings) do
