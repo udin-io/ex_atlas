@@ -74,6 +74,26 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert compute.status == :running
     end
 
+    test "carries an age the Reaper's grace window can use", %{bypass: bypass, ctx_opts: opts} do
+      # `:reap_grace_ms` spares resources younger than the window, and can only
+      # do that for a resource whose `:created_at` survives the round trip.
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "id" => "pod_abc",
+            "desiredStatus" => "RUNNING",
+            "lastStartedAt" => "2024-07-12T19:14:40.144Z"
+          })
+        )
+      end)
+
+      assert {:ok, compute} = ExAtlas.get_compute("pod_abc", opts)
+      assert compute.created_at == ~U[2024-07-12 19:14:40.144Z]
+    end
+
     test "a 200 whose body is not a pod object is a :provider error, not a crash", %{
       bypass: bypass,
       ctx_opts: opts

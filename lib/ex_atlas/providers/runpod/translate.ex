@@ -181,7 +181,14 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp first_gpu_type(%{"machine" => %{"gpuTypeId" => id}}), do: id
   defp first_gpu_type(_), do: nil
 
-  defp parse_created_at(%{"createdAt" => s}) when is_binary(s) do
+  # RunPod's REST v1 `Pod` schema has no `createdAt`. Its only machine-readable
+  # timestamp is `lastStartedAt` ("The UTC timestamp when a Pod was last
+  # started"); `lastStatusChange` is prose, not a date. So last-start is what
+  # `Compute.created_at` can honestly report — and it is the better input for
+  # the question the field is actually asked, `Reaper` deciding whether a
+  # resource is too young to judge: a pod that was just (re)started is freshly
+  # rented no matter when its record was first written.
+  defp parse_created_at(%{"lastStartedAt" => s}) when is_binary(s) do
     case DateTime.from_iso8601(s) do
       {:ok, dt, _} -> dt
       _ -> nil

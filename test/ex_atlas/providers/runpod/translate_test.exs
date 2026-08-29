@@ -78,6 +78,37 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       http_port = Enum.find(compute.ports, &(&1.protocol == :http))
       assert http_port.url == "https://pod_42-8000.proxy.runpod.net"
     end
+
+    test "reads created_at from lastStartedAt, the only timestamp REST v1 carries" do
+      pod = %{
+        "id" => "abc",
+        "desiredStatus" => "RUNNING",
+        "lastStartedAt" => "2024-07-12T19:14:40.144Z"
+      }
+
+      compute = Translate.pod_to_compute(pod)
+
+      assert compute.created_at == ~U[2024-07-12 19:14:40.144Z]
+    end
+
+    test "created_at is nil when the pod carries no usable timestamp" do
+      # `lastStatusChange` is prose ("Rented by User: Fri Jul 12 2024 …"), not a
+      # timestamp, so a pod that only has that one still has no age.
+      pod = %{
+        "id" => "abc",
+        "desiredStatus" => "RUNNING",
+        "lastStatusChange" => "Rented by User: Fri Jul 12 2024 15:14:40 GMT-0400"
+      }
+
+      assert Translate.pod_to_compute(pod).created_at == nil
+      assert Translate.pod_to_compute(%{"id" => "abc"}).created_at == nil
+    end
+
+    test "an unparseable lastStartedAt is nil rather than a crash" do
+      pod = %{"id" => "abc", "desiredStatus" => "RUNNING", "lastStartedAt" => "not a date"}
+
+      assert Translate.pod_to_compute(pod).created_at == nil
+    end
   end
 
   describe "job_response_to_job/2" do
