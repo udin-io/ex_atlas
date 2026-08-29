@@ -218,9 +218,21 @@ ExAtlas.Orchestrator.spawn(
 
 The tracking process survives the swap and re-keys itself under the new pod
 id, so `touch/1`, `info/1` and teardown keep working. Subscribers get
-`{:respawned, compute}` on the *original* topic — that message carries the new
-id, ports and token, and is your cue to `subscribe` to the new topic if you
-follow sessions by id.
+`{:respawned, new_id}` on the *original* topic — your cue to subscribe to the
+new topic and read the replacement:
+
+```elixir
+def handle_info({:atlas_compute, _old_id, {:respawned, new_id}}, socket) do
+  Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> new_id)
+  {:ok, %{compute: compute}} = ExAtlas.Orchestrator.info(new_id)
+
+  {:noreply, assign(socket, compute: compute)}
+end
+```
+
+The event deliberately carries the id alone. `compute.auth` holds a live
+bearer token, and broadcasting it would put a credential on a topic every
+subscriber — on every node — can read.
 
 ### Choosing a poll interval
 

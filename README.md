@@ -548,11 +548,14 @@ you asking is reported as `{:status, :preempted}`. On-demand resources keep
 the literal reason (`:stopped`, `:terminated`, `:vanished`).
 
 With `on_failure: {:respawn, n}` a preempted resource is replaced from the
-same opts rather than ending the session: the tracker re-keys itself under the
-new id and emits `{:respawned, compute}` on the *old* topic, which is how a
-LiveView learns the new URL and token. Only preemption is retried — a stopped
-or terminated resource was ended by someone, and an image that `:failed` here
-will fail on the next host too.
+same opts rather than ending the session: the tracker terminates the old
+resource if the provider still has it, re-keys itself under the new id, and
+emits `{:respawned, new_id}` on the *old* topic. The event carries the id and
+nothing else — the replacement's URL and bearer token come from
+`ExAtlas.Orchestrator.info(new_id)`, which is readable by the time the event
+lands, and a live credential has no business on a PubSub topic. Only
+preemption is retried — a stopped or terminated resource was ended by someone,
+and an image that `:failed` here will fail on the next host too.
 
 `ExAtlas.Orchestrator.UpstreamStatus` is the primitive underneath, usable on
 its own if you want the classification without a tracker process:
@@ -571,13 +574,13 @@ Every state change is broadcast over `ExAtlas.PubSub` on the topic
 
 | Event                            | Emitted when                                      |
 | -------------------------------- | ------------------------------------------------- |
-| `{:status, :running}`            | `ComputeServer` starts                            |
+| `{:status, status}`              | `ComputeServer` starts, with the resource's status |
 | `{:heartbeat, monotonic_ms}`     | Heartbeat tick (no idle timeout)                  |
 | `{:status, status}`              | A status poll saw the upstream status change      |
 | `{:status, :preempted}`          | A `spot: true` resource was reclaimed             |
 | `{:status, :failed \| :stopped \| :vanished}` | Poll found the resource dead        |
 | `{:poll_failed, error}`          | A status poll couldn't reach the provider         |
-| `{:respawned, compute}`          | Preempted resource replaced (sent on the old id)  |
+| `{:respawned, new_id}`           | Preempted resource replaced (sent on the old id)  |
 | `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned               |
 | `{:terminating, reason}`         | Server is about to shut down                      |
 | `{:status, :terminated}`         | Upstream provider confirmed termination           |
@@ -606,11 +609,20 @@ and:
 The prefix is a **safety switch** so ExAtlas never touches pods created by
 other tools on the same cloud account. Set it to `""` to disable.
 
-The Reaper and the status poller look in opposite directions and don't
-overlap: the Reaper asks "is anything running that nothing is tracking?"
-(provider → local), while each tracker asks "is the thing I track still
-alive?" (local → provider). Between them, a resource can neither outlive its
-tracker nor be believed alive after it dies.
+The Reaper and the status poller look in opposite directions: the Reaper asks
+"is anything running that nothing is tracking?" (provider → local), while each
+tracker asks "is the thing I track still alive?" (local → provider). Between
+them, a resource can neither outlive its tracker nor be believed alive after
+it dies.
+
+They do meet in one place. A resource is created upstream *before* its tracker
+is registered — by `spawn/1`, and again by every respawn — so for the duration
+of that provider call it looks exactly like an orphan. The Reaper therefore
+leaves resources younger than `:reap_grace_ms` (default: one reap interval)
+alone, and only resources reporting no `created_at` at all skip the grace.
+Shorten the grace and you shorten how long a genuine orphan bills; shorten it
+below your provider's worst-case spawn latency and the Reaper starts killing
+brand-new resources.
 
 ## Phoenix LiveDashboard integration
 

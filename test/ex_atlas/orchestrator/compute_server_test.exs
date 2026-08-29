@@ -200,6 +200,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
         gpu: :h100,
         image: "x",
         spot: true,
+        auth: :bearer,
         idle_ttl_ms: 60_000,
         heartbeat_ms: 60_000,
         status_poll_ms: 30,
@@ -218,15 +219,22 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       :ok = Mock.forget(old_id)
 
       assert_receive {:atlas_compute, ^old_id, {:status, :preempted}}, 2_000
-      assert_receive {:atlas_compute, ^old_id, {:respawned, replacement}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
 
-      refute replacement.id == old_id
+      # The event carries an id, not the record: the replacement's auth handle
+      # holds a live bearer token, which has no business on a PubSub topic.
+      assert is_binary(new_id)
+      refute new_id == old_id
       refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
 
-      assert {:ok, %{compute: %{id: new_id}}} = ExAtlas.Orchestrator.info(replacement.id)
-      assert new_id == replacement.id
+      # Re-keying happens before the broadcast, so the replacement — URL, token
+      # and all — is readable the moment a subscriber sees the event.
+      assert {:ok, %{compute: %{id: ^new_id, auth: %{token: token}}}} =
+               ExAtlas.Orchestrator.info(new_id)
+
+      assert is_binary(token)
       assert {:error, :not_tracked} = ExAtlas.Orchestrator.info(old_id)
-      assert replacement.id in ExAtlas.Orchestrator.list_ids()
+      assert new_id in ExAtlas.Orchestrator.list_ids()
     end
 
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do
@@ -241,7 +249,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       :ok = Mock.set_status(old_id, :stopped)
 
       assert_receive {:atlas_compute, ^old_id, {:status, :preempted}}, 2_000
-      assert_receive {:atlas_compute, ^old_id, {:respawned, _replacement}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _new_id}}, 2_000
 
       assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(old_id, provider: :mock)
     end
@@ -253,7 +261,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       :ok = Mock.forget(old_id)
 
-      assert_receive {:atlas_compute, ^old_id, {:respawned, _replacement}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _new_id}}, 2_000
       refute_received {:atlas_compute, ^old_id, {:terminate_failed, _}}
     end
 
@@ -262,13 +270,13 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
       :ok = Mock.forget(compute.id)
 
-      assert_receive {:atlas_compute, _, {:respawned, replacement}}, 2_000
+      assert_receive {:atlas_compute, _, {:respawned, new_id}}, 2_000
 
       ref = Process.monitor(pid)
-      :ok = ExAtlas.Orchestrator.stop_tracked(replacement.id)
+      :ok = ExAtlas.Orchestrator.stop_tracked(new_id)
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
 
-      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(replacement.id, provider: :mock)
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(new_id, provider: :mock)
     end
 
     test "the session ends once the respawn budget is spent", %{base: base} do
@@ -277,10 +285,9 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       ref = Process.monitor(pid)
 
       :ok = Mock.forget(compute.id)
-      assert_receive {:atlas_compute, _, {:respawned, replacement}}, 2_000
+      assert_receive {:atlas_compute, _, {:respawned, new_id}}, 2_000
 
-      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(replacement.id))
-      new_id = replacement.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
       :ok = Mock.forget(new_id)
 
       assert_receive {:atlas_compute, ^new_id, {:status, :preempted}}, 2_000
@@ -312,7 +319,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       old_id = compute.id
 
       :ok = Mock.forget(old_id)
-      assert_receive {:atlas_compute, ^old_id, {:respawned, _replacement}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _new_id}}, 2_000
 
       ref = Process.monitor(pid)
       Process.exit(pid, :kill)

@@ -18,9 +18,12 @@ defmodule ExAtlas.Orchestrator.Events do
     * `{:poll_failed, error}` — a status poll could not reach the provider (or
       could not make sense of the answer). The resource is *not* presumed dead;
       the poller backs off and tries again.
-    * `{:respawned, compute}` — a preempted resource was replaced. Sent on the
-      **old** id's topic, carrying the replacement, so a subscriber can follow
-      the session to its new id, URL and token.
+    * `{:respawned, new_id}` — a preempted resource was replaced. Sent on the
+      **old** id's topic so a subscriber can follow the session, then subscribe
+      to `topic(new_id)`. It carries the id alone; the replacement's URL and
+      bearer token come from `ExAtlas.Orchestrator.info/1`, which is already
+      readable by the time the event is sent. Broadcasting the record would put
+      a live credential on a PubSub topic.
     * `{:respawn_failed, {reason, error}}` — the replacement could not be
       spawned; the server is shutting down.
     * `{:terminating, reason}` — server is shutting down.

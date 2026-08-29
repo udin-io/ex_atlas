@@ -49,8 +49,21 @@ the audit recommendations.
     for resources spawned with `spot: true` that stop, are terminated, or
     vanish unbidden.
   - Optional `on_failure: {:respawn, max_attempts}` replaces a preempted
-    resource from the same opts, re-keying the tracker under the new id and
-    emitting `{:respawned, compute}` on the old topic.
+    resource from the same opts, terminating the old one if the provider still
+    has it, re-keying the tracker under the new id and emitting
+    `{:respawned, new_id}` on the old topic. The id travels alone — the
+    replacement's URL and bearer token are read back with
+    `ExAtlas.Orchestrator.info/1` rather than broadcast.
+  - The poll itself runs in a supervised task rather than in the tracker's
+    callback, so a slow or hanging provider can't delay `touch/1`, `info/1` or
+    — the expensive one — teardown, which has to win the race to issue its
+    `DELETE`. Raises on the poll path are reported as `{:poll_failed, _}` too:
+    the tracker never tears a resource down on uncertainty.
+  - `:reap_grace_ms` (default: one reap interval) keeps the Reaper off
+    resources too young to have a tracker yet — every resource is created
+    upstream before it is registered.
+  - Tracking options are validated at the `ExAtlas.Orchestrator.spawn/1`
+    boundary, before the provider is asked for anything.
   - `ExAtlas.Orchestrator.UpstreamStatus` exposes the classification and the
     jittered/backing-off poll schedule as a standalone primitive.
   - `ExAtlas.Providers.Mock.set_status/2` and `forget/1` let consumers

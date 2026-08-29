@@ -67,9 +67,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   With `on_failure: {:respawn, max_attempts}` the server replaces a *preempted*
   resource instead of stopping: it spawns a fresh one from the same opts,
   terminates the old one if the provider still has it, re-keys itself in the
-  registry under the new id, and broadcasts `{:respawned, compute}` on the old
-  topic so subscribers can follow. That suits checkpoint-based batch work on
-  spot capacity.
+  registry under the new id, and broadcasts `{:respawned, new_id}` on the old
+  topic so subscribers can follow. The event carries the id and nothing else:
+  the replacement's `auth` handle holds a bearer token, and a PubSub topic is
+  the wrong place for one. Subscribers read it back with
+  `ExAtlas.Orchestrator.info/1`. That suits checkpoint-based batch work on spot
+  capacity.
 
   Preemption is the only cause worth retrying, and the option is narrow on
   purpose. A resource that was stopped or terminated was ended by someone; an
@@ -357,7 +360,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
         {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
 
-        Events.broadcast(old_id, {:respawned, replacement})
+        Events.broadcast(old_id, {:respawned, replacement.id})
         Events.broadcast(replacement.id, {:status, replacement.status})
 
         state = %{
