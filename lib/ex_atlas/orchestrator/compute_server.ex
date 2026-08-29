@@ -69,6 +69,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   use GenServer
 
   alias ExAtlas.Orchestrator.{ComputeRegistry, Events, UpstreamStatus}
+  alias ExAtlas.Spec
 
   @task_supervisor ExAtlas.Orchestrator.TaskSupervisor
 
@@ -130,7 +131,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           status_poll_ms: pos_integer() | nil,
           poll_task: Task.t() | nil,
           poll_failures: non_neg_integer(),
-          upstream_present?: boolean(),
+          upstream_deletable?: boolean(),
           respawn_limit: non_neg_integer(),
           respawns: non_neg_integer(),
           last_activity_ms: integer(),
@@ -192,7 +193,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       status_poll_ms: poll_interval(tracking[:status_poll_ms]),
       poll_task: nil,
       poll_failures: 0,
-      upstream_present?: true,
+      upstream_deletable?: true,
       respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
       last_activity_ms: now_ms(),
@@ -272,11 +273,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     cancel_poll(state)
     Events.broadcast(state.compute.id, {:terminating, reason})
 
-    if state.upstream_present? do
+    if state.upstream_deletable? do
       terminate_upstream(state)
     else
-      # The provider has already forgotten this resource — a DELETE would only
-      # earn us a 404 and a misleading `{:terminate_failed, _}`.
+      # Nothing left to delete — a DELETE would only earn us an error and a
+      # misleading `{:terminate_failed, _}`.
       Events.broadcast(state.compute.id, {:status, :terminated})
     end
 
@@ -300,7 +301,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp apply_observation({:dead, reason, upstream}, state) do
     Events.broadcast(state.compute.id, {:status, reason})
-    state = %{state | upstream_present?: not is_nil(upstream)}
+    state = %{state | upstream_deletable?: deletable?(upstream)}
 
     if respawn?(reason, state) do
       respawn(state, reason)
@@ -343,7 +344,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           | compute: replacement,
             respawns: state.respawns + 1,
             poll_failures: 0,
-            upstream_present?: true,
+            upstream_deletable?: true,
             last_activity_ms: now_ms()
         }
 
@@ -362,10 +363,22 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # resources. The failed-respawn branch already stops (and so terminates it
   # via `terminate/2`); the success branch must delete it explicitly, or a
   # long-running spot session leaks one carcass per preemption.
-  defp release_old(%{upstream_present?: false}), do: :ok
+  defp release_old(%{upstream_deletable?: false}), do: :ok
   defp release_old(state), do: terminate_upstream(state)
 
   # --- teardown ---
+
+  # Is there anything left for `terminate/2` to delete? Not when the provider
+  # has forgotten the id, and not when it is telling us the resource is already
+  # terminated: providers that keep terminated records answer the DELETE with
+  # an error, which buys nothing, emits a misleading `{:terminate_failed, _}`,
+  # and costs the final `{:status, :terminated}` that `Events` documents as the
+  # end-of-session signal. Keyed off the observed status rather than the death
+  # reason so it also covers `spot: true`, where a terminated resource is
+  # reported as `:preempted`.
+  defp deletable?(nil), do: false
+  defp deletable?(%Spec.Compute{status: :terminated}), do: false
+  defp deletable?(%Spec.Compute{}), do: true
 
   defp terminate_upstream(state) do
     case ExAtlas.terminate(state.compute.id, state.opts) do

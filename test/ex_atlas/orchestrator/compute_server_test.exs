@@ -168,6 +168,38 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, %{compute: %{status: :running}}} = ExAtlas.Orchestrator.info(id)
     end
 
+    test "a resource the provider reports as terminated is not deleted again" do
+      base = [
+        provider: FaultyProvider,
+        gpu: :h100,
+        image: "x",
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: 10
+      ]
+
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      # A provider that keeps terminated records still answers the poll with
+      # the resource present — and refuses to delete it a second time.
+      on_exit(&FaultyProvider.reset/0)
+      FaultyProvider.arm(:terminate, {:error, ExAtlas.Error.new(:not_found, provider: :mock)})
+      :ok = Mock.set_status(id, :terminated)
+
+      assert_receive {:atlas_compute, ^id, {:status, :terminated}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:terminating, :normal}}, 2_000
+
+      # The end-of-session signal `ExAtlas.Orchestrator.Events` documents is
+      # `{:terminating, _}` followed by `{:status, :terminated}`. A doomed
+      # DELETE replaces the second half with `{:terminate_failed, _}`.
+      assert_receive {:atlas_compute, ^id, {:status, :terminated}}, 2_000
+      refute_received {:atlas_compute, ^id, {:terminate_failed, _}}
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
     test "polling is off when :status_poll_ms is false", %{base: base} do
       {:ok, _pid, compute} =
         ExAtlas.Orchestrator.spawn(Keyword.put(base, :status_poll_ms, false))
