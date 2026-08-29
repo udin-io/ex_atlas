@@ -6,12 +6,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
 
   setup do
     ExAtlas.Test.Orchestrator.start!()
-    FaultyProvider.reset()
-
-    on_exit(fn ->
-      FaultyProvider.reset()
-      Application.delete_env(:ex_atlas, :orchestrator)
-    end)
+    on_exit(fn -> Application.delete_env(:ex_atlas, :orchestrator) end)
 
     :ok
   end

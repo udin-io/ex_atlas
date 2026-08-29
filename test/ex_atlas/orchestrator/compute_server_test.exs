@@ -166,7 +166,6 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       # A provider that keeps terminated records still answers the poll with
       # the resource present — and refuses to delete it a second time.
-      on_exit(&FaultyProvider.reset/0)
       FaultyProvider.arm(:terminate, {:error, ExAtlas.Error.new(:not_found, provider: :mock)})
       :ok = Mock.set_status(id, :terminated)
 
@@ -286,6 +285,25 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       assert_receive {:atlas_compute, ^new_id, {:status, :preempted}}, 2_000
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a replacement that cannot be spawned ends the session", %{base: base} do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(Keyword.put(base, :provider, FaultyProvider))
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      error = ExAtlas.Error.new(:provider, provider: :mock, message: "no capacity")
+      FaultyProvider.arm(:spawn_compute, {:error, error})
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawn_failed, {:preempted, ^error}}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+
+      # A failed respawn must not leave a half-rented session behind.
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
     end
 
     test "a crashed tracker is not restarted onto the resource it replaced", %{base: base} do
@@ -467,9 +485,6 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
   describe "a poll that blows up" do
     setup do
-      FaultyProvider.reset()
-      on_exit(&FaultyProvider.reset/0)
-
       base = [
         provider: FaultyProvider,
         gpu: :h100,
@@ -515,9 +530,6 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
   describe "a poll the provider never answers" do
     setup do
-      FaultyProvider.reset()
-      on_exit(&FaultyProvider.reset/0)
-
       base = [
         provider: FaultyProvider,
         gpu: :h100,
