@@ -144,9 +144,9 @@ end
 
 ## Orchestrator tests
 
-The orchestrator uses `Phoenix.PubSub` and `Registry`. Start supervised
-children explicitly in `setup` so each test gets a fresh supervision
-tree:
+The orchestrator uses `Phoenix.PubSub`, a `Registry`, and a `Task.Supervisor`
+for the trackers' status polls. Start supervised children explicitly in
+`setup` so each test gets a fresh supervision tree:
 
 ```elixir
 setup do
@@ -155,6 +155,11 @@ setup do
   ExAtlas.Providers.Mock.reset()
 
   start_supervised!({Registry, keys: :unique, name: ExAtlas.Orchestrator.ComputeRegistry})
+
+  start_supervised!(
+    {Task.Supervisor, name: ExAtlas.Orchestrator.ComputeServer.task_supervisor_name()}
+  )
+
   start_supervised!({DynamicSupervisor, name: ExAtlas.Orchestrator.ComputeSupervisor,
                                          strategy: :one_for_one})
   start_supervised!({Phoenix.PubSub, name: ExAtlas.PubSub})
@@ -162,6 +167,10 @@ setup do
   :ok
 end
 ```
+
+Leave the `Task.Supervisor` out and nothing crashes — status polls just report
+`{:poll_failed, :no_task_supervisor}` and back off, because a tracker that
+cannot poll must never conclude its resource is dead.
 
 Follow project conventions:
 
