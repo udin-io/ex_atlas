@@ -37,6 +37,10 @@ defmodule ExAtlas.Test.Orchestrator do
     Mock.reset()
     FaultyProvider.reset()
 
+    # First, so it is torn down last — trackers write to the store from
+    # `terminate/2`, exactly as they do in `ExAtlas.Application`'s tree.
+    configure_store(Keyword.get(opts, :tracking_store, false))
+
     start_supervised!({Registry, keys: :unique, name: ComputeRegistry})
     start_supervised!({Task.Supervisor, name: ComputeServer.task_supervisor_name()})
     start_supervised!({DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one})
@@ -53,8 +57,6 @@ defmodule ExAtlas.Test.Orchestrator do
       Application.delete_env(:ex_atlas, :callback)
       Application.delete_env(:ex_atlas, :orchestrator)
     end)
-
-    configure_store(Keyword.get(opts, :tracking_store, false))
 
     :ok
   end

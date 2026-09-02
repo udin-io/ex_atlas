@@ -237,20 +237,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         }
 
   @doc false
-  def start_link({compute, opts}) do
-    name = {:via, Registry, {ComputeRegistry, {:compute, compute.id}}}
-    GenServer.start_link(__MODULE__, {compute, opts}, name: name)
+  def start_link(arg) do
+    name = {:via, Registry, {ComputeRegistry, {:compute, tracked_id(arg)}}}
+    GenServer.start_link(__MODULE__, arg, name: name)
   end
 
-  def child_spec({compute, opts}) do
+  def child_spec(arg) do
     %{
-      id: {:compute_server, compute.id},
-      start: {__MODULE__, :start_link, [{compute, opts}]},
+      id: {:compute_server, tracked_id(arg)},
+      start: {__MODULE__, :start_link, [arg]},
       restart: :temporary,
       shutdown: @shutdown_timeout_ms,
       type: :worker
     }
   end
+
+  defp tracked_id({:adopted, record}), do: record.id
+  defp tracked_id({compute, _opts}), do: compute.id
 
   @doc """
   Validate the tracking options out of a spawn keyword list.
@@ -301,14 +304,65 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # --- callbacks ---
 
   @impl true
+  # Re-adoption at boot — see `ExAtlas.Orchestrator.Adopter`. The record is
+  # what survived the VM; `:compute` is the observation the Adopter just made
+  # and is never persisted.
+  #
+  # Three things differ from a fresh spawn, and each of them is a budget that
+  # must not refill:
+  #
+  #   * The deadline is recomputed from the record's wall-clock
+  #     `:spawned_at_ms`, not re-armed from `:max_runtime_ms`. A task that
+  #     spent its whole budget while the node was down fires `:max_runtime` at
+  #     once rather than starting a second one.
+  #   * `:respawns` and `:report` are carried, so an `on_failure: {:respawn, n}`
+  #     budget stays spent and work that already reported is never re-run.
+  #   * `:ready_timeout_ms` is deliberately *not* re-armed. It answers "did
+  #     this ever come up?", and an adopted resource has been up for hours.
+  def init({:adopted, record}) do
+    Process.flag(:trap_exit, true)
+
+    %{compute: compute, opts: opts} = record
+    tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
+    remaining_ms = remaining_runtime_ms(record)
+
+    state = %{
+      new_state(compute, opts, tracking)
+      | respawns: record.respawns,
+        report: record.report,
+        deadline_at_ms: deadline_at(remaining_ms),
+        store: TrackingStore.impl()
+    }
+
+    register_callback(state.callback_task_id)
+    Events.broadcast(compute.id, {:status, compute.status})
+    schedule_heartbeat(state)
+    schedule_deadline(remaining_ms)
+    # Nothing has watched this resource since the node went down, so the first
+    # look is now rather than one poll interval from now.
+    poll_now(state)
+    {:ok, state}
+  end
+
   def init({compute, opts}) do
     Process.flag(:trap_exit, true)
 
     # Already validated by `ExAtlas.Orchestrator.spawn/1`; re-run so a directly
     # started tracker gets the same defaults and the same clear failure.
     tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
+    state = new_state(compute, opts, tracking)
 
-    state = %{
+    register_callback(state.callback_task_id)
+    Events.broadcast(compute.id, {:status, compute.status})
+    schedule_heartbeat(state)
+    schedule_status_poll(state)
+    schedule_deadline(tracking[:max_runtime_ms])
+    schedule_ready_timeout(state, tracking[:ready_timeout_ms])
+    {:ok, state}
+  end
+
+  defp new_state(compute, opts, tracking) do
+    %{
       compute: compute,
       opts: opts,
       idle_ttl_ms: tracking[:idle_ttl_ms],
@@ -329,15 +383,18 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       user_id: tracking[:user_id],
       store: store_for(tracking[:persist])
     }
-
-    register_callback(state.callback_task_id)
-    Events.broadcast(compute.id, {:status, compute.status})
-    schedule_heartbeat(state)
-    schedule_status_poll(state)
-    schedule_deadline(tracking[:max_runtime_ms])
-    schedule_ready_timeout(state, tracking[:ready_timeout_ms])
-    {:ok, state}
   end
+
+  # What is left of a wall-clock budget, measured from the spawn that started
+  # it. `0` means the budget is gone and the deadline fires on the next pass
+  # through the mailbox.
+  defp remaining_runtime_ms(%{max_runtime_ms: false}), do: false
+
+  defp remaining_runtime_ms(%{max_runtime_ms: ms, spawned_at_ms: spawned_at_ms}),
+    do: max(ms - (System.system_time(:millisecond) - spawned_at_ms), 0)
+
+  defp poll_now(%{status_poll_ms: nil}), do: :ok
+  defp poll_now(_state), do: send(self(), :status_poll)
 
   @impl true
   def handle_cast(:touch, state) do
