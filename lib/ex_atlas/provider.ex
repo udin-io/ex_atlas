@@ -96,6 +96,8 @@ defmodule ExAtlas.Provider do
     * `:symmetric_ports` — inside-port == outside-port guarantee
     * `:webhooks` — push completion callbacks
     * `:global_networking` — private networking across datacenters
+    * `:self_terminate` — honors `ComputeRequest.self_terminate`, wrapping
+      `:command` so the resource destroys itself when the command ends
   """
   @callback capabilities() :: [atom()]
 

@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **`ExAtlas.Orchestrator.run_task/1` — run a container to completion** (#21).
+  The third compute shape, alongside interactive per-user pods and serverless
+  jobs: run this image with this command until it exits, report the outcome,
+  destroy the resource. Broadcasts `{:task, :completed}`,
+  `{:task, :timed_out}` or `{:task, {:failed, reason}}` before the existing
+  `{:terminating, _}` / `{:status, :terminated}` pair.
+
+  It is the same `ComputeServer` in `mode: :task`, not a second server: that
+  module already owns `trap_exit` plus a `terminate/2` that guarantees the
+  `DELETE`, the shutdown budget that lets it finish, the offloaded status
+  poll, "uncertainty never tears a resource down", and registry re-keying on
+  respawn. Task mode adds `:max_runtime_ms` and `:ready_timeout_ms` timers,
+  removes the idle clock, and defers the one mode-dependent decision to the
+  new pure `ExAtlas.Orchestrator.TaskOutcome`.
+
+- **`:command` and `:self_terminate` on `ExAtlas.Spec.ComputeRequest`** (#21).
+  `:command` maps to RunPod's `dockerStartCmd`, previously reachable only via
+  the `:provider_opts` escape hatch. `:self_terminate` (default `true`) wraps
+  it in a shell that deletes the resource when the command ends, using the
+  `RUNPOD_POD_ID` and pod-scoped `RUNPOD_API_KEY` RunPod injects, with a
+  `trap` so a crash cleans up too.
+
+  This is not a convenience. RunPod's REST v1 `Pod` schema exposes no
+  container state — no `runtime` object, no `currentStatus`, no exit code —
+  and `desiredStatus` is a *desired* state that only changes when someone asks.
+  So a pod whose `dockerStartCmd` has exited keeps reporting `RUNNING` and
+  keeps billing, and polling can never notice. Self-termination is the only
+  source of a normal-exit signal; `:max_runtime_ms` is the only cover for the
+  cases where nothing in the container can run (SIGKILL, OOM kill, a hung
+  process, a failed image pull, `self_terminate: false`). Both are required
+  and neither is sufficient alone, so `run_task/1` defaults both on.
+
+- **`ExAtlas.Orchestrator.info/1` reports `:mode` and
+  `:max_runtime_remaining_ms`** (#21), so a UI can show how much of a task's
+  wall-clock budget is left.
+
+- **`:self_terminate` capability atom**, reported by RunPod.
+
+### Fixed
+
+- **`created_at` is populated for RunPod pods again** (#21) —
+  `Translate.parse_created_at/1` read `pod["createdAt"]`, which does not exist
+  on RunPod's REST v1 `Pod` schema; its only machine-readable timestamp is
+  `lastStartedAt`. So `Compute.created_at` was `nil` for every RunPod pod,
+  `Reaper.young?/3` fell through to its `false` catch-all, and the
+  `:reap_grace_ms` window shipped in #24 was inert against the one provider it
+  was written for — leaving the spawn race it exists to close wide open.
+
+- **Request options are routed by request type** (#21) — `spawn_compute/1` and
+  `run_job/1` split their options against a single shared key list holding the
+  union of both request structs' fields, so each handed the other's options to
+  its own builder and `NimbleOptions` raised on a key merely addressed
+  elsewhere: `spawn_compute(gpu: :h100, mode: :async)` died on
+  `unknown options [:mode]`.
+
+### Removed
+
+- The unreachable `desiredStatus: "FAILED"` clause in RunPod's pod-status
+  translation. The enum is exactly `RUNNING | EXITED | TERMINATED`; an
+  unclassifiable status now falls through to `:provisioning`, which
+  `UpstreamStatus` counts as alive rather than as a death.
+
 ## v0.5.0 — unreleased
 
 Closes all remaining audit items. Library is now at feature parity with

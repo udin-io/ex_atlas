@@ -76,7 +76,7 @@ defmodule ExAtlas do
   @spec spawn_compute(opts()) :: {:ok, Spec.Compute.t()} | {:error, term()}
   def spawn_compute(opts) when is_list(opts) do
     {provider, opts} = Config.pop_provider!(opts)
-    {request_opts, config_opts} = split_request_opts(opts)
+    {request_opts, config_opts} = split_compute_request_opts(opts)
     req = Spec.ComputeRequest.new!(request_opts)
     ctx = Config.build_ctx(provider, config_opts)
     provider |> Config.provider_module() |> apply(:spawn_compute, [req, ctx])
@@ -119,7 +119,7 @@ defmodule ExAtlas do
   @spec run_job(opts()) :: {:ok, Spec.Job.t()} | {:error, term()}
   def run_job(opts) when is_list(opts) do
     {provider, opts} = Config.pop_provider!(opts)
-    {request_opts, config_opts} = split_request_opts(opts)
+    {request_opts, config_opts} = split_job_request_opts(opts)
     req = Spec.JobRequest.new!(request_opts)
     ctx = Config.build_ctx(provider, config_opts)
     provider |> Config.provider_module() |> apply(:run_job, [req, ctx])
@@ -162,7 +162,13 @@ defmodule ExAtlas do
 
   # --- helpers ---
 
-  @request_keys [
+  # Each request struct gets its own key list. A single shared list meant
+  # `spawn_compute/1` handed `JobRequest`-only keys to `ComputeRequest.new!/1`
+  # (and vice versa), which raised on an option that was merely addressed to
+  # the other request — `:mode` being the one that matters, since the
+  # orchestrator now uses it for `run_task/1`. Anything not listed here is a
+  # provider-config option and reaches the ctx untouched.
+  @compute_request_keys [
     :gpu,
     :gpu_count,
     :image,
@@ -178,17 +184,23 @@ defmodule ExAtlas do
     :template_id,
     :auth,
     :idle_ttl_ms,
-    :provider_opts,
-    # JobRequest keys
+    :command,
+    :self_terminate,
+    :provider_opts
+  ]
+
+  @job_request_keys [
     :endpoint,
     :input,
     :mode,
     :timeout_ms,
     :webhook,
-    :policy
+    :policy,
+    :provider_opts
   ]
 
-  defp split_request_opts(opts), do: Keyword.split(opts, @request_keys)
+  defp split_compute_request_opts(opts), do: Keyword.split(opts, @compute_request_keys)
+  defp split_job_request_opts(opts), do: Keyword.split(opts, @job_request_keys)
 
   defp dispatch(fun, args, opts) do
     {provider, opts} = Config.pop_provider!(opts)

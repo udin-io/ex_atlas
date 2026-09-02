@@ -568,4 +568,271 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert touched.last_activity_ms >= before.last_activity_ms
     end
   end
+
+  describe "task mode" do
+    setup do
+      # Idle TTL and heartbeat are set aggressively short on purpose: task mode
+      # must ignore both, and an interactive server with these numbers would be
+      # dead within a few tens of milliseconds.
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        command: ["/app/train.sh"],
+        mode: :task,
+        idle_ttl_ms: 10,
+        heartbeat_ms: 10,
+        status_poll_ms: 10,
+        max_runtime_ms: 60_000
+      ]
+
+      {:ok, base: base}
+    end
+
+    defp start_task(base, overrides \\ []) do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(Keyword.merge(base, overrides))
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {pid, compute}
+    end
+
+    test "the idle clock never runs — an unattended task outlives its idle ttl", %{base: base} do
+      {pid, compute} = start_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:heartbeat, _}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "touch/1 is meaningless but harmless in task mode", %{base: base} do
+      {_pid, compute} = start_task(base)
+
+      assert :ok = ExAtlas.Orchestrator.touch(compute.id)
+      assert {:ok, %{mode: :task}} = ExAtlas.Orchestrator.info(compute.id)
+    end
+
+    test "a self-terminated container completes, and nothing is deleted twice", %{base: base} do
+      {pid, compute} = start_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      # The self-termination wrapper DELETEs the pod from inside the container,
+      # so the next poll 404s. That 404 is the only container-exit signal
+      # RunPod's REST API can produce.
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, first}, 2_000
+      assert_receive {:atlas_compute, ^id, second}, 2_000
+      assert_receive {:atlas_compute, ^id, third}, 2_000
+      assert_receive {:atlas_compute, ^id, fourth}, 2_000
+
+      # The task outcome precedes the end-of-session pair, so a subscriber that
+      # ignores {:task, _} still sees a correct lifecycle.
+      assert [
+               {:status, :vanished},
+               {:task, :completed},
+               {:terminating, _},
+               {:status, :terminated}
+             ] =
+               [first, second, third, fourth]
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a container that never self-terminated is killed at the deadline", %{base: base} do
+      # Covers both the crash-before-the-cleanup-line case and a hung process:
+      # the pod stays desiredStatus RUNNING forever, so no observation will ever
+      # end this task and only the wall clock can.
+      {pid, compute} = start_task(base, max_runtime_ms: 50)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:task, :completed}}, 0
+      assert_receive {:atlas_compute, ^id, {:task, :timed_out}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+
+      # The meter is actually stopped, not just the tracker.
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a resource that never leaves provisioning fails as :never_ready", %{base: base} do
+      {pid, compute} = start_task(base, ready_timeout_ms: 300)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      # An image that will not pull: the pod is rented and billing, but no
+      # container ever starts.
+      :ok = Mock.set_status(id, :provisioning)
+      assert_receive {:atlas_compute, ^id, {:status, :provisioning}}, 2_000
+
+      assert_receive {:atlas_compute, ^id, {:task, {:failed, :never_ready}}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a task that did become ready is never failed as :never_ready", %{base: base} do
+      {pid, compute} = start_task(base, ready_timeout_ms: 50)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:task, _}}, 300
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+    end
+
+    test "a failed poll ends nothing — the task keeps running", %{base: base} do
+      {pid, compute} =
+        start_task(base, provider: FaultyProvider, status_poll_ms: 10)
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      FaultyProvider.arm(
+        :get_compute,
+        {:error, ExAtlas.Error.new(:provider, provider: :mock, status: 500)}
+      )
+
+      assert_receive {:atlas_compute, ^id, {:poll_failed, _}}, 2_000
+      refute_receive {:atlas_compute, ^id, {:task, _}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a preempted spot task with no respawn budget reports the cause", %{base: base} do
+      {pid, compute} = start_task(base, spot: true)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, {:failed, :preempted}}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "the deadline is wall clock from spawn and carries across a respawn", %{base: base} do
+      # A caller who asked for 90 minutes must not be able to spend 360 by
+      # being preempted three times, so the replacement inherits what is left
+      # of the original budget rather than starting a fresh one.
+      {_pid, compute} = start_task(base, spot: true, on_failure: {:respawn, 1})
+      id = compute.id
+
+      assert {:ok, %{max_runtime_remaining_ms: before_ms}} = ExAtlas.Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{max_runtime_remaining_ms: after_ms}} = ExAtlas.Orchestrator.info(new_id)
+
+      # A re-armed deadline would have jumped back up to the full budget.
+      assert after_ms < before_ms
+    end
+
+    test "an interactive session gets no task events at all" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          idle_ttl_ms: 60_000,
+          heartbeat_ms: 60_000,
+          status_poll_ms: 10
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:status, :vanished}}, 2_000
+      refute_receive {:atlas_compute, ^id, {:task, _}}, 200
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+  end
+
+  describe "task option validation" do
+    test "rejects a bad mode before renting anything" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.spawn(provider: :mock, gpu: :h100, image: "x", mode: :batch)
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "rejects a bad max_runtime_ms or ready_timeout_ms before renting anything" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 mode: :task,
+                 max_runtime_ms: 0
+               )
+
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 mode: :task,
+                 ready_timeout_ms: "10s"
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
+
+  describe "run_task/1" do
+    test "runs a command to completion and reports the outcome" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          provider: :mock,
+          gpu: :h100,
+          image: "ghcr.io/acme/trainer:latest",
+          command: ["/app/train.sh"],
+          name: "atlas-task-42",
+          status_poll_ms: 10,
+          max_runtime_ms: 60_000
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      assert {:ok, %{mode: :task}} = ExAtlas.Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "always has a deadline, even when the caller forgets to ask for one" do
+      # An unattended task with no wall-clock cap is the billing trap this
+      # whole feature exists to close, so the wrapper supplies one.
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          command: ["/app/train.sh"],
+          status_poll_ms: false
+        )
+
+      assert {:ok, info} = ExAtlas.Orchestrator.info(compute.id)
+      assert is_integer(info.max_runtime_remaining_ms)
+      assert info.max_runtime_remaining_ms > 0
+    end
+
+    test "validates its options before renting anything" do
+      assert {:error, %NimbleOptions.ValidationError{}} =
+               ExAtlas.Orchestrator.run_task(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 max_runtime_ms: -1
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
 end

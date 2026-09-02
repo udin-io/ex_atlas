@@ -41,6 +41,7 @@ Two concerns under one roof:
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Quick start — Fly.io platform ops](#quick-start--flyio-platform-ops)
 - [Quick start — transient per-user GPU pod](#quick-start--transient-per-user-gpu-pod)
+- [Quick start — batch task on a GPU pod](#quick-start--batch-task-on-a-gpu-pod)
 - [Quick start — serverless inference](#quick-start--serverless-inference)
 - [Swapping providers](#swapping-providers)
 - [Configuration](#configuration)
@@ -262,6 +263,43 @@ You can also terminate manually:
 :ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
 ```
 
+## Quick start — batch task on a GPU pod
+
+Unattended work that runs to completion, rather than a session a user holds
+open:
+
+```elixir
+{:ok, _pid, compute} =
+  ExAtlas.Orchestrator.run_task(
+    provider: :runpod,
+    gpu: :rtx_4090,
+    image: "ghcr.io/acme/trainer:latest",
+    command: ["/app/train.sh", "--epochs", "3"],
+    name: "atlas-task-42",
+    max_runtime_ms: :timer.minutes(90)
+  )
+
+Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
+
+def handle_info({:atlas_compute, _id, {:task, :completed}}, socket) do
+  {:noreply, put_flash(socket, :info, "Training finished")}
+end
+
+def handle_info({:atlas_compute, _id, {:task, :timed_out}}, socket) do
+  {:noreply, put_flash(socket, :error, "Training hit its 90-minute cap")}
+end
+
+def handle_info({:atlas_compute, _id, {:task, {:failed, reason}}}, socket) do
+  {:noreply, put_flash(socket, :error, "Training failed: #{reason}")}
+end
+```
+
+No heartbeats, no idle TTL: the pod ends when the command ends, when the
+wall-clock deadline fires, or when it dies — and it is always destroyed. See
+[`run_task/1`](#exatlasorchestratorrun_task1--run-a-container-to-completion)
+for why exit detection needs the container's cooperation, and why
+`:completed` does not mean "succeeded".
+
 ## Quick start — serverless inference
 
 ```elixir
@@ -419,6 +457,7 @@ end
 | `:symmetric_ports`  | `internal == external` port guarantee                                 |
 | `:webhooks`         | Push completion callbacks                                             |
 | `:global_networking`| Private networking across datacenters                                 |
+| `:self_terminate`   | Honors `:self_terminate` — wraps `:command` so the resource ends itself |
 
 ## Normalized specs (`ExAtlas.Spec.*`)
 
@@ -428,7 +467,8 @@ to know each provider's native shape.
 - `ExAtlas.Spec.ComputeRequest` — input to `spawn_compute/1`. Fields:
   `:gpu`, `:gpu_count`, `:image`, `:cloud_type`, `:spot`, `:region_hints`,
   `:ports`, `:env`, `:volume_gb`, `:container_disk_gb`, `:network_volume_id`,
-  `:name`, `:template_id`, `:auth`, `:idle_ttl_ms`, `:provider_opts`.
+  `:name`, `:template_id`, `:auth`, `:idle_ttl_ms`, `:command`,
+  `:self_terminate`, `:provider_opts`.
 - `ExAtlas.Spec.Compute` — output. Fields: `:id`, `:provider`, `:status`,
   `:public_ip`, `:ports`, `:gpu_type`, `:gpu_count`, `:cost_per_hour`,
   `:region`, `:image`, `:name`, `:auth`, `:created_at`, `:raw`.
@@ -583,6 +623,7 @@ Every state change is broadcast over `ExAtlas.PubSub` on the topic
 | `{:poll_failed, error}`              | A status poll couldn't reach the provider, or blew up trying                    |
 | `{:respawned, new_id}`               | Preempted resource replaced (sent on the old id)                               |
 | `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned                                                |
+| `{:task, outcome}`                   | A `mode: :task` session ended: `:completed`, `:timed_out`, `{:failed, reason}`  |
 | `{:terminating, reason}`             | Server is about to shut down                                                   |
 | `{:status, :terminated}`             | Upstream provider confirmed termination, or had nothing left to terminate       |
 | `{:terminate_failed, error}`         | Upstream `terminate` call returned an error                                    |
@@ -599,6 +640,100 @@ def handle_info({:atlas_compute, _id, {:status, :terminated}}, socket) do
   {:noreply, put_flash(socket, :info, "Session ended")}
 end
 ```
+
+### `ExAtlas.Orchestrator.run_task/1` — run a container to completion
+
+The third compute shape, alongside interactive per-user pods and serverless
+jobs: *run this image with this command until it exits, then tell me the
+outcome and stop the meter.*
+
+```elixir
+{:ok, pid, compute} =
+  ExAtlas.Orchestrator.run_task(
+    provider: :runpod,
+    gpu: :rtx_4090,
+    image: "ghcr.io/acme/trainer:latest",
+    command: ["/app/train.sh", "--epochs", "3"],
+    name: "atlas-task-42",
+    max_runtime_ms: :timer.minutes(90)
+  )
+
+Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
+```
+
+| Option              | Default    | Meaning                                                    |
+| ------------------- | ---------- | ---------------------------------------------------------- |
+| `:command`          | `nil`      | Overrides the image's start command (`dockerStartCmd`)      |
+| `:self_terminate`   | `true`     | Wrap `:command` so the resource destroys itself on exit     |
+| `:max_runtime_ms`   | 60 min     | Wall-clock deadline **from spawn**; then `DELETE`           |
+| `:ready_timeout_ms` | 15 min     | Fail as `:never_ready` if still provisioning when it fires  |
+
+Task mode is the same `ComputeServer`, so everything above still applies —
+the status poll, the backoff, the guaranteed `DELETE` on teardown, the respawn
+option. Three things differ:
+
+* **No idle clock.** The heartbeat is never scheduled and `touch/1` has
+  nothing to postpone. Unattended work has no heartbeats to miss, and the
+  30-minute default idle TTL would otherwise kill a 90-minute run.
+* **A wall-clock deadline** measured from spawn, not from `:running`. Billing
+  starts when the resource is rented and an image pull is exactly the
+  unbounded cost worth capping. It **carries across an `on_failure:
+  {:respawn, n}` replacement** rather than resetting: a caller who asked for
+  90 minutes must not be able to spend 360 by being preempted three times.
+* **A readiness deadline**, much shorter, so an image that never pulls fails
+  in minutes rather than burning the whole budget.
+
+#### Why exit detection needs the container's help
+
+RunPod's REST API exposes **no container state**: the `Pod` schema has no
+`runtime` object, no `currentStatus` and no exit code, and `desiredStatus` is
+only `RUNNING | EXITED | TERMINATED` — a *desired* state that changes when
+somebody asks it to. So when `dockerStartCmd` exits the pod stays `RUNNING`,
+the GPU stays reserved, and no amount of polling can tell that the work is
+done.
+
+The only party that knows is the container. With `self_terminate: true`
+ex_atlas wraps your command in a shell that deletes the pod when it ends:
+
+```sh
+atlas_self_terminate() {
+  curl -sS -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
+    "https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID"
+}
+trap atlas_self_terminate EXIT INT TERM
+/app/train.sh --epochs 3
+```
+
+`RUNPOD_POD_ID` and the pod-scoped `RUNPOD_API_KEY` are injected by RunPod, so
+no secret of yours travels to the pod, and `trap … EXIT` fires on a crash and
+on a signal as well as on a clean finish. The orchestrator sees the resulting
+404 and reports `{:task, :completed}`.
+
+Pass `self_terminate: false` for an image with no shell or no `curl`, or when
+you want the resource kept up for inspection. Such a task will always end at
+`:max_runtime_ms` and report `:timed_out`, which is honest.
+
+**Self-termination and the deadline are both required — they cover disjoint
+failures.** Self-termination is the only source of a normal-exit signal; the
+deadline is the only cover for a SIGKILL or OOM kill that runs no cleanup, a
+hung process, an image that never pulled, and `self_terminate: false`.
+
+#### `:completed` does not mean "succeeded"
+
+It means **the container ended and the resource is gone**. `trap … EXIT` fires
+on a crash too, so success and failure arrive as the same 404, and the exit
+code dies with the pod. If you need the difference, have the container report
+it before it exits — a status file on a network volume, a call to your own
+webhook.
+
+#### Spot tasks
+
+With `spot: true` a resource that vanished is reported as `:preempted`, and a
+self-terminating container also makes it vanish — so on spot capacity the two
+are indistinguishable through the API. `on_failure: {:respawn, n}` can
+therefore re-run a task that had actually finished. Use it only where
+re-running is harmless (checkpoint-resuming training, which is what the option
+was added for); the carried deadline bounds the total spend either way.
 
 ### Reaper
 

@@ -25,6 +25,49 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   API will tolerate. Set `status_poll_ms: false` to opt out of upstream polling
   entirely.
 
+  ## Interactive mode and task mode
+
+  `mode: :interactive` (the default) is the transient-per-user session the rest
+  of this moduledoc describes: it lives as long as someone keeps `touch/1`ing
+  it and dies of an idle TTL.
+
+  `mode: :task` is the same server rented to run one command to completion —
+  see `ExAtlas.Orchestrator.run_task/1`. Three things change:
+
+    * **The heartbeat clock is never started.** Unattended work has no
+      heartbeats to miss, and the default 30-minute idle TTL would otherwise
+      kill a 90-minute training run. `touch/1` still answers, it just has
+      nothing to postpone.
+    * **`:max_runtime_ms` arms a one-shot deadline** in `init/1`, measured as
+      wall clock from spawn rather than from `:running`. Billing starts when
+      the resource is rented, so the cap should measure what the meter
+      measures, and an image pull is exactly the unbounded cost worth capping.
+      It is never re-armed, so a respawn inherits what is left of the budget
+      instead of starting a fresh one — "90 minutes" must not be able to spend
+      360 by being preempted three times.
+    * **`:ready_timeout_ms` arms a second, shorter one-shot timer** that fails
+      the task as `{:failed, :never_ready}` if the resource is still
+      `:provisioning` when it fires. An image that will not pull leaves a
+      rented pod with no container in it; without this it would burn the whole
+      `:max_runtime_ms` budget doing nothing.
+
+  Whether an observation ends a task, and how, is decided by the pure
+  `ExAtlas.Orchestrator.TaskOutcome`, so this server keeps two extra timers and
+  one extra branch rather than a second personality.
+
+  ## Why a task needs both a self-terminating container and a deadline
+
+  RunPod's REST API reports no container state at all — see
+  `ExAtlas.Spec.ComputeRequest`'s `:self_terminate`. A pod whose command has
+  exited keeps answering `desiredStatus: "RUNNING"`, so polling can never
+  detect a normal finish; only the container deleting itself can, and that
+  arrives here as a 404, i.e. `{:dead, :vanished, nil}`.
+
+  The deadline covers the disjoint set the container cannot: a SIGKILL or OOM
+  kill that runs no cleanup, a hung process, an image that never pulled, and
+  `self_terminate: false`. Neither mechanism alone is sufficient, which is why
+  `run_task/1` defaults both on.
+
   ## The poll never runs in the callback
 
   `get_compute/2` is an HTTP call against someone else's cloud, and the
@@ -92,7 +135,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   use GenServer
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, Events, UpstreamStatus}
+  alias ExAtlas.Orchestrator.{ComputeRegistry, Events, TaskOutcome, UpstreamStatus}
   alias ExAtlas.Spec
 
   @task_supervisor ExAtlas.Orchestrator.TaskSupervisor
@@ -142,6 +185,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       type: {:or, [{:in, [:stop]}, {:tuple, [{:in, [:respawn]}, :non_neg_integer]}]},
       default: :stop
     ],
+    mode: [type: {:in, [:interactive, :task]}, default: :interactive],
+    max_runtime_ms: [
+      type: {:or, [:pos_integer, {:in, [false]}]},
+      default: false
+    ],
+    ready_timeout_ms: [
+      type: {:or, [:pos_integer, {:in, [false]}]},
+      default: false
+    ],
     user_id: [type: :any, default: nil]
   ]
 
@@ -160,6 +212,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           respawn_limit: non_neg_integer(),
           respawns: non_neg_integer(),
           last_activity_ms: integer(),
+          mode: TaskOutcome.mode(),
+          deadline_at_ms: integer() | nil,
           user_id: term() | nil
         }
 
@@ -223,12 +277,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
       last_activity_ms: now_ms(),
+      mode: tracking[:mode],
+      deadline_at_ms: deadline_at(tracking[:max_runtime_ms]),
       user_id: tracking[:user_id]
     }
 
     Events.broadcast(compute.id, {:status, compute.status})
-    schedule_heartbeat(state.heartbeat_ms)
+    schedule_heartbeat(state)
     schedule_status_poll(state)
+    schedule_deadline(tracking[:max_runtime_ms])
+    schedule_ready_timeout(state, tracking[:ready_timeout_ms])
     {:ok, state}
   end
 
@@ -239,7 +297,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   @impl true
   def handle_call(:info, _from, state) do
-    {:reply, Map.take(state, [:compute, :last_activity_ms, :user_id, :idle_ttl_ms]), state}
+    info =
+      state
+      |> Map.take([:compute, :last_activity_ms, :user_id, :idle_ttl_ms, :mode])
+      |> Map.put(:max_runtime_remaining_ms, remaining_ms(state.deadline_at_ms))
+
+    {:reply, info, state}
   end
 
   @impl true
@@ -251,10 +314,25 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:stop, :normal, state}
     else
       Events.broadcast(state.compute.id, {:heartbeat, now_ms()})
-      schedule_heartbeat(state.heartbeat_ms)
+      schedule_heartbeat(state)
       {:noreply, state}
     end
   end
+
+  # The wall-clock backstop. It is the only thing that ends a task whose
+  # container died without running its self-termination trap — a SIGKILL, an
+  # OOM kill, a wedged process — because RunPod keeps reporting such a pod as
+  # RUNNING and billing for it indefinitely.
+  def handle_info(:max_runtime, state), do: finish(:timed_out, state)
+
+  # A resource still provisioning this late is not slow, it is stuck: an image
+  # that will not pull leaves a rented, billing pod with no container in it.
+  # Failing here rather than waiting for `:max_runtime_ms` turns hours of
+  # wasted spend into minutes.
+  def handle_info(:ready_timeout, %{compute: %{status: :provisioning}} = state),
+    do: finish({:failed, :never_ready}, state)
+
+  def handle_info(:ready_timeout, state), do: {:noreply, state}
 
   def handle_info(:status_poll, %{poll_task: nil} = state) do
     case start_poll(state) do
@@ -332,8 +410,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     if respawn?(reason, state) do
       respawn(state, reason)
     else
-      {:stop, :normal, state}
+      case TaskOutcome.classify({:dead, reason, upstream}, state.mode) do
+        :none -> {:stop, :normal, state}
+        outcome -> finish(outcome, state)
+      end
     end
+  end
+
+  # --- task outcomes ---
+
+  # Announce the outcome *before* stopping, so the `{:task, _}` event precedes
+  # the `{:terminating, _}` / `{:status, :terminated}` pair that `Events`
+  # documents as the end-of-session signal. A subscriber that ignores task
+  # events still sees a correct lifecycle; one that reads them learns why the
+  # session ended before it ends.
+  defp finish(outcome, state) do
+    Events.broadcast(state.compute.id, {:task, outcome})
+    {:stop, :normal, state}
   end
 
   # `get_compute/2` can't return the auth handle — it was minted locally at
@@ -454,7 +547,27 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # --- scheduling ---
 
-  defp schedule_heartbeat(ms), do: Process.send_after(self(), :heartbeat, ms)
+  # Unattended work has no heartbeats to miss. Scheduling the idle clock in
+  # task mode would let the default 30-minute TTL kill a 90-minute training
+  # run, so in task mode it is never started at all — `touch/1` still accepts
+  # calls, it simply has nothing to postpone.
+  defp schedule_heartbeat(%{mode: :task}), do: :ok
+
+  defp schedule_heartbeat(%{heartbeat_ms: ms}), do: Process.send_after(self(), :heartbeat, ms)
+
+  # One-shot, armed here and never re-armed: a respawn inherits what is left of
+  # the original budget rather than starting a fresh one. `:max_runtime_ms` is
+  # a wall-clock spend cap, and a caller who asked for 90 minutes must not be
+  # able to spend 360 by being preempted three times.
+  defp schedule_deadline(false), do: :ok
+  defp schedule_deadline(ms), do: Process.send_after(self(), :max_runtime, ms)
+
+  # Readiness is a claim about *observed* status, so there is nothing to check
+  # without the status poller — with it disabled the deadline is the only
+  # backstop.
+  defp schedule_ready_timeout(_state, false), do: :ok
+  defp schedule_ready_timeout(%{status_poll_ms: nil}, _ms), do: :ok
+  defp schedule_ready_timeout(_state, ms), do: Process.send_after(self(), :ready_timeout, ms)
 
   defp schedule_status_poll(%{status_poll_ms: nil}), do: :ok
 
@@ -469,6 +582,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp respawn_limit(:stop), do: 0
   defp respawn_limit({:respawn, max}), do: max
+
+  defp deadline_at(false), do: nil
+  defp deadline_at(ms), do: now_ms() + ms
+
+  defp remaining_ms(nil), do: nil
+  defp remaining_ms(at), do: max(at - now_ms(), 0)
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 end

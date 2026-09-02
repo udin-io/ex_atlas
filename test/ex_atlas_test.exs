@@ -32,6 +32,28 @@ defmodule AtlasTest do
       assert compute.provider == :mock
     end
 
+    test "does not hand serverless job options to a ComputeRequest" do
+      # `:mode` belongs to `JobRequest`. Routing every request key to whichever
+      # request is being built made a compute spawn choke on it, which blocks
+      # the orchestrator using `:mode` for anything of its own.
+      assert {:ok, %Spec.Compute{}} =
+               ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x", mode: :task)
+    end
+
+    test "sends :command and :self_terminate to the provider" do
+      {:ok, compute} =
+        ExAtlas.spawn_compute(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          command: ["/app/train.sh"],
+          self_terminate: false
+        )
+
+      assert compute.raw.request.command == ["/app/train.sh"]
+      assert compute.raw.request.self_terminate == false
+    end
+
     test "accepts a user-provided provider module" do
       {:ok, compute} =
         ExAtlas.spawn_compute(provider: ExAtlas.Providers.Mock, gpu: :a100_80g, image: "x")
@@ -98,6 +120,16 @@ defmodule AtlasTest do
 
       assert job.status == :completed
       assert job.output == %{"echo" => %{prompt: "hi"}}
+    end
+
+    test "does not hand compute options to a JobRequest" do
+      assert {:ok, _job} =
+               ExAtlas.run_job(
+                 provider: :mock,
+                 endpoint: "abc",
+                 input: %{},
+                 image: "not-a-job-option"
+               )
     end
   end
 

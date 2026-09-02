@@ -27,4 +27,20 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
     req = ComputeRequest.new!(%{gpu: :h100, spot: true})
     assert req.spot == true
   end
+
+  test "new!/1 defaults to no command and to self-termination" do
+    req = ComputeRequest.new!(gpu: :h100)
+    assert req.command == nil
+    assert req.self_terminate == true
+  end
+
+  test "new!/1 takes a command as a list of strings" do
+    req = ComputeRequest.new!(gpu: :h100, command: ["/app/train.sh", "--epochs", "3"])
+    assert req.command == ["/app/train.sh", "--epochs", "3"]
+  end
+
+  test "new/1 rejects a command that is not a list of strings" do
+    assert {:error, %NimbleOptions.ValidationError{}} =
+             ComputeRequest.new(gpu: :h100, command: "/app/train.sh")
+  end
 end
