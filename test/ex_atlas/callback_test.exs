@@ -4,8 +4,9 @@ defmodule ExAtlas.CallbackTest do
   alias ExAtlas.Callback
   alias ExAtlas.Callback.Token
   alias ExAtlas.Orchestrator.ComputeRegistry
+  alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
-  setup do: ExAtlas.Test.Orchestrator.start!()
+  setup do: TestOrchestrator.start!()
 
   defp task_id, do: "task-#{System.unique_integer([:positive])}"
 
@@ -172,7 +173,7 @@ defmodule ExAtlas.CallbackTest do
 
     test "falls back to the configured base url" do
       Application.put_env(:ex_atlas, :callback,
-        secret: ExAtlas.Test.Orchestrator.callback_secret(),
+        secret: TestOrchestrator.callback_secret(),
         base_url: "https://configured.example.com/cb"
       )
 

@@ -5,12 +5,14 @@ defmodule ExAtlas.Callback.PlugTest do
   import Plug.Conn
 
   alias ExAtlas.Callback
-  alias ExAtlas.Callback.Token
+  alias ExAtlas.Callback.{Limiter, Token}
+  alias ExAtlas.Callback.Plug, as: CallbackPlug
   alias ExAtlas.Orchestrator.ComputeRegistry
+  alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
-  setup do: ExAtlas.Test.Orchestrator.start!()
+  setup do: TestOrchestrator.start!()
 
-  @opts ExAtlas.Callback.Plug.init([])
+  @opts CallbackPlug.init([])
 
   defp tracked_task(kinds \\ Callback.kinds()) do
     task = "task-#{System.unique_integer([:positive])}"
@@ -28,7 +30,7 @@ defmodule ExAtlas.Callback.PlugTest do
     |> then(fn conn ->
       if token, do: put_req_header(conn, "authorization", "Bearer " <> token), else: conn
     end)
-    |> ExAtlas.Callback.Plug.call(@opts)
+    |> CallbackPlug.call(@opts)
   end
 
   describe "the happy path" do
@@ -110,7 +112,7 @@ defmodule ExAtlas.Callback.PlugTest do
         :post
         |> conn("/progress", ~s({"pct":1}))
         |> put_req_header("authorization", "Basic " <> token)
-        |> ExAtlas.Callback.Plug.call(@opts)
+        |> CallbackPlug.call(@opts)
 
       assert conn.status == 401
     end
@@ -165,7 +167,7 @@ defmodule ExAtlas.Callback.PlugTest do
     test "a pod that floods progress is throttled, and only for progress" do
       {_task, token} = tracked_task()
 
-      for _ <- 1..ExAtlas.Callback.Limiter.burst(:progress) do
+      for _ <- 1..Limiter.burst(:progress) do
         assert post("/progress", token, ~s({"pct":1})).status == 202
       end
 
@@ -177,7 +179,7 @@ defmodule ExAtlas.Callback.PlugTest do
       {_a, token_a} = tracked_task()
       {_b, token_b} = tracked_task()
 
-      for _ <- 1..ExAtlas.Callback.Limiter.burst(:progress),
+      for _ <- 1..Limiter.burst(:progress),
           do: post("/progress", token_a, ~s({"pct":1}))
 
       assert post("/progress", token_a, ~s({"pct":1})).status == 429
@@ -187,7 +189,7 @@ defmodule ExAtlas.Callback.PlugTest do
     test "a rate-limited request never reaches the tracker" do
       {_task, token} = tracked_task()
 
-      for _ <- 1..ExAtlas.Callback.Limiter.burst(:progress),
+      for _ <- 1..Limiter.burst(:progress),
           do: post("/progress", token, ~s({"pct":1}))
 
       flush()
@@ -228,7 +230,7 @@ defmodule ExAtlas.Callback.PlugTest do
         :get
         |> conn("/progress")
         |> put_req_header("authorization", "Bearer " <> token)
-        |> ExAtlas.Callback.Plug.call(@opts)
+        |> CallbackPlug.call(@opts)
 
       assert conn.status == 404
     end
