@@ -146,6 +146,50 @@ signed =
 <video src={signed} />
 ```
 
+## Waiting until the pod is usable
+
+`spawn/1` returns when RunPod accepts the rental, which is 30–90 seconds
+(sometimes minutes, on a cold image) before anything in the pod answers a
+request. A LiveView should not block on that — subscribe, render "starting…",
+and react to `{:status, :running}` as the snippet above does.
+
+Everything that is *not* a LiveView should use `await_ready/2`:
+
+```elixir
+# Tracked: rides the tracker's existing status poll, so this costs the
+# provider no extra requests.
+case ExAtlas.Orchestrator.await_ready(compute.id, timeout_ms: 120_000) do
+  {:ok, ready}                 -> warm_up(hd(ready.ports).url)
+  {:error, {:dead, reason, _}} -> {:error, reason}
+  {:error, {:timeout, last}}   -> abandon_or_wait_longer(last)
+end
+
+# Untracked (a bare ExAtlas.spawn_compute/1, a script, a mix task): polls
+# get_compute/2 itself. Needs the provider opts; takes :poll_interval_ms.
+ExAtlas.await_ready(compute.id, provider: :runpod, timeout_ms: 120_000)
+```
+
+Three properties worth knowing:
+
+- **A failed poll never resolves the wait.** A 5xx, a rate limit or a socket
+  error means "we could not tell", so the wait backs off and keeps going to
+  its timeout. Only an answer that says failed, stopped, terminated or gone
+  ends it early — the same rule the poller itself works under.
+- **Timing out terminates nothing.** You get the last observed `Compute` back
+  and decide; `{:error, {:timeout, last}}` and `{:error, {:dead, reason, _}}`
+  are deliberately different answers to deliberately different questions.
+- **It follows a respawn.** With `on_failure: {:respawn, n}` a preempted pod is
+  replaced rather than ended, and the wait resolves on the replacement — on the
+  original deadline, so a preemption cannot buy the pod a fresh budget.
+
+The tracked wait runs in the calling process and consumes that pod's
+`{:atlas_compute, id, _}` messages while it waits, so call it from a task
+(`start_async/3`, `Task.async/1`, an Oban worker) rather than from a process
+that is itself subscribed. And because it listens to the tracker rather than
+the provider, it is only as timely as `:status_poll_ms` — with
+`status_poll_ms: false` nothing observes upstream at all, so use
+`ExAtlas.await_ready/2` with provider opts if you want your own poll.
+
 ## Choosing `idle_ttl_ms`
 
 - Too short: users blink and the pod dies. Bad UX, repeated cold starts

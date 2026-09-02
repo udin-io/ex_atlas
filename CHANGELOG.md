@@ -9,6 +9,47 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **`await_ready/2`: block until a compute is usable** (#22). `spawn_compute/1`
+  returns when the provider accepts the rental, minutes before the container
+  can serve traffic, and every caller was writing the same spawn → poll →
+  check-status loop by hand.
+
+  Two entry points, one result shape (`t:ExAtlas.await_result/0`):
+
+      # Untracked — a bare spawn, a script, a mix task. Polls get_compute/2.
+      ExAtlas.await_ready(id, provider: :runpod, timeout_ms: 120_000)
+
+      # Tracked — subscribes to the ComputeServer's existing status stream.
+      ExAtlas.Orchestrator.await_ready(id, timeout_ms: 120_000)
+      # {:ok, %Compute{status: :running}}
+      # | {:error, {:timeout, last_seen_compute_or_nil}}
+      # | {:error, {:dead, :failed | :stopped | :terminated | :vanished | :preempted, compute_or_nil}}
+
+  What the ticket asked for that is no longer needed: it also proposed that
+  `ComputeServer` poll upstream and broadcast `{:status, :running}` when the
+  pod is actually up. #24 shipped exactly that, so a *tracked* compute already
+  announces readiness. `Orchestrator.await_ready/2` therefore subscribes to
+  that stream rather than opening a second poll — awaiting ten pods costs the
+  provider nothing beyond the ten polls already running — and reads the
+  tracker's state after subscribing so a resource that came up in between is
+  not missed. An untracked id falls back to the polling path, so one call
+  covers both.
+
+  `{:poll_failed, _}` does not resolve the wait: a 5xx, a rate limit or a
+  socket error is "we could not tell", so the wait backs off (reusing
+  `UpstreamStatus.next_interval_ms/3`) and continues to its timeout. Timing out
+  terminates nothing and hands back the last observed `Compute`, per the
+  ticket. Readiness means observed `:running` and deliberately *not* "running
+  with ports populated" — a port-less `run_task/1` pod would never satisfy
+  that.
+
+  Across an `on_failure: {:respawn, n}` respawn the wait follows the
+  replacement on the *original* deadline. Getting that right meant fixing a
+  real ordering bug the tests found: `ComputeServer` broadcasts the death cause
+  *before* deciding whether to respawn, so a naive wait reported a preempted-
+  then-replaced session as over. A cause is now held until the tracker confirms
+  it by stopping.
+
 - **Pod→host callback boundary: progress, logs and exit codes** (#25).
   ExAtlas gains its first *inbound* external boundary. A running container can
   now POST progress, stream log lines, and declare its exit code before it
