@@ -172,6 +172,27 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a store that misbehaves outright" do
+    test "raising from all/0 fails adoption instead of failing the boot" do
+      # This runs inside the host's supervision tree during their boot. A
+      # host-supplied store that blows up must cost them adoption, not their
+      # application.
+      assert :ok = Adopter.run(store: ExAtlas.Test.TrackingStore.Raising, notify: self())
+
+      assert_receive :adoption_failed, 2_000
+    end
+
+    test "one unreadable record does not cost the others their trackers" do
+      compute = orphaned_task()
+      :ok = Memory.put(%{v: TrackingStore.version(), id: "not-a-real-record"})
+
+      assert :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert {:ok, _info} = Orchestrator.info(compute.id)
+    end
+  end
+
   describe "records this build does not understand" do
     test "are left alone rather than adopted or deleted" do
       compute = orphaned_task()

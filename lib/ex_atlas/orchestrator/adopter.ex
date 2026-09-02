@@ -88,9 +88,9 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   defp adopt_all(store, notify) do
-    case store.all() do
+    case read_all(store) do
       {:ok, records} ->
-        Enum.each(records, &adopt(&1, store))
+        Enum.each(records, &adopt_one(&1, store))
         signal(notify, :adoption_complete)
 
       {:error, reason} ->
@@ -103,6 +103,37 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
         signal(notify, :adoption_failed)
     end
+  end
+
+  # This runs inside the host's supervision tree during *their* boot, against a
+  # store they may have written and a provider API that may be down. Neither is
+  # allowed to take their application down, and a `restart: :transient` task
+  # that keeps crashing would do exactly that. So both boundaries are contained
+  # here, and every containment resolves towards the safe answer: adopt nothing
+  # and let the Reaper stay shut rather than guess.
+  defp read_all(store) do
+    store.all()
+  rescue
+    error -> {:error, error}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # One unreadable record must not cost the others their trackers.
+  defp adopt_one(record, store) do
+    adopt(record, store)
+  rescue
+    error -> log_skipped(record, error)
+  catch
+    :exit, reason -> log_skipped(record, {:exit, reason})
+  end
+
+  defp log_skipped(record, error) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Adopter] failed to adopt #{inspect(Map.get(record, :id))} " <>
+        "(#{inspect(error)}); it is still running upstream. Its record is kept, so the " <>
+        "Reaper will not terminate it."
+    )
   end
 
   defp adopt(record, store) do
