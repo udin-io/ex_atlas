@@ -186,6 +186,7 @@ defmodule ExAtlas do
     :idle_ttl_ms,
     :command,
     :self_terminate,
+    :callback,
     :provider_opts
   ]
 
