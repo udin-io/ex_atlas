@@ -3,6 +3,7 @@ defmodule AtlasTest do
 
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Spec
+  alias ExAtlas.Test.FaultyProvider
 
   setup do
     Mock.reset()
@@ -137,6 +138,117 @@ defmodule AtlasTest do
     test "returns mock catalog" do
       {:ok, [gpu | _]} = ExAtlas.list_gpu_types(provider: :mock)
       assert %Spec.GpuType{provider: :mock, canonical: :h100} = gpu
+    end
+  end
+
+  describe "await_ready/2" do
+    setup do
+      FaultyProvider.reset()
+      on_exit(&FaultyProvider.reset/0)
+
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      {:ok, id: compute.id}
+    end
+
+    test "returns straight away when the resource is already running", %{id: id} do
+      # A timeout too short to survive a single poll interval, so a wait that
+      # slept even once would fail here.
+      assert {:ok, %Spec.Compute{id: ^id, status: :running}} =
+               ExAtlas.await_ready(id, provider: :mock, poll_interval_ms: 5_000, timeout_ms: 50)
+    end
+
+    test "keeps polling until the provider reports running", %{id: id} do
+      :ok = Mock.set_status(id, :provisioning)
+      FaultyProvider.arm(:get_compute, {:block, self()})
+
+      task = Task.async(fn -> await(id) end)
+
+      # First poll: still provisioning, so the wait must not resolve.
+      assert_receive {:blocked, :get_compute, first}, 2_000
+      send(first, :release)
+
+      # Second poll: the cloud has finished provisioning.
+      assert_receive {:blocked, :get_compute, second}, 2_000
+      :ok = Mock.set_status(id, :running)
+      send(second, :release)
+
+      assert {:ok, %Spec.Compute{id: ^id, status: :running}} = Task.await(task, 5_000)
+    end
+
+    test "a poll that merely failed does not resolve the wait", %{id: id} do
+      # A 5xx or a socket blip is "we could not tell", not "it will never be
+      # ready". Resolving on one would turn a provider hiccup into a spurious
+      # failure for every caller of this function.
+      FaultyProvider.arm(
+        :get_compute,
+        {:error_once, ExAtlas.Error.new(:provider, provider: :mock, status: 500)}
+      )
+
+      assert {:ok, %Spec.Compute{id: ^id, status: :running}} = await(id)
+    end
+
+    test "gives up at the timeout and hands back the last compute it saw", %{id: id} do
+      :ok = Mock.set_status(id, :provisioning)
+
+      assert {:error, {:timeout, %Spec.Compute{id: ^id, status: :provisioning}}} =
+               ExAtlas.await_ready(id, provider: :mock, poll_interval_ms: 5, timeout_ms: 40)
+
+      # Nothing is terminated implicitly — the caller decides what a slow pod
+      # is worth.
+      assert {:ok, %Spec.Compute{status: :provisioning}} =
+               ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a timeout with no successful poll at all hands back nothing", %{id: id} do
+      FaultyProvider.arm(
+        :get_compute,
+        {:error, ExAtlas.Error.new(:provider, provider: :mock, status: 500)}
+      )
+
+      assert {:error, {:timeout, nil}} =
+               ExAtlas.await_ready(id,
+                 provider: FaultyProvider,
+                 poll_interval_ms: 5,
+                 timeout_ms: 40
+               )
+    end
+
+    test "a resource that dies while waiting is reported with its cause", %{id: id} do
+      :ok = Mock.set_status(id, :provisioning)
+      FaultyProvider.arm(:get_compute, {:block, self()})
+
+      task = Task.async(fn -> await(id) end)
+
+      assert_receive {:blocked, :get_compute, first}, 2_000
+      send(first, :release)
+
+      assert_receive {:blocked, :get_compute, second}, 2_000
+      :ok = Mock.set_status(id, :failed)
+      send(second, :release)
+
+      assert {:error, {:dead, :failed, %Spec.Compute{status: :failed}}} = Task.await(task, 5_000)
+    end
+
+    test "a resource the provider has forgotten is dead, with nothing to hand back", %{id: id} do
+      :ok = Mock.forget(id)
+
+      assert {:error, {:dead, :vanished, nil}} = await(id)
+    end
+
+    test "on spot capacity a disappearance is reported as preemption", %{id: id} do
+      :ok = Mock.forget(id)
+
+      assert {:error, {:dead, :preempted, nil}} =
+               ExAtlas.await_ready(id,
+                 provider: :mock,
+                 spot: true,
+                 poll_interval_ms: 5,
+                 timeout_ms: 500
+               )
+    end
+
+    defp await(id) do
+      ExAtlas.await_ready(id, provider: FaultyProvider, poll_interval_ms: 1, timeout_ms: 5_000)
     end
   end
 end

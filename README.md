@@ -41,6 +41,7 @@ Two concerns under one roof:
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Quick start — Fly.io platform ops](#quick-start--flyio-platform-ops)
 - [Quick start — transient per-user GPU pod](#quick-start--transient-per-user-gpu-pod)
+- [Waiting until a pod is usable](#waiting-until-a-pod-is-usable)
 - [Quick start — batch task on a GPU pod](#quick-start--batch-task-on-a-gpu-pod)
 - [Pod callbacks — progress, logs, exit codes](#pod-callbacks--progress-logs-exit-codes)
 - [Quick start — serverless inference](#quick-start--serverless-inference)
@@ -263,6 +264,38 @@ You can also terminate manually:
 ```elixir
 :ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
 ```
+
+## Waiting until a pod is usable
+
+`spawn_compute/1` and `Orchestrator.spawn/1` return the moment the provider
+accepts the rental — 30–90 seconds before the container answers anything. A
+LiveView should subscribe and render "starting…"; everything else should block
+on `await_ready/2`.
+
+```elixir
+# Tracked. Rides the ComputeServer's existing status poll, so it adds no
+# requests to your provider, and returns immediately if it is already up.
+case ExAtlas.Orchestrator.await_ready(compute.id, timeout_ms: 120_000) do
+  {:ok, ready}                 -> hd(ready.ports).url
+  {:error, {:dead, reason, _}} -> {:error, reason}   # :failed | :vanished | :preempted | …
+  {:error, {:timeout, last}}   -> wait_longer_or_give_up(last)
+end
+
+# Untracked — a bare spawn, a script, a mix task. Polls get_compute/2 itself.
+ExAtlas.await_ready(id, provider: :runpod, timeout_ms: 120_000, poll_interval_ms: 2_000)
+```
+
+- A **failed poll never resolves the wait**: a 5xx or a socket blip means "we
+  could not tell", so it backs off and keeps waiting to the timeout.
+- A **timeout terminates nothing** — you get the last observed `Compute` back
+  and decide.
+- It **follows an `on_failure: {:respawn, n}` respawn** to the replacement, on
+  the original deadline.
+
+The tracked wait runs in the calling process and consumes that pod's
+`{:atlas_compute, id, _}` messages, so run it in a task rather than in a
+process that is itself subscribed. See the
+[transient pods guide](guides/transient_pods.md).
 
 ## Quick start — batch task on a GPU pod
 
