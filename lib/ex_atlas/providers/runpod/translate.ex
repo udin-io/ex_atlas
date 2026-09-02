@@ -9,6 +9,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   """
 
   alias ExAtlas.Auth.Token, as: AuthToken
+  alias ExAtlas.Callback
   alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Spec
 
@@ -23,7 +24,12 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   @spec compute_request_to_pod_create(Spec.ComputeRequest.t()) :: {map(), map() | nil}
   def compute_request_to_pod_create(%Spec.ComputeRequest{} = req) do
     {auth_env, auth_handle} = build_auth(req.auth)
-    env = req.env |> Map.merge(auth_env) |> atomize_for_runpod_env()
+
+    env =
+      req.env
+      |> Map.merge(auth_env)
+      |> Map.merge(callback_env(req.callback))
+      |> atomize_for_runpod_env()
 
     body =
       %{
@@ -130,10 +136,13 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # delete the pod before anything ran, so both mean "leave it unset".
   defp docker_start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
   defp docker_start_cmd(%Spec.ComputeRequest{command: []}), do: nil
-  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false}), do: cmd
 
-  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd}),
-    do: ["sh", "-c", self_terminating(cmd)]
+  # Nothing to trap for: no self-termination asked for and nothing to report.
+  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false, callback: nil}),
+    do: cmd
+
+  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd} = req),
+    do: ["sh", "-c", wrapped(req, cmd)]
 
   # A pod whose start command has exited does not stop: RunPod's REST v1 `Pod`
   # schema carries no container state — no `runtime`, no `currentStatus`, no
@@ -155,12 +164,43 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # nothing runs in the container at all in those cases. That is precisely the
   # set `ExAtlas.Orchestrator.run_task/1`'s deadline exists for, which is why
   # the two mechanisms are both required rather than alternatives.
-  defp self_terminating(command) do
+  # `atlas_code=$?` must be the very first thing in the trap: anything else runs
+  # first and clobbers the status we are trying to report.
+  #
+  # The finish POST goes *before* the DELETE, and swallows its own failure, for
+  # two reasons. It has to be a marker written while the pod still exists, so a
+  # later disappearance is no longer ambiguous — that is the spot fix. And the
+  # DELETE is the line that stops the meter, so an unreachable callback host
+  # must never be able to skip it. `-m` bounds the same risk in time.
+  defp wrapped(req, command) do
+    body =
+      [finish_report(req.callback), self_delete(req.self_terminate)]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(" ")
+
+    "atlas_self_terminate() { atlas_code=$?; #{body} }; " <>
+      "trap atlas_self_terminate EXIT INT TERM; " <> shell_join(command)
+  end
+
+  defp self_delete(false), do: nil
+
+  defp self_delete(true) do
     url = "#{Client.management_url()}/pods/$RUNPOD_POD_ID"
 
-    "atlas_self_terminate() { curl -sS -X DELETE " <>
-      "-H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\"; }; " <>
-      "trap atlas_self_terminate EXIT INT TERM; " <> shell_join(command)
+    "curl -sS -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\";"
+  end
+
+  defp finish_report(nil), do: nil
+
+  # Every value here comes from the container's own environment rather than
+  # being interpolated into the script, so a callback URL can never be read as
+  # shell syntax.
+  defp finish_report(%{}) do
+    ~s(curl -sS -m 10 -X POST ) <>
+      ~s(-H "Authorization: Bearer $ATLAS_CALLBACK_TOKEN" ) <>
+      ~s(-H "Content-Type: application/json" ) <>
+      ~s(-d "{\\"exit_code\\":$atlas_code}" ) <>
+      ~s("$ATLAS_CALLBACK_URL/finish" || true;)
   end
 
   defp shell_join(command), do: command |> Enum.map_join(" ", &shell_quote/1)
@@ -261,6 +301,9 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp job_status("CANCELLED"), do: :cancelled
   defp job_status("TIMED_OUT"), do: :timed_out
   defp job_status(_), do: :in_queue
+
+  defp callback_env(nil), do: %{}
+  defp callback_env(%{} = callback), do: Callback.env(callback)
 
   # --- auth helpers ---
 

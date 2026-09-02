@@ -1,6 +1,7 @@
 defmodule ExAtlas.Orchestrator.ComputeServerTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Callback
   alias ExAtlas.Orchestrator.{ComputeSupervisor, Events}
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.FaultyProvider
@@ -833,6 +834,243 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
                )
 
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
+
+  describe "pod callbacks" do
+    setup do
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        command: ["/app/train.sh"],
+        mode: :task,
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: 10,
+        max_runtime_ms: 60_000,
+        callback: "https://app.example.com/atlas/cb"
+      ]
+
+      {:ok, base: base}
+    end
+
+    defp start_reporting_task(base, overrides \\ []) do
+      opts = Keyword.merge(base, overrides)
+      {:ok, prepared} = Callback.prepare(opts)
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(prepared)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {pid, compute, prepared[:callback].task_id}
+    end
+
+    test "a progress report reaches subscribers on the compute topic", %{base: base} do
+      {_pid, compute, task_id} = start_reporting_task(base)
+      id = compute.id
+
+      assert :ok = Callback.ingest(task_id, :progress, %{"seq" => 1, "pct" => 42})
+
+      assert_receive {:atlas_compute, ^id, {:progress, %{"pct" => 42}}}, 2_000
+    end
+
+    test "a log batch reaches subscribers and is retained nowhere", %{base: base} do
+      {_pid, compute, task_id} = start_reporting_task(base)
+      id = compute.id
+
+      assert :ok = Callback.ingest(task_id, :log, %{"lines" => ["epoch 1", "epoch 2"]})
+
+      assert_receive {:atlas_compute, ^id, {:log, %{"lines" => ["epoch 1", "epoch 2"]}}}, 2_000
+
+      # Nothing about the tracked state grew: the boundary is a bus, not a store.
+      assert {:ok, info} = ExAtlas.Orchestrator.info(id)
+      refute Map.has_key?(info, :logs)
+    end
+
+    test "progress does not postpone the idle clock", %{base: base} do
+      # An authenticated but compromised pod must not be able to keep itself
+      # alive against the idle TTL just by talking.
+      {_pid, compute, task_id} = start_reporting_task(base, mode: :interactive)
+      id = compute.id
+      {:ok, %{last_activity_ms: before}} = ExAtlas.Orchestrator.info(id)
+
+      :ok = Callback.ingest(task_id, :progress, %{"pct" => 1})
+      assert_receive {:atlas_compute, ^id, {:progress, _}}, 2_000
+
+      assert {:ok, %{last_activity_ms: ^before}} = ExAtlas.Orchestrator.info(id)
+    end
+
+    test "a finish report is announced the moment it lands", %{base: base} do
+      {_pid, compute, task_id} = start_reporting_task(base)
+      id = compute.id
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+    end
+
+    test "a clean exit followed by the pod vanishing completes, provably", %{base: base} do
+      {pid, compute, task_id} = start_reporting_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a non-zero exit fails the task with the code the container reported", %{base: base} do
+      {pid, compute, task_id} = start_reporting_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 3})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 3}}}, 2_000
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, {:failed, {:exit_code, 3}}}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a report from a pod that never vanishes finishes on the grace timer", %{base: base} do
+      # self_terminate: false, a skipped trap, a DELETE that failed. Today this
+      # can only ever end as :timed_out, an hour later.
+      {pid, compute, task_id} = start_reporting_task(base, finish_grace_ms: 50)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+
+      # And the meter is actually stopped — terminate/2 issued the DELETE the
+      # container's own trap evidently did not.
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "the grace window waits for the 404 rather than pre-empting it", %{base: base} do
+      {_pid, compute, task_id} = start_reporting_task(base, finish_grace_ms: 60_000)
+      id = compute.id
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+
+      refute_receive {:atlas_compute, ^id, {:task, _}}, 200
+    end
+
+    test "a second finish report does not restart the grace window", %{base: base} do
+      {pid, compute, task_id} = start_reporting_task(base, finish_grace_ms: 80)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 9})
+
+      # First report wins: a replayed or retried finish cannot rewrite the
+      # outcome, and cannot buy the pod another grace window either.
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "the deadline stays authoritative when nothing ever calls back", %{base: base} do
+      {pid, compute, _task_id} = start_reporting_task(base, max_runtime_ms: 50)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id, {:task, :timed_out}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a configured callback nobody uses behaves exactly like no callback", %{base: base} do
+      {pid, compute, _task_id} = start_reporting_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a callback for a task that is not this one is ignored", %{base: base} do
+      {pid, compute, _task_id} = start_reporting_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      assert {:error, :not_tracked} =
+               Callback.ingest("some-other-task", :finish, %{"exit_code" => 1})
+
+      refute_receive {:atlas_compute, ^id, {:task_report, _}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+    end
+  end
+
+  describe "callbacks and spot capacity" do
+    setup do
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        command: ["/app/train.sh"],
+        mode: :task,
+        spot: true,
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: 10,
+        max_runtime_ms: 60_000,
+        on_failure: {:respawn, 1},
+        callback: "https://app.example.com/atlas/cb"
+      ]
+
+      {:ok, base: base}
+    end
+
+    test "a task that reported finish is never respawned", %{base: base} do
+      # The ambiguity #25 exists to kill: on spot capacity a 404 means both
+      # "self-terminated fine" and "reclaimed", so respawn can re-run finished
+      # work. A recorded report settles it.
+      {pid, compute, task_id} = start_reporting_task(base)
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+    end
+
+    test "a genuine preemption with no report still respawns", %{base: base} do
+      {pid, compute, _task_id} = start_reporting_task(base)
+      old_id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(old_id)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, _new_id}}, 2_000
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+    end
+
+    test "the task id follows the replacement, so a respawned pod can still report",
+         %{base: base} do
+      {_pid, compute, task_id} = start_reporting_task(base)
+      old_id = compute.id
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      # The credential in the replacement's env is the same one: it is bound to
+      # the task, not to a compute id that no longer exists.
+      assert :ok = Callback.ingest(task_id, :progress, %{"pct" => 50})
+
+      assert_receive {:atlas_compute, ^new_id, {:progress, %{"pct" => 50}}}, 2_000
     end
   end
 end

@@ -48,6 +48,7 @@ defmodule ExAtlas.Orchestrator do
       :ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
   """
 
+  alias ExAtlas.Callback
   alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor}
 
   # A task with no wall-clock cap is the billing trap this whole feature exists
@@ -63,7 +64,8 @@ defmodule ExAtlas.Orchestrator do
   `compute` is the `ExAtlas.Spec.Compute` normally returned by `ExAtlas.spawn_compute/1`.
 
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
-  `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`, `:user_id`)
+  `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`,
+  `:finish_grace_ms`, `:callback`, `:user_id`)
   are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
@@ -75,7 +77,8 @@ defmodule ExAtlas.Orchestrator do
   def spawn(opts) do
     ensure_running!()
 
-    with {:ok, _tracking} <- ComputeServer.validate_opts(opts),
+    with {:ok, opts} <- Callback.prepare(opts),
+         {:ok, _tracking} <- ComputeServer.validate_opts(opts),
          {:ok, compute} <- ExAtlas.spawn_compute(opts) do
       track(compute, opts)
     end
@@ -122,17 +125,34 @@ defmodule ExAtlas.Orchestrator do
     * `{:task, :completed}`
     * `{:task, :timed_out}`
     * `{:task, {:failed, reason}}` — `:never_ready`, `:preempted`,
-      `:terminated`, `:failed`
+      `:terminated`, `:failed`, or `{:exit_code, n}`
 
-  ## `:completed` does not mean "succeeded"
+  ## Reporting back: the `:callback` option
+
+  Pass `callback: "https://your-app.example.com/atlas/cb"` (or configure
+  `config :ex_atlas, :callback, base_url: ...`) and ExAtlas mints a task-scoped
+  credential, injects `ATLAS_CALLBACK_URL` / `ATLAS_CALLBACK_TOKEN` /
+  `ATLAS_TASK_ID` into the container, and has the self-termination trap POST
+  the exit code before the pod goes. Mount `ExAtlas.Callback.Plug` to receive
+  it. See the "Pod callbacks" guide.
+
+  With a callback, `{:task, :completed}` is **proven** and a non-zero exit
+  arrives as `{:task, {:failed, {:exit_code, n}}}`. Subscribers also get
+  `{:progress, payload}`, `{:log, payload}` and `{:task_report, report}`.
+
+  Related options: `:finish_grace_ms` (default 60s) is how long to wait, after
+  a report lands, for the resource to actually disappear before finishing on
+  the report anyway; `:allow_insecure_callback` lets a loopback or plain-HTTP
+  URL through for local development.
+
+  ## Without a callback, `:completed` does not mean "succeeded"
 
   It means **the container ended and the resource is gone**. The
   self-termination wrapper traps `EXIT`, so a crashed command cleans up exactly
   like a successful one and both reach the orchestrator as the same 404; the
   exit code dies with the pod, and RunPod's REST API offers no way to read it
-  back. If you need to distinguish success from failure, have the container
-  report it — write a status file to a network volume, call your own webhook —
-  before it exits.
+  back. That is precisely the ambiguity `:callback` removes — and it is a
+  strictly additive feature, so omitting it costs nothing that was ever there.
 
   ## Two mechanisms, both required
 
@@ -152,6 +172,8 @@ defmodule ExAtlas.Orchestrator do
     * `ready_timeout_ms:` 15 minutes, if you did not say. Applies only while
       the resource is still `:provisioning`, and only when the status poller
       is running.
+    * `finish_grace_ms:` 60 seconds. Only ever armed by a callback report, so
+      it does nothing at all without `:callback`.
 
   Note that `:max_runtime_ms` is wall clock **from spawn**, not compute time
   and not time since `:running` — image-pull time counts against it, because
@@ -169,6 +191,10 @@ defmodule ExAtlas.Orchestrator do
   re-run. Use respawn for spot tasks only where re-running is harmless —
   checkpoint-resuming training, which is what the option was added for — and
   note the carried deadline bounds the total spend either way.
+
+  A `:callback` removes that ambiguity: a task that reported `finish` is never
+  respawned, and a preemption observed after a clean report is read as
+  `:completed`.
   """
   @spec run_task(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()} | {:error, term()}

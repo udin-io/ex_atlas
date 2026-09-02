@@ -26,12 +26,28 @@ defmodule ExAtlas.Orchestrator.Events do
       a live credential on a PubSub topic.
     * `{:respawn_failed, {reason, error}}` — the replacement could not be
       spawned; the server is shutting down.
+    * `{:progress, payload}` — a pod reported progress through
+      `ExAtlas.Callback`. The payload is the container's own JSON object,
+      relayed verbatim and retained nowhere; the convention is a `seq` plus
+      whatever the job wants to say (`pct`, `step`, …).
+    * `{:log, payload}` — a batch of log lines from the pod, by convention
+      `%{"seq" => n, "lines" => [...]}`. **ExAtlas retains zero log bytes**:
+      this is a bus, not a store, exactly as `ExAtlas.Fly.Logs.Streamer`
+      already is for Fly log entries. A subscriber that wants history keeps it.
+    * `{:task_report, %{exit_code: n}}` — the container declared its exit code
+      before going away. Fires the moment the callback lands, so a subscriber
+      learns the exit code without waiting for the resource to disappear. In
+      `mode: :task` it also ends the task: either the usual disappearance
+      confirms it, or a `:finish_grace_ms` timer does.
     * `{:task, outcome}` — a `mode: :task` session ended, and this is what
       happened: `:completed`, `:timed_out`, or `{:failed, reason}`. Sent
       *before* the `{:terminating, _}` / `{:status, :terminated}` pair, so a
       subscriber that ignores task events still sees a correct lifecycle.
-      `:completed` means the container ended and the resource is gone — not
-      that the work succeeded; see `ExAtlas.Orchestrator.run_task/1`.
+      Without a `{:task_report, _}` first, `:completed` means the container
+      ended and the resource is gone — not that the work succeeded. With one,
+      it is proven: the container said `exit_code: 0`. A non-zero exit arrives
+      as `{:task, {:failed, {:exit_code, n}}}`. See
+      `ExAtlas.Orchestrator.run_task/1`.
     * `{:terminating, reason}` — server is shutting down.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 

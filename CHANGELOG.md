@@ -9,6 +9,46 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **Pod→host callback boundary: progress, logs and exit codes** (#25).
+  ExAtlas gains its first *inbound* external boundary. A running container can
+  now POST progress, stream log lines, and declare its exit code before it
+  goes, and the orchestrator relays all three on the existing
+  `"compute:<id>"` topic as `{:progress, payload}`, `{:log, payload}` and
+  `{:task_report, %{exit_code: n}}`.
+
+  New modules: `ExAtlas.Callback` (framework-free core — `verify/1`,
+  `ingest/3`, `prepare/1`), `ExAtlas.Callback.Plug` (the shipped HTTP
+  boundary, behind a new **optional** `:plug` dependency),
+  `ExAtlas.Callback.Token` (stateless signed credential) and
+  `ExAtlas.Callback.Limiter` (per-task, per-kind ETS token bucket).
+
+  Turn it on with `callback: "https://app.example.com/atlas/cb"` on
+  `spawn/1`/`run_task/1` (or `config :ex_atlas, :callback, base_url: ...`),
+  a `secret:` in the same config block, and
+  `forward "/cb", ExAtlas.Callback.Plug` in your router.
+
+  Why a `task_id` and not the compute id, as the ticket proposed: RunPod
+  assigns the compute id in the `POST /pods` *response*, so nothing can bind a
+  token to it while the container environment is still being built. The task id
+  is minted before the provider call, and it survives an
+  `on_failure: {:respawn, n}` swap, where a compute id would not.
+
+- **`:completed` is now provable, and the spot ambiguity is closed** (#25).
+  `ExAtlas.Orchestrator.TaskOutcome.classify/3` takes the recorded report:
+  a clean exit turns an inferred completion into a proven one, a non-zero exit
+  becomes `{:task, {:failed, {:exit_code, n}}}` — the existing failure shape,
+  so no subscriber breaks — and a preemption observed after a clean report
+  reads as `:completed`. A compute that reported `finish` is never respawned,
+  so `on_failure: {:respawn, n}` can no longer re-run work that already
+  finished. With no report, `classify/3` is byte-identical to `classify/2`.
+
+- **`:finish_grace_ms` (default 60s) fixes `self_terminate: false`** (#25).
+  A one-shot armed by the first report. When the report lands but the resource
+  never disappears — a skipped trap, an image without `curl`, a `DELETE` that
+  failed — the task finishes on the report and teardown issues the `DELETE`
+  that stops the meter. Those tasks could previously only ever end as
+  `:timed_out`.
+
 - **`ExAtlas.Orchestrator.run_task/1` — run a container to completion** (#21).
   The third compute shape, alongside interactive per-user pods and serverless
   jobs: run this image with this command until it exits, report the outcome,
@@ -70,6 +110,29 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   translation. The enum is exactly `RUNNING | EXITED | TERMINATED`; an
   unclassifiable status now falls through to `:provisioning`, which
   `UpstreamStatus` counts as alive rather than as a death.
+
+### Security
+
+- The pod callback endpoint is internet-reachable and every byte on it comes
+  from a container ExAtlas does not control, so the library ships the
+  dangerous parts rather than documenting them (#25): body caps applied by
+  `read_body/2` **before** any JSON decode and without consulting the
+  attacker-written `content-length`; constant-time verification via
+  `Plug.Crypto`; a per-task, per-kind rate limit with swept buckets; distinct
+  401/410/413/429 responses, none of which reveals to an unauthenticated
+  caller whether a task id exists; `send` rather than `GenServer.call`, so a
+  web request can never block on the orchestrator's mailbox; no atom ever
+  created from client input; and no response body that echoes the token.
+
+- Callback URLs are validated at the `spawn/1` seam, *before* the provider is
+  called, and a non-`https`, loopback, RFC 1918, link-local or `.local` host is
+  refused unless `allow_insecure_callback: true` (#25). Validating after the
+  resource existed would leak a live, billing pod behind a raise, and a
+  callback that silently never arrives is worse than no callback at all.
+
+- `:max_runtime_ms` remains authoritative: a pod cannot extend its own budget
+  by staying quiet or by talking. `progress` deliberately does **not**
+  `touch/1`, so a compromised pod cannot defeat its own idle TTL (#25).
 
 ## v0.5.0 — unreleased
 

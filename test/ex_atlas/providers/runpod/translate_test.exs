@@ -1,6 +1,7 @@
 defmodule ExAtlas.Providers.RunPod.TranslateTest do
   use ExUnit.Case, async: true
 
+  alias ExAtlas.Callback
   alias ExAtlas.Providers.RunPod.Translate
   alias ExAtlas.Spec
 
@@ -99,7 +100,9 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     # Run a generated `dockerStartCmd` for real, with a `curl` shim ahead of
     # everything else on PATH so the self-termination request is recorded
     # rather than sent. Returns `{exit_status, curl_log}`.
-    defp run_start_cmd(["sh", "-c", script], tmp) do
+    defp run_start_cmd(cmd, tmp, extra_env \\ [])
+
+    defp run_start_cmd(["sh", "-c", script], tmp, extra_env) do
       shim = Path.join(tmp, "curl")
       log = Path.join(tmp, "curl.log")
       File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\n")
@@ -108,11 +111,12 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {_out, status} =
         System.cmd("sh", ["-c", script],
           stderr_to_stdout: true,
-          env: [
-            {"PATH", tmp <> ":" <> System.get_env("PATH", "/usr/bin:/bin")},
-            {"RUNPOD_POD_ID", "pod_abc"},
-            {"RUNPOD_API_KEY", "pod-scoped-key"}
-          ]
+          env:
+            [
+              {"PATH", tmp <> ":" <> System.get_env("PATH", "/usr/bin:/bin")},
+              {"RUNPOD_POD_ID", "pod_abc"},
+              {"RUNPOD_API_KEY", "pod-scoped-key"}
+            ] ++ extra_env
         )
 
       {status, File.read!(log)}
@@ -219,6 +223,172 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       assert %{status: :failed} =
                Translate.job_response_to_job(%{"id" => "j", "status" => "FAILED"})
+    end
+  end
+
+  describe "pod callbacks" do
+    setup do
+      secret = String.duplicate("translate-test-callback-secret", 2)
+      Application.put_env(:ex_atlas, :callback, secret: secret)
+      on_exit(fn -> Application.delete_env(:ex_atlas, :callback) end)
+
+      {:ok, opts} = Callback.prepare(callback: "https://app.example.com/atlas/cb")
+      %{callback: opts[:callback]}
+    end
+
+    defp env_value(body, key) do
+      case Enum.find(body["env"], &(&1["key"] == key)) do
+        nil -> nil
+        pair -> pair["value"]
+      end
+    end
+
+    defp callback_env(tmp) do
+      [
+        {"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"},
+        {"ATLAS_CALLBACK_TOKEN", "a-token"},
+        {"ATLAS_TASK_ID", "a-task"},
+        {"CURL_LOG", Path.join(tmp, "curl.log")}
+      ]
+    end
+
+    test "no callback injects nothing — the request is byte-identical to today" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", command: ["/app/train.sh"])
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert env_value(body, "ATLAS_CALLBACK_URL") == nil
+      assert env_value(body, "ATLAS_CALLBACK_TOKEN") == nil
+      assert env_value(body, "ATLAS_TASK_ID") == nil
+      refute body["dockerStartCmd"] |> List.last() =~ "ATLAS_CALLBACK_URL"
+    end
+
+    test "a callback injects the three documented variables", %{callback: callback} do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", callback: callback)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert env_value(body, "ATLAS_CALLBACK_URL") == "https://app.example.com/atlas/cb"
+      assert env_value(body, "ATLAS_TASK_ID") == callback.task_id
+    end
+
+    test "the injected token verifies back to that task alone", %{callback: callback} do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", callback: callback)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {:ok, claims} = Callback.verify(env_value(body, "ATLAS_CALLBACK_TOKEN"))
+      assert claims.task_id == callback.task_id
+    end
+
+    test "the callback token is not the preshared key", %{callback: callback} do
+      req =
+        Spec.ComputeRequest.new!(gpu: :h100, image: "x", auth: :bearer, callback: callback)
+
+      {body, auth} = Translate.compute_request_to_pod_create(req)
+
+      # A browser-held secret must never also authorize writing into the
+      # orchestrator, so the two credentials are separate.
+      refute env_value(body, "ATLAS_CALLBACK_TOKEN") == auth.token
+      assert env_value(body, "ATLAS_PRESHARED_KEY") == auth.token
+    end
+
+    test "env injection needs no command — an image's own CMD can report too",
+         %{callback: callback} do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", callback: callback)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      refute Map.has_key?(body, "dockerStartCmd")
+      assert env_value(body, "ATLAS_TASK_ID") == callback.task_id
+    end
+
+    @tag :tmp_dir
+    test "the trap posts a clean exit code, then deletes the pod",
+         %{tmp_dir: tmp, callback: callback} do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["sh", "-c", "echo ran"],
+          callback: callback
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+
+      assert log =~ ~s({"exit_code":0})
+      assert log =~ "https://app.example.com/atlas/cb/finish"
+      assert log =~ "-X DELETE"
+
+      # The marker is written before the pod goes, which is the whole point:
+      # a later disappearance is no longer ambiguous.
+      [finish, delete] = String.split(log, "\n", trim: true)
+      assert finish =~ "/finish"
+      assert delete =~ "-X DELETE"
+    end
+
+    @tag :tmp_dir
+    test "the trap reports the real exit code of a failed command",
+         %{tmp_dir: tmp, callback: callback} do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["sh", "-c", "exit 3"],
+          callback: callback
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {3, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert log =~ ~s({"exit_code":3})
+    end
+
+    @tag :tmp_dir
+    test "self_terminate: false still reports, and still does not delete",
+         %{tmp_dir: tmp, callback: callback} do
+      # This is what makes the :finish_grace_ms window useful: without the
+      # report, a `self_terminate: false` task can only ever end as :timed_out.
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["sh", "-c", "exit 0"],
+          self_terminate: false,
+          callback: callback
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert log =~ ~s({"exit_code":0})
+      refute log =~ "-X DELETE"
+    end
+
+    @tag :tmp_dir
+    test "a callback host that is down cannot stop the pod deleting itself",
+         %{tmp_dir: tmp, callback: callback} do
+      # The DELETE is the line that stops the meter. A failing POST in front of
+      # it must never be able to skip it.
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["sh", "-c", "echo ran"],
+          callback: callback
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      failing_curl(tmp)
+
+      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert log =~ "-X DELETE"
+    end
+
+    # A curl shim that logs and then fails, the way an unreachable host looks.
+    defp failing_curl(tmp) do
+      shim = Path.join(tmp, "curl")
+      log = Path.join(tmp, "curl.log")
+      File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\nexit 7\n")
+      File.chmod!(shim, 0o755)
     end
   end
 end

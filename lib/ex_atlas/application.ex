@@ -6,8 +6,10 @@ defmodule ExAtlas.Application do
 
     * **Orchestrator** (opt-in via `config :ex_atlas, start_orchestrator: true`) —
       boots a `Registry`, a `Task.Supervisor` for the trackers' status polls,
-      a `DynamicSupervisor`, optional `Phoenix.PubSub`, and the `Reaper` that
-      periodically reconciles tracked compute resources.
+      a `DynamicSupervisor`, the pod-callback rate limiter, optional
+      `Phoenix.PubSub`, and the `Reaper` that periodically reconciles tracked
+      compute resources. `ExAtlas.Callback` routes through the same `Registry`,
+      so the inbound callback boundary needs this tree too.
 
     * **Fly platform ops** (default on, disable via
       `config :ex_atlas, :fly, enabled: false`) — boots the token storage, token
@@ -18,6 +20,7 @@ defmodule ExAtlas.Application do
   """
   use Application
 
+  alias ExAtlas.Callback.Limiter
   alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor, Reaper}
 
   @impl true
@@ -32,7 +35,8 @@ defmodule ExAtlas.Application do
       base = [
         {Registry, keys: :unique, name: ComputeRegistry},
         {Task.Supervisor, name: ComputeServer.task_supervisor_name()},
-        {DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one}
+        {DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one},
+        Limiter
       ]
 
       base ++ pubsub_child() ++ [Reaper]

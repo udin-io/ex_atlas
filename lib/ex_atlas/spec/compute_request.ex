@@ -26,7 +26,17 @@ defmodule ExAtlas.Spec.ComputeRequest do
   Set `self_terminate: false` for an image with no shell or no `curl`, or when
   you want to keep the resource up for inspection after the command ends. Then
   the only thing that will ever stop it is
-  `ExAtlas.Orchestrator.run_task/1`'s `:max_runtime_ms`, or you.
+  `ExAtlas.Orchestrator.run_task/1`'s `:max_runtime_ms`, or you — unless a
+  `:callback` is configured, in which case the container still reports its exit
+  code and `:finish_grace_ms` ends the task on that.
+
+  ## Reporting back
+
+  `:callback` is not set by hand. `ExAtlas.Orchestrator.spawn/1` builds it from
+  the `callback: url` spawn option (see `ExAtlas.Callback.prepare/1`) and it
+  carries the `task_id` the pod's credential is bound to. A provider translator
+  expands it into `ATLAS_CALLBACK_URL`, `ATLAS_CALLBACK_TOKEN` and
+  `ATLAS_TASK_ID` in the container environment.
   """
 
   @enforce_keys [:gpu]
@@ -47,6 +57,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
             idle_ttl_ms: nil,
             command: nil,
             self_terminate: true,
+            callback: nil,
             provider_opts: %{}
 
   @type port_spec :: {pos_integer(), :http | :tcp}
@@ -71,6 +82,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
           idle_ttl_ms: pos_integer() | nil,
           command: [String.t()] | nil,
           self_terminate: boolean(),
+          callback: ExAtlas.Callback.config() | nil,
           provider_opts: map()
         }
 
@@ -92,6 +104,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
     idle_ttl_ms: [type: {:or, [:pos_integer, nil]}, default: nil],
     command: [type: {:or, [{:list, :string}, nil]}, default: nil],
     self_terminate: [type: :boolean, default: true],
+    callback: [type: {:or, [:map, nil]}, default: nil],
     provider_opts: [type: :map, default: %{}]
   ]
 
