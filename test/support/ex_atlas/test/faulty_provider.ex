@@ -26,6 +26,9 @@ defmodule ExAtlas.Test.FaultyProvider do
       tracking it locally.
     * `:raise` — raise, the way `Client.fetch_key!/1` does on a missing key.
     * `{:error, error}` — return `{:error, error}`.
+    * `{:error_once, error}` — return `{:error, error}` for the *next* call
+      only, then disarm. A transient 5xx or socket blip, which callers are
+      required to ride out rather than treat as news about the resource.
   """
 
   @behaviour ExAtlas.Provider
@@ -104,7 +107,15 @@ defmodule ExAtlas.Test.FaultyProvider do
 
       {:error, error} ->
         {:error, error}
+
+      {:error_once, error} ->
+        disarm(callback)
+        {:error, error}
     end
+  end
+
+  defp disarm(callback) do
+    Application.put_env(:ex_atlas, @env_key, Map.delete(faults(), callback))
   end
 
   defp faults, do: Application.get_env(:ex_atlas, @env_key, %{})
