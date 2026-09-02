@@ -55,6 +55,20 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `ExAtlas.Orchestrator.TaskOutcome`, so this server keeps two extra timers and
   one extra branch rather than a second personality.
 
+  ## Adopted trackers
+
+  With `persist: true` a task is recorded in an
+  `ExAtlas.Orchestrator.TrackingStore`, and after a restart
+  `ExAtlas.Orchestrator.Adopter` starts this server with `{:adopted, record}`
+  instead of `{compute, opts}`. The difference is entirely about budgets that
+  must not refill: `deadline_at_ms` is monotonic and meaningless in a new VM,
+  so the deadline is recomputed from the record's **wall-clock**
+  `:spawned_at_ms` — a 90-minute task that was down for two hours fires
+  `:max_runtime` at once rather than starting a second 90 minutes — and the
+  `on_failure` budget and any landed report are carried across as well. The
+  first status poll runs immediately, since nothing has watched the resource
+  since the node went down.
+
   ## Why a task needs both a self-terminating container and a deadline
 
   RunPod's REST API reports no container state at all — see

@@ -81,7 +81,19 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   end
 
   @impl ExAtlas.Orchestrator.TrackingStore
-  def put(record), do: call({:put, record})
+  def put(record) do
+    if is_nil(Process.whereis(__MODULE__)) do
+      # `persist: true` is a durability promise, and dropping the write in
+      # silence is how it gets discovered a deploy later, by a reaped pod.
+      Logger.error(
+        "[ExAtlas.Orchestrator.TrackingStore.Dets] not running; dropping the tracking " <>
+          "record for #{record.id}. It will not be adopted at the next boot, and the " <>
+          "Reaper will treat it as an orphan."
+      )
+    end
+
+    call({:put, record})
+  end
 
   @impl ExAtlas.Orchestrator.TrackingStore
   def delete(id), do: call({:delete, id})
