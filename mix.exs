@@ -37,6 +37,7 @@ defmodule ExAtlas.MixProject do
       {:nimble_options, "~> 1.1"},
       {:telemetry, "~> 1.3"},
       {:plug_crypto, "~> 2.1"},
+      {:plug, "~> 1.16", optional: true},
       {:igniter, "~> 0.6", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
       {:phoenix_live_dashboard, "~> 0.8", optional: true},
