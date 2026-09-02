@@ -78,6 +78,7 @@ defmodule ExAtlas.MixProject do
         "guides/getting_started.md",
         "guides/fly.md",
         "guides/transient_pods.md",
+        "guides/pod_callbacks.md",
         "guides/writing_a_provider.md",
         "guides/telemetry.md",
         "guides/testing.md",
@@ -119,6 +120,12 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Fly.Logs.StreamerSupervisor
         ],
         Auth: [ExAtlas.Auth.Token, ExAtlas.Auth.SignedUrl],
+        "Pod callbacks": [
+          ExAtlas.Callback,
+          ExAtlas.Callback.Plug,
+          ExAtlas.Callback.Token,
+          ExAtlas.Callback.Limiter
+        ],
         "LiveDashboard integration": [ExAtlas.LiveDashboard.ComputePage],
         Orchestrator: [
           ExAtlas.Orchestrator,

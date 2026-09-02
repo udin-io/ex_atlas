@@ -42,6 +42,7 @@ Two concerns under one roof:
 - [Quick start — Fly.io platform ops](#quick-start--flyio-platform-ops)
 - [Quick start — transient per-user GPU pod](#quick-start--transient-per-user-gpu-pod)
 - [Quick start — batch task on a GPU pod](#quick-start--batch-task-on-a-gpu-pod)
+- [Pod callbacks — progress, logs, exit codes](#pod-callbacks--progress-logs-exit-codes)
 - [Quick start — serverless inference](#quick-start--serverless-inference)
 - [Swapping providers](#swapping-providers)
 - [Configuration](#configuration)
@@ -298,7 +299,70 @@ No heartbeats, no idle TTL: the pod ends when the command ends, when the
 wall-clock deadline fires, or when it dies — and it is always destroyed. See
 [`run_task/1`](#exatlasorchestratorrun_task1--run-a-container-to-completion)
 for why exit detection needs the container's cooperation, and why
-`:completed` does not mean "succeeded".
+`:completed` does not mean "succeeded" — unless you add a callback.
+
+## Pod callbacks — progress, logs, exit codes
+
+RunPod has no API for pod logs and reports no container state, so for
+unattended work the only party that knows what is happening inside the
+container is the container. `ExAtlas.Callback` is the supported way for it to
+say so: progress reports, streamed log lines, and an exit code declared before
+the pod goes.
+
+```elixir
+# config/runtime.exs
+config :ex_atlas, :callback,
+  secret: System.fetch_env!("ATLAS_CALLBACK_SECRET"),  # >= 32 bytes, same on every node
+  base_url: "https://app.example.com/atlas/cb"
+
+# lib/my_app_web/router.ex — outside :browser, outside your auth, and NOT
+# through Plug.Parsers (its 8 MB default is the memory vector).
+scope "/atlas" do
+  forward "/cb", ExAtlas.Callback.Plug
+end
+```
+
+```elixir
+{:ok, _pid, compute} =
+  ExAtlas.Orchestrator.run_task(
+    provider: :runpod,
+    gpu: :rtx_4090,
+    image: "ghcr.io/acme/trainer:latest",
+    command: ["/app/train.sh"],
+    callback: "https://app.example.com/atlas/cb"
+  )
+
+def handle_info({:atlas_compute, _id, {:progress, payload}}, socket),
+  do: {:noreply, assign(socket, pct: payload["pct"])}
+
+def handle_info({:atlas_compute, _id, {:log, payload}}, socket),
+  do: {:noreply, stream(socket, :lines, payload["lines"])}
+
+def handle_info({:atlas_compute, _id, {:task, {:failed, {:exit_code, n}}}}, socket),
+  do: {:noreply, put_flash(socket, :error, "Training exited #{n}")}
+```
+
+The container is handed `ATLAS_CALLBACK_URL`, `ATLAS_CALLBACK_TOKEN` and
+`ATLAS_TASK_ID`; the self-termination wrapper already POSTs `/finish` with the
+exit code from its `trap`, so only progress and logs need code in your image.
+
+Three things worth knowing up front:
+
+- **`:completed` becomes proven rather than inferred.** With a report, a clean
+  exit is a fact and a non-zero one is `{:task, {:failed, {:exit_code, n}}}`.
+  It also kills the spot ambiguity: a task that reported `finish` is never
+  respawned.
+- **ExAtlas retains zero log bytes.** `/logs` is a bus, not a store — no ring
+  buffer, no back-pressure, nothing to exhaust. Keep history yourself.
+- **No public URL? Omit `:callback`.** Everything reverts precisely to the
+  behaviour above. Pointing it at `localhost` is refused at spawn time, because
+  a callback that silently never arrives is worse than none at all.
+
+Not using Plug? `ExAtlas.Callback` is framework-free — `verify/1` and
+`ingest/3` are all a hand-rolled controller needs, and `:plug` stays an
+optional dependency. Full details, container-side examples, rate limits and
+the security model are in the
+[pod callbacks guide](guides/pod_callbacks.md).
 
 ## Quick start — serverless inference
 
@@ -505,6 +569,16 @@ ExAtlas.Auth.Token.valid?(candidate, mint.hash)
 When you pass `auth: :bearer` to `spawn_compute/1`, ExAtlas mints a token,
 adds it to the pod's env as `ATLAS_PRESHARED_KEY`, and returns the handle
 in `compute.auth` — all in one round-trip.
+
+### Callback tokens
+
+`ExAtlas.Callback.Token` is the *inbound* direction — the credential a pod
+presents when calling back into your app. It is a stateless signed token
+(`Plug.Crypto.sign/4` over `%{task_id, kinds}`, verified in constant time),
+bound to a task id rather than a compute id, and deliberately **not** the same
+credential as `ATLAS_PRESHARED_KEY`: that one is handed to a browser, and a
+browser-held secret must never also authorize writing into your orchestrator.
+See the [pod callbacks guide](guides/pod_callbacks.md).
 
 ### S3-style signed URLs
 
