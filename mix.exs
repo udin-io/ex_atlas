@@ -133,6 +133,9 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.ComputeSupervisor,
           ExAtlas.Orchestrator.ComputeRegistry,
           ExAtlas.Orchestrator.Reaper,
+          ExAtlas.Orchestrator.Adopter,
+          ExAtlas.Orchestrator.TrackingStore,
+          ExAtlas.Orchestrator.TrackingStore.Dets,
           ExAtlas.Orchestrator.Events,
           ExAtlas.Orchestrator.UpstreamStatus
         ]

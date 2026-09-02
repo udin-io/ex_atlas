@@ -11,6 +11,12 @@ defmodule ExAtlas.Application do
       compute resources. `ExAtlas.Callback` routes through the same `Registry`,
       so the inbound callback boundary needs this tree too.
 
+      Unless `tracking_store: false`, it also boots an
+      `ExAtlas.Orchestrator.TrackingStore` — first, so it outlives the trackers
+      that write to it from `terminate/2` — and, last, the
+      `ExAtlas.Orchestrator.Adopter` that re-adopts persisted compute at boot
+      and releases the Reaper's gate.
+
     * **Fly platform ops** (default on, disable via
       `config :ex_atlas, :fly, enabled: false`) — boots the token storage, token
       server, log streamer supervisor, and (when the dispatcher mode is

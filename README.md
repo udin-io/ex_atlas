@@ -469,7 +469,13 @@ config :ex_atlas, :orchestrator,
   reap_interval_ms: 60_000,
   reap_providers: [:runpod],
   reap_name_prefix: "atlas-",    # safety switch: only reap resources ExAtlas spawned
-  reap_grace_ms: 60_000          # spare resources too young to have a tracker yet
+  reap_grace_ms: 60_000,         # spare resources too young to have a tracker yet
+
+  # Durable tracking, so a deploy does not orphan (and then reap) a running
+  # task. Defaults to the DETS store; set `false` to disable persistence.
+  tracking_store: ExAtlas.Orchestrator.TrackingStore.Dets,
+  storage_path: "/data/ex_atlas",  # a MOUNTED volume — see "Surviving a deploy"
+  scrub_keys: []                   # extra opt keys to keep off disk
 ```
 
 **Default environment variable names** used when nothing else is set:
@@ -848,7 +854,8 @@ was added for); the carried deadline bounds the total spend either way.
 and:
 
 1. Lists each configured provider's running resources.
-2. Compares against the resources tracked by the local `ComputeRegistry`.
+2. Compares against the resources tracked by the local `ComputeRegistry`
+   **and** recorded in the tracking store (see "Surviving a deploy").
 3. Terminates any orphan whose `:name` starts with `:reap_name_prefix`
    (default `"atlas-"`) and that is older than `:reap_grace_ms`.
 
@@ -869,6 +876,72 @@ alone, and only resources reporting no `created_at` at all skip the grace.
 Shorten the grace and you shorten how long a genuine orphan bills; shorten it
 below your provider's worst-case spawn latency and the Reaper starts killing
 brand-new resources.
+
+### Surviving a deploy: the tracking store
+
+The Registry is in memory and the trackers are `restart: :temporary`, so a
+**deploy empties them while your pods keep running**. Every one of those pods
+is then old, prefix-matching and untracked — an orphan by the rules above — and
+the Reaper terminates it on the first tick. `:reap_grace_ms` cannot save it: the
+window is keyed off `created_at`, and a pod that has been training for three
+hours is not young.
+
+`ExAtlas.Orchestrator.TrackingStore` is the fix. Opt a task in with
+`persist: true`:
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  provider: :runpod,
+  gpu: :h100,
+  image: "ghcr.io/acme/trainer:latest",
+  command: ["/app/train.sh"],
+  name: "atlas-train-#{run.id}",
+  max_runtime_ms: :timer.hours(6),
+  persist: true
+)
+```
+
+At the next boot `ExAtlas.Orchestrator.Adopter` reads the store, asks the
+provider whether each id still exists, and starts a tracker for the ones that
+do. The Reaper waits for it: with a store configured it reaps **nothing** until
+adoption has settled, and if the store could not be read it reaps nothing for
+the whole boot — a node that cannot tell which pods are its own must never
+issue a DELETE.
+
+What an adopted task keeps:
+
+| Carried across the restart | Why |
+| -------------------------- | --- |
+| `:max_runtime_ms` deadline | Recomputed from a **wall-clock** anchor, so a 90-minute task that was down for two hours ends immediately instead of starting a second 90 minutes. |
+| `on_failure: {:respawn, n}` budget | A restart must not refill it. |
+| A landed `finish` report | So work that already reported is never re-run. |
+| The callback `task_id` | In-flight pod callbacks stop answering `410 Gone`. |
+
+Four things to know before you rely on it:
+
+- **Tasks only.** `persist: true` requires `mode: :task` and is refused
+  otherwise. An interactive session's bearer token is never written to disk, so
+  an adopted one would be a pod nobody can authenticate to, billing for another
+  full idle TTL.
+- **The DETS default needs a durable filesystem.** It writes to `priv` (or
+  `tmp`), and **a Fly machine with no attached volume gets a fresh filesystem
+  on every deploy** — the store comes up empty, adoption silently does nothing,
+  and the pods are reaped anyway. Mount a volume and point `:storage_path` at
+  it, or supply your own store.
+- **The behaviour is the real feature.** `ExAtlas.Orchestrator.TrackingStore`
+  is five callbacks; implement it against Postgres or anything else you already
+  trust to survive a deploy, and set
+  `config :ex_atlas, :orchestrator, tracking_store: MyApp.AtlasStore`. The
+  shared conformance suite in `test/support` gives your implementation the
+  contract tests for free.
+- **Single node.** A node adopts only ids it recorded itself. "Node A died,
+  node B takes over" is deliberately out of scope — it needs a shared store
+  plus leases. Note the Reaper is already unsafe on 2+ nodes sharing a provider
+  account and prefix (issue #38), which this does not change: run one
+  orchestrating node, or give each its own `:reap_name_prefix`.
+
+Nothing here is on by default. With `persist: false` — the default — the
+orchestrator behaves exactly as it did before the store existed.
 
 ## Phoenix LiveDashboard integration
 
@@ -1049,6 +1122,13 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
 - **Reaper safety.** `:reap_name_prefix` is the only thing preventing the
   reaper from terminating pods other tools (or other ExAtlas-using apps) own
   on the same cloud account. Keep the prefix unique per deployment.
+- **The tracking store is on disk.** Records are scrubbed of `:api_key` and
+  friends and never hold `compute.auth.token`, but they do hold your spawn
+  opts — including `:env`, which is persisted verbatim so a respawn after
+  adoption still works. If you inject secrets through `:env`, add it to
+  `config :ex_atlas, :orchestrator, scrub_keys: [:env]` (accepting that a
+  respawn then loses them) or supply a store that encrypts at rest. The DETS
+  default is `0700`/`0600`.
 - **Outbound egress.** RunPod's `*.proxy.runpod.net` is world-reachable.
   If the pod inside doesn't validate `ATLAS_PRESHARED_KEY` on every request,
   anyone with the URL can hit it.

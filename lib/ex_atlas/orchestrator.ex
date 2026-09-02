@@ -84,11 +84,19 @@ defmodule ExAtlas.Orchestrator do
 
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
   `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`,
-  `:finish_grace_ms`, `:callback`, `:user_id`)
+  `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`)
   are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
   nothing tracking it.
+
+  ## `persist: true` — surviving a deploy
+
+  Off by default. When set (and only for `mode: :task`), the resource is
+  recorded in the configured `ExAtlas.Orchestrator.TrackingStore` before its
+  tracker starts, so the next boot can re-adopt it instead of letting the
+  Reaper reclaim it as an orphan. See `ExAtlas.Orchestrator.TrackingStore` for
+  what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}
@@ -186,6 +194,16 @@ defmodule ExAtlas.Orchestrator do
   a report lands, for the resource to actually disappear before finishing on
   the report anyway; `:allow_insecure_callback` lets a loopback or plain-HTTP
   URL through for local development.
+
+  ## Surviving a deploy: `persist: true`
+
+  A multi-hour task and a routine deploy do not mix by default. The registry
+  is in memory, so a restart leaves the pod running with nothing tracking it —
+  and `ExAtlas.Orchestrator.Reaper` reclaims exactly that. Pass
+  `persist: true` to record the task durably and have
+  `ExAtlas.Orchestrator.Adopter` rebuild its tracker at the next boot, on
+  what is *left* of `:max_runtime_ms` rather than a fresh budget. See
+  `ExAtlas.Orchestrator.TrackingStore`.
 
   ## Without a callback, `:completed` does not mean "succeeded"
 

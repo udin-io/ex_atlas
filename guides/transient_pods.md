@@ -403,10 +403,62 @@ volume; remember the cost scales with the number of live pods, not with the
 interval alone. Polls back off exponentially while the provider is erroring,
 so an outage doesn't turn into a retry storm.
 
+### Surviving a deploy
+
+Everything above lives in memory. Deploy the app mid-task and the registry is
+empty while the pod is still training — and the Reaper, seeing an old,
+prefix-matching pod that nothing tracks, terminates it. `:reap_grace_ms` does
+not help: it spares pods that are *young*, and a task three hours into a run is
+the opposite of young.
+
+Opt the task into durable tracking:
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  provider: :runpod,
+  gpu: :h100,
+  image: "ghcr.io/acme/trainer:latest",
+  command: ["/app/train.sh"],
+  name: "atlas-train-#{run.id}",
+  max_runtime_ms: :timer.hours(6),
+  persist: true
+)
+```
+
+`ExAtlas.Orchestrator.spawn/1` then records the id, the (scrubbed) opts and a
+**wall-clock** spawn timestamp. On the next boot `ExAtlas.Orchestrator.Adopter`
+reads that back, checks each id against the provider, and starts a tracker for
+the ones that are still there — and the Reaper terminates nothing until it has
+finished.
+
+The wall-clock anchor is the part that matters. `deadline_at_ms` is monotonic
+and means nothing in a new VM, so an adopted task recomputes what is *left* of
+`:max_runtime_ms` from when it was actually rented. A six-hour task that was
+down for seven hours ends the moment it is adopted; it does not quietly start a
+second six hours. `:respawns` and any landed `finish` report carry across for
+the same reason.
+
+Three constraints worth knowing before you design around it:
+
+- It is **tasks only**. `persist: true` with `mode: :interactive` is refused —
+  the session's bearer token is never written to disk, so an adopted session
+  would be a pod nobody can reach that bills for another idle TTL.
+- The zero-config DETS store writes to the machine's own filesystem, which on
+  Fly **is not preserved across a deploy unless you attach a volume**. Point
+  `config :ex_atlas, :orchestrator, storage_path: "/data/ex_atlas"` at a mount,
+  or implement `ExAtlas.Orchestrator.TrackingStore` against your database — it
+  is five callbacks, and `test/support`'s conformance suite tests it for you.
+- One orchestrating node. A node adopts only what it recorded itself; taking
+  over another node's pods needs leases and is out of scope (and see issue #38
+  for the Reaper's existing multi-node hazard, which is unchanged).
+
 ## Pitfalls
 
 - **Don't** share a single pod across users unless you've designed for
   isolation. The preshared-key model assumes one key per pod.
+- **Don't** assume a long task survives a deploy without `persist: true` and a
+  durable store. The default is off, and the default is "the Reaper reclaims
+  it".
 - **Don't** put the orchestrator in a cluster-shared PubSub — ExAtlas's
   PubSub is per-node. If you need cluster-wide visibility, subscribe
   from each node and reduce upstream.
