@@ -20,9 +20,17 @@ defmodule ExAtlas.Test.Orchestrator do
   @spec callback_secret() :: String.t()
   def callback_secret, do: @callback_secret
 
-  @doc "Boot the tree and point the default provider at the in-memory Mock."
-  @spec start!() :: :ok
-  def start! do
+  @doc """
+  Boot the tree and point the default provider at the in-memory Mock.
+
+  Options:
+
+    * `:tracking_store` — `false` (the default, persistence off), a module, or
+      `{module, start_opts}`. The store is configured *and* started under the
+      test supervisor, so a test only has to say which one it wants.
+  """
+  @spec start!(keyword()) :: :ok
+  def start!(opts \\ []) do
     Application.put_env(:ex_atlas, :start_orchestrator, true)
     Application.put_env(:ex_atlas, :default_provider, :mock)
     Application.put_env(:ex_atlas, :callback, secret: @callback_secret)
@@ -43,8 +51,34 @@ defmodule ExAtlas.Test.Orchestrator do
       Application.delete_env(:ex_atlas, :start_orchestrator)
       Application.delete_env(:ex_atlas, :default_provider)
       Application.delete_env(:ex_atlas, :callback)
+      Application.delete_env(:ex_atlas, :orchestrator)
     end)
+
+    configure_store(Keyword.get(opts, :tracking_store, false))
 
     :ok
   end
+
+  @doc """
+  Merge `values` into `config :ex_atlas, :orchestrator`.
+
+  The orchestrator config is one keyword list holding both the reaping knobs
+  and `:tracking_store`, so a plain `put_env` from a test would silently drop
+  whichever half it did not mention.
+  """
+  @spec put_env(keyword()) :: :ok
+  def put_env(values) do
+    current = Application.get_env(:ex_atlas, :orchestrator, [])
+    Application.put_env(:ex_atlas, :orchestrator, Keyword.merge(current, values))
+  end
+
+  defp configure_store(false), do: put_env(tracking_store: false)
+
+  defp configure_store({module, start_opts}) do
+    put_env(tracking_store: module)
+    start_supervised!({module, start_opts})
+    :ok
+  end
+
+  defp configure_store(module) when is_atom(module), do: configure_store({module, []})
 end

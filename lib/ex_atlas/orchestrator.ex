@@ -49,7 +49,15 @@ defmodule ExAtlas.Orchestrator do
   """
 
   alias ExAtlas.Callback
-  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor, Events}
+
+  alias ExAtlas.Orchestrator.{
+    ComputeRegistry,
+    ComputeServer,
+    ComputeSupervisor,
+    Events,
+    TrackingStore
+  }
+
   alias ExAtlas.Spec
 
   @pubsub ExAtlas.PubSub
@@ -89,13 +97,26 @@ defmodule ExAtlas.Orchestrator do
     ensure_running!()
 
     with {:ok, opts} <- Callback.prepare(opts),
-         {:ok, _tracking} <- ComputeServer.validate_opts(opts),
+         {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, compute} <- ExAtlas.spawn_compute(opts) do
-      track(compute, opts)
+      persist(compute, opts, tracking)
+      track(compute, opts, tracking)
     end
   end
 
-  defp track(compute, opts) do
+  # Written *after* the provider hands back an id and *before* the tracker
+  # starts, so the only window in which a live resource is unrecorded is the
+  # provider call itself — the same window `:reap_grace_ms` already covers.
+  # See `ExAtlas.Orchestrator.TrackingStore` for what is stored and what is
+  # deliberately not.
+  defp persist(compute, opts, tracking) do
+    with true <- Keyword.get(tracking, :persist, false),
+         store when not is_nil(store) <- TrackingStore.impl() do
+      store.put(TrackingStore.new(compute, opts, tracking))
+    end
+  end
+
+  defp track(compute, opts, tracking) do
     case DynamicSupervisor.start_child(ComputeSupervisor, {ComputeServer, {compute, opts}}) do
       {:ok, pid} ->
         {:ok, pid, compute}
@@ -105,9 +126,19 @@ defmodule ExAtlas.Orchestrator do
 
       {:error, reason} ->
         # The resource exists upstream but nothing will ever track it, so it
-        # would bill until the Reaper noticed. Take it down with the tracker.
+        # would bill until the Reaper noticed. Take it down with the tracker —
+        # and with the record, or the next boot would adopt a pod we just
+        # deleted.
         _ = ExAtlas.terminate(compute.id, opts)
+        forget(compute.id, tracking)
         {:error, {:tracker_start_failed, reason}}
+    end
+  end
+
+  defp forget(id, tracking) do
+    with true <- Keyword.get(tracking, :persist, false),
+         store when not is_nil(store) <- TrackingStore.impl() do
+      store.delete(id)
     end
   end
 

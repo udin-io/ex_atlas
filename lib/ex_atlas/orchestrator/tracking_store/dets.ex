@@ -213,9 +213,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     fallback = Path.join(System.tmp_dir!(), "ex_atlas_orchestrator")
 
     Logger.warning(
-      "[ExAtlas.Orchestrator.TrackingStore.Dets] storage path not writable; falling back to tmp_dir",
-      attempted: attempted,
-      fallback: fallback
+      "[ExAtlas.Orchestrator.TrackingStore.Dets] storage path #{attempted} not writable; " <>
+        "falling back to #{fallback}, which a release or a container almost certainly " <>
+        "does not preserve across a deploy"
     )
 
     File.mkdir_p!(fallback)
