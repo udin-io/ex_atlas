@@ -164,6 +164,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # current one lands.
   @poll_task_timeout_ms 10_000
 
+  # How long to wait, after a container has reported its exit code, for the
+  # resource to actually disappear. It normally does within a second — the
+  # finish POST is sent from the same trap that then DELETEs the pod — so this
+  # is the backstop for the case where the DELETE never happened:
+  # `self_terminate: false`, an image with no curl, a provider hiccup. Without
+  # it those tasks can only ever end at `:max_runtime_ms`.
+  @default_finish_grace_ms 60 * 1_000
+
   # Teardown does one `DELETE` against the provider and must be allowed to
   # finish it: the DynamicSupervisor default of 5s brutal-kills the tracker
   # first, and a resource nobody deleted bills until the Reaper notices.
@@ -194,6 +202,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       type: {:or, [:pos_integer, {:in, [false]}]},
       default: false
     ],
+    callback: [type: {:or, [:map, nil]}, default: nil],
+    allow_insecure_callback: [type: :boolean, default: false],
+    finish_grace_ms: [
+      type: {:or, [:pos_integer, {:in, [false]}]},
+      default: @default_finish_grace_ms
+    ],
     user_id: [type: :any, default: nil]
   ]
 
@@ -214,6 +228,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           last_activity_ms: integer(),
           mode: TaskOutcome.mode(),
           deadline_at_ms: integer() | nil,
+          callback_task_id: String.t() | nil,
+          finish_grace_ms: pos_integer() | nil,
+          report: TaskOutcome.report(),
           user_id: term() | nil
         }
 
@@ -279,9 +296,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       last_activity_ms: now_ms(),
       mode: tracking[:mode],
       deadline_at_ms: deadline_at(tracking[:max_runtime_ms]),
+      callback_task_id: callback_task_id(tracking[:callback]),
+      finish_grace_ms: finish_grace(tracking[:finish_grace_ms]),
+      report: nil,
       user_id: tracking[:user_id]
     }
 
+    register_callback(state.callback_task_id)
     Events.broadcast(compute.id, {:status, compute.status})
     schedule_heartbeat(state)
     schedule_status_poll(state)
@@ -367,6 +388,51 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     apply_observation({:poll_failed, reason}, clear_poll(state))
   end
 
+  # --- pod callbacks ---
+  #
+  # These arrive from `ExAtlas.Callback.ingest/3` as plain messages, never as
+  # calls: the web request that carried them must not be able to block on this
+  # mailbox, and an untrusted pod must not get a lever on it.
+
+  # Relayed verbatim and retained nowhere. `ExAtlas.Callback` has already
+  # checked that the payload is a JSON object; what is *in* it is a convention
+  # between the container and its subscribers, not something to reinterpret
+  # here.
+  #
+  # Progress deliberately does not `touch/1`. It would let a compromised pod
+  # postpone its own idle TTL indefinitely, and in `:task` mode — the only mode
+  # that arms a deadline — there is no idle clock to postpone anyway. The
+  # option would carry risk exactly where it carries no benefit.
+  def handle_info({:atlas_callback, :progress, payload}, state) do
+    Events.broadcast(state.compute.id, {:progress, payload})
+    {:noreply, state}
+  end
+
+  def handle_info({:atlas_callback, :log, payload}, state) do
+    Events.broadcast(state.compute.id, {:log, payload})
+    {:noreply, state}
+  end
+
+  # First report wins. A replayed or retried `finish` is therefore idempotent
+  # — it cannot rewrite the recorded outcome, and it cannot buy the pod another
+  # grace window either.
+  def handle_info({:atlas_callback, :finish, _payload}, %{report: %{}} = state),
+    do: {:noreply, state}
+
+  def handle_info({:atlas_callback, :finish, report}, state) do
+    Events.broadcast(state.compute.id, {:task_report, report})
+    {:noreply, arm_finish_grace(%{state | report: report})}
+  end
+
+  # The report landed but the resource never disappeared: the trap was skipped,
+  # `self_terminate: false`, or the container's own DELETE failed. Finish on
+  # what the container said and let `terminate/2` issue the DELETE, which is
+  # what actually stops the meter.
+  def handle_info(:finish_grace, %{report: nil} = state), do: {:noreply, state}
+
+  def handle_info(:finish_grace, state),
+    do: finish(TaskOutcome.from_report(state.report), state)
+
   # Late replies from a poll we already gave up on, and anything else. Because
   # this server traps exits, an unmatched message would run `terminate/2` and
   # DELETE a perfectly healthy resource.
@@ -410,7 +476,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     if respawn?(reason, state) do
       respawn(state, reason)
     else
-      case TaskOutcome.classify({:dead, reason, upstream}, state.mode) do
+      case TaskOutcome.classify({:dead, reason, upstream}, state.mode, state.report) do
         :none -> {:stop, :normal, state}
         outcome -> finish(outcome, state)
       end
@@ -443,8 +509,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # --- respawn ---
 
+  # A compute that reported `finish` is never respawned, whatever the provider
+  # says happened to it. On spot capacity a disappearance means both
+  # "self-terminated fine" and "reclaimed", and without a marker the two are
+  # indistinguishable — which is how `on_failure: {:respawn, n}` ends up
+  # re-running work that already finished, on a meter.
   defp respawn?(reason, state),
-    do: reason in @respawnable and state.respawns < state.respawn_limit
+    do:
+      is_nil(state.report) and reason in @respawnable and
+        state.respawns < state.respawn_limit
 
   defp respawn(state, reason) do
     old_id = state.compute.id
@@ -569,6 +642,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp schedule_ready_timeout(%{status_poll_ms: nil}, _ms), do: :ok
   defp schedule_ready_timeout(_state, ms), do: Process.send_after(self(), :ready_timeout, ms)
 
+  # One-shot, and armed only by the first report — see the `finish` clause of
+  # `handle_info/2`. Interactive sessions have no task to end, so a report
+  # there is announced and nothing more.
+  defp arm_finish_grace(%{mode: :task, finish_grace_ms: ms} = state) when is_integer(ms) do
+    Process.send_after(self(), :finish_grace, ms)
+    state
+  end
+
+  defp arm_finish_grace(state), do: state
+
   defp schedule_status_poll(%{status_poll_ms: nil}), do: :ok
 
   defp schedule_status_poll(%{status_poll_ms: base, poll_failures: failures}) do
@@ -585,6 +668,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp deadline_at(false), do: nil
   defp deadline_at(ms), do: now_ms() + ms
+
+  defp finish_grace(false), do: nil
+  defp finish_grace(ms) when is_integer(ms) and ms > 0, do: ms
+
+  defp callback_task_id(nil), do: nil
+  defp callback_task_id(%{task_id: task_id}), do: task_id
+
+  # Registered alongside the `{:compute, id}` key this server is named by, and
+  # *not* re-keyed on a respawn: the task id is what the credential in the
+  # pod's environment is bound to, and it has to keep working when the compute
+  # id underneath it is replaced.
+  defp register_callback(nil), do: :ok
+
+  defp register_callback(task_id) do
+    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, nil)
+    :ok
+  end
 
   defp remaining_ms(nil), do: nil
   defp remaining_ms(at), do: max(at - now_ms(), 0)

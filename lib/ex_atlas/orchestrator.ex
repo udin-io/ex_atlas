@@ -48,6 +48,7 @@ defmodule ExAtlas.Orchestrator do
       :ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
   """
 
+  alias ExAtlas.Callback
   alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor}
 
   # A task with no wall-clock cap is the billing trap this whole feature exists
@@ -75,7 +76,8 @@ defmodule ExAtlas.Orchestrator do
   def spawn(opts) do
     ensure_running!()
 
-    with {:ok, _tracking} <- ComputeServer.validate_opts(opts),
+    with {:ok, opts} <- Callback.prepare(opts),
+         {:ok, _tracking} <- ComputeServer.validate_opts(opts),
          {:ok, compute} <- ExAtlas.spawn_compute(opts) do
       track(compute, opts)
     end
