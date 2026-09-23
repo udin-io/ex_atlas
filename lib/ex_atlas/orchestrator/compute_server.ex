@@ -55,6 +55,20 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `ExAtlas.Orchestrator.TaskOutcome`, so this server keeps two extra timers and
   one extra branch rather than a second personality.
 
+  ## Adopted trackers
+
+  With `persist: true` a task is recorded in an
+  `ExAtlas.Orchestrator.TrackingStore`, and after a restart
+  `ExAtlas.Orchestrator.Adopter` starts this server with `{:adopted, record}`
+  instead of `{compute, opts}`. The difference is entirely about budgets that
+  must not refill: `deadline_at_ms` is monotonic and meaningless in a new VM,
+  so the deadline is recomputed from the record's **wall-clock**
+  `:spawned_at_ms` — a 90-minute task that was down for two hours fires
+  `:max_runtime` at once rather than starting a second 90 minutes — and the
+  `on_failure` budget and any landed report are carried across as well. The
+  first status poll runs immediately, since nothing has watched the resource
+  since the node went down.
+
   ## Why a task needs both a self-terminating container and a deadline
 
   RunPod's REST API reports no container state at all — see
@@ -135,7 +149,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   use GenServer
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, Events, TaskOutcome, UpstreamStatus}
+  alias ExAtlas.Orchestrator.{ComputeRegistry, Events, TaskOutcome, TrackingStore, UpstreamStatus}
   alias ExAtlas.Spec
 
   @task_supervisor ExAtlas.Orchestrator.TaskSupervisor
@@ -208,7 +222,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       type: {:or, [:pos_integer, {:in, [false]}]},
       default: @default_finish_grace_ms
     ],
-    user_id: [type: :any, default: nil]
+    user_id: [type: :any, default: nil],
+    persist: [type: :boolean, default: false]
   ]
 
   @option_keys Keyword.keys(@schema)
@@ -231,24 +246,28 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           callback_task_id: String.t() | nil,
           finish_grace_ms: pos_integer() | nil,
           report: TaskOutcome.report(),
-          user_id: term() | nil
+          user_id: term() | nil,
+          store: module() | nil
         }
 
   @doc false
-  def start_link({compute, opts}) do
-    name = {:via, Registry, {ComputeRegistry, {:compute, compute.id}}}
-    GenServer.start_link(__MODULE__, {compute, opts}, name: name)
+  def start_link(arg) do
+    name = {:via, Registry, {ComputeRegistry, {:compute, tracked_id(arg)}}}
+    GenServer.start_link(__MODULE__, arg, name: name)
   end
 
-  def child_spec({compute, opts}) do
+  def child_spec(arg) do
     %{
-      id: {:compute_server, compute.id},
-      start: {__MODULE__, :start_link, [{compute, opts}]},
+      id: {:compute_server, tracked_id(arg)},
+      start: {__MODULE__, :start_link, [arg]},
       restart: :temporary,
       shutdown: @shutdown_timeout_ms,
       type: :worker
     }
   end
+
+  defp tracked_id({:adopted, record}), do: record.id
+  defp tracked_id({compute, _opts}), do: compute.id
 
   @doc """
   Validate the tracking options out of a spawn keyword list.
@@ -262,7 +281,32 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema)
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
+      validate_persist_mode(tracking)
+    end
+  end
+
+  # `persist: true` is a promise that the resource can be rebuilt at boot, and
+  # for an interactive session it cannot: `compute.auth.token` is a bearer
+  # credential `ExAtlas.Auth.Token` promises is never written down, so an
+  # adopted session would come back with `auth: nil` — a pod nobody can reach,
+  # billing for another full idle TTL, for a user whose browser is long gone.
+  # Refused here rather than silently ignored, at the same boundary as every
+  # other tracking option and for the same reason: before anything is rented.
+  defp validate_persist_mode(tracking) do
+    if tracking[:persist] and tracking[:mode] != :task do
+      {:error,
+       %NimbleOptions.ValidationError{
+         key: :persist,
+         value: true,
+         message:
+           "invalid value for :persist option: only mode: :task can be persisted and adopted. " <>
+             "An interactive session's auth token is never stored, so an adopted one would be " <>
+             "unreachable and would bill for another idle TTL."
+       }}
+    else
+      {:ok, tracking}
+    end
   end
 
   @doc "Bump last-activity so the idle reaper waits another `idle_ttl_ms`."
@@ -274,14 +318,65 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # --- callbacks ---
 
   @impl true
+  # Re-adoption at boot — see `ExAtlas.Orchestrator.Adopter`. The record is
+  # what survived the VM; `:compute` is the observation the Adopter just made
+  # and is never persisted.
+  #
+  # Three things differ from a fresh spawn, and each of them is a budget that
+  # must not refill:
+  #
+  #   * The deadline is recomputed from the record's wall-clock
+  #     `:spawned_at_ms`, not re-armed from `:max_runtime_ms`. A task that
+  #     spent its whole budget while the node was down fires `:max_runtime` at
+  #     once rather than starting a second one.
+  #   * `:respawns` and `:report` are carried, so an `on_failure: {:respawn, n}`
+  #     budget stays spent and work that already reported is never re-run.
+  #   * `:ready_timeout_ms` is deliberately *not* re-armed. It answers "did
+  #     this ever come up?", and an adopted resource has been up for hours.
+  def init({:adopted, record}) do
+    Process.flag(:trap_exit, true)
+
+    %{compute: compute, opts: opts} = record
+    tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
+    remaining_ms = remaining_runtime_ms(record)
+
+    state = %{
+      new_state(compute, opts, tracking)
+      | respawns: record.respawns,
+        report: record.report,
+        deadline_at_ms: deadline_at(remaining_ms),
+        store: TrackingStore.impl()
+    }
+
+    register_callback(state.callback_task_id)
+    Events.broadcast(compute.id, {:status, compute.status})
+    schedule_heartbeat(state)
+    schedule_deadline(remaining_ms)
+    # Nothing has watched this resource since the node went down, so the first
+    # look is now rather than one poll interval from now.
+    poll_now(state)
+    {:ok, state}
+  end
+
   def init({compute, opts}) do
     Process.flag(:trap_exit, true)
 
     # Already validated by `ExAtlas.Orchestrator.spawn/1`; re-run so a directly
     # started tracker gets the same defaults and the same clear failure.
     tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
+    state = new_state(compute, opts, tracking)
 
-    state = %{
+    register_callback(state.callback_task_id)
+    Events.broadcast(compute.id, {:status, compute.status})
+    schedule_heartbeat(state)
+    schedule_status_poll(state)
+    schedule_deadline(tracking[:max_runtime_ms])
+    schedule_ready_timeout(state, tracking[:ready_timeout_ms])
+    {:ok, state}
+  end
+
+  defp new_state(compute, opts, tracking) do
+    %{
       compute: compute,
       opts: opts,
       idle_ttl_ms: tracking[:idle_ttl_ms],
@@ -299,17 +394,21 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       callback_task_id: callback_task_id(tracking[:callback]),
       finish_grace_ms: finish_grace(tracking[:finish_grace_ms]),
       report: nil,
-      user_id: tracking[:user_id]
+      user_id: tracking[:user_id],
+      store: store_for(tracking[:persist])
     }
-
-    register_callback(state.callback_task_id)
-    Events.broadcast(compute.id, {:status, compute.status})
-    schedule_heartbeat(state)
-    schedule_status_poll(state)
-    schedule_deadline(tracking[:max_runtime_ms])
-    schedule_ready_timeout(state, tracking[:ready_timeout_ms])
-    {:ok, state}
   end
+
+  # What is left of a wall-clock budget, measured from the spawn that started
+  # it. `0` means the budget is gone and the deadline fires on the next pass
+  # through the mailbox.
+  defp remaining_runtime_ms(%{max_runtime_ms: false}), do: false
+
+  defp remaining_runtime_ms(%{max_runtime_ms: ms, spawned_at_ms: spawned_at_ms}),
+    do: max(ms - (System.system_time(:millisecond) - spawned_at_ms), 0)
+
+  defp poll_now(%{status_poll_ms: nil}), do: :ok
+  defp poll_now(_state), do: send(self(), :status_poll)
 
   @impl true
   def handle_cast(:touch, state) do
@@ -420,6 +519,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     do: {:noreply, state}
 
   def handle_info({:atlas_callback, :finish, report}, state) do
+    # Recorded *before* the broadcast, so the report is durable the moment a
+    # subscriber learns of it. It is what makes "never respawn something that
+    # already reported" survive a restart: without it an adopted task that
+    # finished during the downtime could be re-run on a meter.
+    update_record(state, &%{&1 | report: report})
     Events.broadcast(state.compute.id, {:task_report, report})
     {:noreply, arm_finish_grace(%{state | report: report})}
   end
@@ -449,6 +553,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       # Nothing left to delete — a DELETE would only earn us an error and a
       # misleading `{:terminate_failed, _}`.
       Events.broadcast(state.compute.id, {:status, :terminated})
+      forget(state, state.compute.id)
     end
 
     :ok
@@ -524,6 +629,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     case ExAtlas.spawn_compute(state.opts) do
       {:ok, replacement} ->
+        # Before `release_old/1`, which deletes the old record along with the
+        # old resource. The replacement inherits the original `spawned_at_ms`
+        # so an adopted deadline still measures from the *first* spawn — a
+        # record that re-anchored here would hand a task preempted three times
+        # three times its budget, which is exactly what the in-memory deadline
+        # already refuses to do.
+        carry_record(state, old_id, replacement.id)
         release_old(state)
         :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
         {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
@@ -558,6 +670,42 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp release_old(%{upstream_deletable?: false}), do: :ok
   defp release_old(state), do: terminate_upstream(state)
 
+  # --- durable tracking ---
+  #
+  # `ExAtlas.Orchestrator.spawn/1` writes the record; this server owns it from
+  # then on. Every write goes through the configured
+  # `ExAtlas.Orchestrator.TrackingStore`, which is `nil` unless this spawn
+  # asked for `persist: true` — so an opted-out session touches no store at
+  # all and behaves exactly as it did before the store existed.
+
+  defp store_for(false), do: nil
+  defp store_for(true), do: TrackingStore.impl()
+
+  defp update_record(%{store: nil}, _fun), do: :ok
+
+  defp update_record(%{store: store} = state, fun) do
+    case store.get(state.compute.id) do
+      {:ok, record} -> store.put(fun.(record))
+      :error -> :ok
+    end
+  end
+
+  defp carry_record(%{store: nil}, _old_id, _new_id), do: :ok
+
+  defp carry_record(%{store: store} = state, old_id, new_id) do
+    case store.get(old_id) do
+      {:ok, record} ->
+        store.put(%{record | id: new_id, respawns: state.respawns + 1})
+        store.delete(old_id)
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp forget(%{store: nil}, _id), do: :ok
+  defp forget(%{store: store}, id), do: store.delete(id)
+
   # --- teardown ---
 
   # Is there anything left for `terminate/2` to delete? Not when the provider
@@ -574,8 +722,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp terminate_upstream(state) do
     case ExAtlas.terminate(state.compute.id, state.opts) do
-      :ok -> Events.broadcast(state.compute.id, {:status, :terminated})
-      {:error, err} -> Events.broadcast(state.compute.id, {:terminate_failed, err})
+      :ok ->
+        Events.broadcast(state.compute.id, {:status, :terminated})
+        forget(state, state.compute.id)
+
+      {:error, err} ->
+        # The record deliberately stays: we asked the provider to delete this
+        # and it refused, so the resource may well still be running and
+        # billing. Leaving the record means the next boot re-adopts it and
+        # tries again, instead of the Reaper being the only thing left that
+        # could reclaim it.
+        Events.broadcast(state.compute.id, {:terminate_failed, err})
     end
   end
 

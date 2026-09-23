@@ -49,7 +49,15 @@ defmodule ExAtlas.Orchestrator do
   """
 
   alias ExAtlas.Callback
-  alias ExAtlas.Orchestrator.{ComputeRegistry, ComputeServer, ComputeSupervisor, Events}
+
+  alias ExAtlas.Orchestrator.{
+    ComputeRegistry,
+    ComputeServer,
+    ComputeSupervisor,
+    Events,
+    TrackingStore
+  }
+
   alias ExAtlas.Spec
 
   @pubsub ExAtlas.PubSub
@@ -76,11 +84,19 @@ defmodule ExAtlas.Orchestrator do
 
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
   `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`,
-  `:finish_grace_ms`, `:callback`, `:user_id`)
+  `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`)
   are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
   nothing tracking it.
+
+  ## `persist: true` — surviving a deploy
+
+  Off by default. When set (and only for `mode: :task`), the resource is
+  recorded in the configured `ExAtlas.Orchestrator.TrackingStore` before its
+  tracker starts, so the next boot can re-adopt it instead of letting the
+  Reaper reclaim it as an orphan. See `ExAtlas.Orchestrator.TrackingStore` for
+  what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}
@@ -89,13 +105,26 @@ defmodule ExAtlas.Orchestrator do
     ensure_running!()
 
     with {:ok, opts} <- Callback.prepare(opts),
-         {:ok, _tracking} <- ComputeServer.validate_opts(opts),
+         {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, compute} <- ExAtlas.spawn_compute(opts) do
-      track(compute, opts)
+      persist(compute, opts, tracking)
+      track(compute, opts, tracking)
     end
   end
 
-  defp track(compute, opts) do
+  # Written *after* the provider hands back an id and *before* the tracker
+  # starts, so the only window in which a live resource is unrecorded is the
+  # provider call itself — the same window `:reap_grace_ms` already covers.
+  # See `ExAtlas.Orchestrator.TrackingStore` for what is stored and what is
+  # deliberately not.
+  defp persist(compute, opts, tracking) do
+    with true <- Keyword.get(tracking, :persist, false),
+         store when not is_nil(store) <- TrackingStore.impl() do
+      store.put(TrackingStore.new(compute, opts, tracking))
+    end
+  end
+
+  defp track(compute, opts, tracking) do
     case DynamicSupervisor.start_child(ComputeSupervisor, {ComputeServer, {compute, opts}}) do
       {:ok, pid} ->
         {:ok, pid, compute}
@@ -105,9 +134,19 @@ defmodule ExAtlas.Orchestrator do
 
       {:error, reason} ->
         # The resource exists upstream but nothing will ever track it, so it
-        # would bill until the Reaper noticed. Take it down with the tracker.
+        # would bill until the Reaper noticed. Take it down with the tracker —
+        # and with the record, or the next boot would adopt a pod we just
+        # deleted.
         _ = ExAtlas.terminate(compute.id, opts)
+        forget(compute.id, tracking)
         {:error, {:tracker_start_failed, reason}}
+    end
+  end
+
+  defp forget(id, tracking) do
+    with true <- Keyword.get(tracking, :persist, false),
+         store when not is_nil(store) <- TrackingStore.impl() do
+      store.delete(id)
     end
   end
 
@@ -155,6 +194,16 @@ defmodule ExAtlas.Orchestrator do
   a report lands, for the resource to actually disappear before finishing on
   the report anyway; `:allow_insecure_callback` lets a loopback or plain-HTTP
   URL through for local development.
+
+  ## Surviving a deploy: `persist: true`
+
+  A multi-hour task and a routine deploy do not mix by default. The registry
+  is in memory, so a restart leaves the pod running with nothing tracking it —
+  and `ExAtlas.Orchestrator.Reaper` reclaims exactly that. Pass
+  `persist: true` to record the task durably and have
+  `ExAtlas.Orchestrator.Adopter` rebuild its tracker at the next boot, on
+  what is *left* of `:max_runtime_ms` rather than a fresh budget. See
+  `ExAtlas.Orchestrator.TrackingStore`.
 
   ## Without a callback, `:completed` does not mean "succeeded"
 

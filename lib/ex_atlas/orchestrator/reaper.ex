@@ -5,8 +5,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   On each tick, the Reaper:
 
     1. Asks each tracked provider for its list of live resources.
-    2. Compares against the `ComputeServer` processes in the Registry.
-    3. Flags any resource that exists at the provider but has no local tracker
+    2. Compares against the `ComputeServer` processes in the Registry **and**
+       the `ExAtlas.Orchestrator.TrackingStore`.
+    3. Flags any resource that exists at the provider but appears in neither
        (symptom of a node restart after a crash) and calls
        `ExAtlas.terminate/2` to reclaim the runaway spend.
 
@@ -22,6 +23,43 @@ defmodule ExAtlas.Orchestrator.Reaper do
   resources whose `:name` starts with the configured prefix, so it never
   touches pods spawned by other tools on the same RunPod account. Set it to
   `""` to disable the safeguard.
+
+  ## "Ours" means the Registry *or* the store
+
+  A tracker in the Registry is the live answer, and it is the only one a node
+  has for the first minute after a deploy — which is precisely when a
+  multi-hour training run has no tracker and every reason to still be running.
+  `:reap_grace_ms` cannot help there: it is keyed off `created_at`, and a pod
+  that has been training for three hours is not young by any reading of it.
+
+  So an id recorded in the `ExAtlas.Orchestrator.TrackingStore` is ours too,
+  whether or not `ExAtlas.Orchestrator.Adopter` has reached it yet. An id in
+  neither is an orphan.
+
+  ## The adoption gate
+
+  Between "the store is loaded" and "the trackers are running", every
+  adoptable resource looks exactly like an orphan. So a Reaper that has a
+  store configured starts **gated**: it does nothing on a tick until the
+  Adopter has signalled `:adoption_complete`.
+
+  If the Adopter signals `:adoption_failed` — the store could not be read —
+  reaping stays off for the **entire boot**. A node that cannot account for
+  which running compute is its own must never issue a DELETE; a leak is
+  bounded by `:max_runtime_ms` and an operator reading the log, while a
+  wrongly reaped task is hours of GPU spend that no longer exists.
+
+  With no store configured (`tracking_store: false`) there is nothing to wait
+  for and the Reaper behaves exactly as it did before adoption existed.
+
+  ## One orchestrating node
+
+  The Reaper is unsafe on two or more nodes sharing a provider account *and* a
+  `:reap_name_prefix`, and always has been: node B lists the account, sees node
+  A's pods as untracked, and terminates them once the grace window passes.
+  Per-node tracking stores do not fix that — node B's store simply has no
+  record of node A's pods either. See issue #38. Run one orchestrating node, or
+  give each node its own `:reap_name_prefix`.
 
   ## The grace window
 
@@ -44,7 +82,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   use GenServer
 
-  alias ExAtlas.Orchestrator.ComputeRegistry
+  require Logger
+
+  alias ExAtlas.Orchestrator.{ComputeRegistry, TrackingStore}
 
   @default_interval_ms 60 * 1_000
 
@@ -56,18 +96,59 @@ defmodule ExAtlas.Orchestrator.Reaper do
   def init(_opts) do
     config = config()
     schedule(config.interval)
-    {:ok, config}
+    {:ok, Map.merge(config, %{adoption: initial_adoption(), announced?: false})}
+  end
+
+  # With no tracking store there is nothing to adopt and nothing to wait for,
+  # so the Reaper behaves exactly as it did before adoption existed.
+  defp initial_adoption do
+    if TrackingStore.impl(), do: :pending, else: :settled
   end
 
   @impl true
-  def handle_info(:reap, state) do
+  def handle_info(:reap, %{adoption: :settled} = state) do
     Enum.each(state.providers, &reap_provider(&1, state.prefix, state.grace_ms))
     schedule(state.interval)
     {:noreply, state}
   end
 
+  # Adoption has not run yet, or could not. Either way every adoptable resource
+  # currently looks exactly like an orphan, so this tick does nothing at all.
+  def handle_info(:reap, state) do
+    schedule(state.interval)
+    {:noreply, announce(state)}
+  end
+
+  def handle_info(:adoption_complete, state),
+    do: {:noreply, %{state | adoption: :settled, announced?: false}}
+
+  def handle_info(:adoption_failed, state),
+    do: {:noreply, %{state | adoption: :failed, announced?: false}}
+
   @impl true
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # Once per state change, not once per tick: an operator needs to know the
+  # Reaper is off, and needs it to still be readable an hour later.
+  defp announce(%{announced?: true} = state), do: state
+
+  defp announce(%{adoption: :failed} = state) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED for this boot: the tracking store " <>
+        "could not be read, so this node cannot tell which running compute is its own. " <>
+        "Untracked compute will keep billing until you reclaim it by hand."
+    )
+
+    %{state | announced?: true}
+  end
+
+  defp announce(state) do
+    Logger.info(
+      "[ExAtlas.Orchestrator.Reaper] skipping this cycle until boot-time adoption settles"
+    )
+
+    %{state | announced?: true}
+  end
 
   @doc "Run a single reap cycle. Useful in tests."
   def reap_now(prefix \\ "atlas-", providers \\ [:runpod]) do
@@ -92,10 +173,11 @@ defmodule ExAtlas.Orchestrator.Reaper do
     case ExAtlas.list_compute(provider: provider, status: :running) do
       {:ok, computes} ->
         tracked = registered_ids()
+        store = TrackingStore.impl()
         now = DateTime.utc_now()
 
         computes
-        |> Enum.filter(&orphan?(&1, tracked, prefix, now, grace_ms))
+        |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
         |> Enum.each(fn compute ->
           _ = ExAtlas.terminate(compute.id, provider: provider)
         end)
@@ -105,11 +187,33 @@ defmodule ExAtlas.Orchestrator.Reaper do
     end
   end
 
-  defp orphan?(compute, tracked, prefix, now, grace_ms) do
+  defp orphan?(compute, tracked, store, prefix, now, grace_ms) do
     not MapSet.member?(tracked, compute.id) and
+      not ours?(store, compute.id) and
       is_binary(compute.name) and
       String.starts_with?(compute.name, prefix) and
       not young?(compute, now, grace_ms)
+  end
+
+  # The second half of the "is this ours?" question, and the reason a deploy no
+  # longer destroys a running task: in the Registry means a tracker has it, in
+  # the store means we spawned it and adoption either has it or decided it was
+  # gone. Only an id in neither is an orphan.
+  defp ours?(nil, _id), do: false
+
+  defp ours?(store, id) do
+    match?({:ok, _record}, store.get(id))
+  rescue
+    # A store implementation that raises is not evidence that a live resource
+    # belongs to somebody else. Uncertainty always resolves towards leaving it
+    # alone — and a raise here must not crash-loop the Reaper either.
+    error ->
+      Logger.error(
+        "[ExAtlas.Orchestrator.Reaper] tracking store raised for #{id} " <>
+          "(#{inspect(error)}); treating it as ours and terminating nothing"
+      )
+
+      true
   end
 
   # `created_at` is the provider's clock, so a skewed one shifts the window:

@@ -9,6 +9,80 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **Re-adoption instead of reaping after a restart** (#23). Nothing in the
+  orchestrator survived the VM: `ComputeRegistry` is in-memory and
+  `ComputeServer` is `restart: :temporary`, so a deploy emptied the registry
+  while the pods kept running — and the Reaper, seeing an old,
+  prefix-matching, untracked pod, terminated it. For a task that is hours of
+  GPU spend destroyed by a routine deploy. `:reap_grace_ms` never covered it:
+  it spares resources that are *young*, and a pod three hours into a training
+  run is not.
+
+  Opt a task in per spawn:
+
+      ExAtlas.Orchestrator.run_task(
+        provider: :runpod,
+        gpu: :h100,
+        image: "ghcr.io/acme/trainer:latest",
+        command: ["/app/train.sh"],
+        name: "atlas-train-#{run.id}",
+        max_runtime_ms: :timer.hours(6),
+        persist: true
+      )
+
+  `spawn/1` records the id, the scrubbed opts and a **wall-clock**
+  `spawned_at_ms`; at the next boot `ExAtlas.Orchestrator.Adopter` reads them
+  back, asks the provider which ids still exist, and rebuilds a tracker for
+  each one.
+
+  **The deadline survives.** `deadline_at_ms` is `System.monotonic_time/1` and
+  is meaningless in a new VM, so an adopted task recomputes what is *left* of
+  `:max_runtime_ms` from the wall-clock anchor. A six-hour task that was down
+  for seven hours fires `:max_runtime` immediately rather than silently
+  starting a second six hours. The `on_failure: {:respawn, n}` budget and a
+  landed `finish` report carry across for the same reason.
+
+  **`ExAtlas.Orchestrator.TrackingStore` is a behaviour**, mirroring
+  `ExAtlas.Fly.TokenStorage`: five callbacks, a shared conformance suite in
+  `test/support`, and `config :ex_atlas, :orchestrator, tracking_store:
+  MyApp.AtlasStore` to swap in your own. `TrackingStore.Dets` is the
+  zero-config default — but note that **a Fly machine with no attached volume
+  gets a fresh filesystem on every deploy**, which makes the DETS default
+  silently useless there. Mount a volume and set `:storage_path`, or supply a
+  store backed by something already durable.
+
+  **The Reaper now asks "Registry *or* store?"** and starts gated: with a store
+  configured it terminates nothing until the Adopter signals that adoption has
+  settled, which closes the boot-time race explicitly rather than relying on
+  the first tick being scheduled an interval out. If the store cannot be read
+  — a corrupt DETS file, a database that will not answer — the Adopter says so
+  and **reaping is disabled for the entire boot**: a node that cannot account
+  for which running compute is its own must never issue a DELETE.
+
+  Deliberately scoped out, and documented as such:
+
+    * **Tasks only.** `persist: true` requires `mode: :task`, refused at the
+      same boundary that validates every other tracking option. An interactive
+      session's `compute.auth.token` is never written down, so an adopted one
+      would be a pod nobody can authenticate to, billing for another idle TTL.
+    * **Single node.** A node adopts only ids it recorded itself. "Node A died,
+      node B takes over" needs a shared store plus leases with an owner column
+      and expiry — a different ticket. The Reaper's existing multi-node hazard
+      (#38) is unchanged either way.
+    * **No `reap_action` flag.** The ticket proposed one alongside the store;
+      with the store authoritative it is redundant, and per-spawn intent is
+      one boolean.
+
+  Secrets never reach disk: `:api_key` and friends are scrubbed, `:req_options`
+  loses its `:auth`/`:headers`, and the raw preshared key
+  `ExAtlas.Auth.Token`'s moduledoc promises is never stored has no field to be
+  stored in. `:env` *is* persisted verbatim, because a respawn without it would
+  silently run broken work — extend `scrub_keys:` if you inject secrets that
+  way.
+
+  Everything is opt-in. With `persist: false` (the default) and
+  `tracking_store: false`, behaviour is exactly what it was.
+
 - **`await_ready/2`: block until a compute is usable** (#22). `spawn_compute/1`
   returns when the provider accepts the rental, minutes before the container
   can serve traffic, and every caller was writing the same spawn → poll →
