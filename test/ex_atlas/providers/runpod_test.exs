@@ -135,6 +135,9 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
+  # Telemetry calls a remote capture faster than an anonymous function.
+  def forward_url(_event, _measurements, meta, test_pid), do: send(test_pid, {:url, meta.url})
+
   describe "telemetry" do
     test "the request event's url carries no query, so no GraphQL api_key", %{
       bypass: bypass,
@@ -146,10 +149,8 @@ defmodule ExAtlas.Providers.RunPodTest do
       :telemetry.attach(
         handler,
         [:ex_atlas, :runpod, :request],
-        fn _, _, meta, _ ->
-          send(test_pid, {:url, meta.url})
-        end,
-        nil
+        &__MODULE__.forward_url/4,
+        test_pid
       )
 
       on_exit(fn -> :telemetry.detach(handler) end)
