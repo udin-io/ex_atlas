@@ -135,13 +135,16 @@ defmodule ExAtlas.Providers.RunPod.Client do
          :telemetry.execute(
            @telemetry_prefix ++ [:request],
            %{status: response.status},
-           %{api: api, method: request.method, url: URI.to_string(request.url)}
+           %{api: api, method: request.method, url: telemetry_url(request.url)}
          )
 
          {request, response}
        end}
     ])
   end
+
+  # GraphQL sends the API key as `?api_key=`, so telemetry never sees a query.
+  defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
 
   defp merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
     Req.merge(req, opts)

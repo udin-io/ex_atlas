@@ -135,6 +135,40 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
+  describe "telemetry" do
+    test "the request event's url carries no query, so no GraphQL api_key", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      handler = "runpod-telemetry-#{System.unique_integer()}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:ex_atlas, :runpod, :request],
+        fn _, _, meta, _ ->
+          send(test_pid, {:url, meta.url})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      Bypass.expect_once(bypass, "POST", "/", fn conn ->
+        json(conn, 200, %{"data" => %{"gpuTypes" => []}})
+      end)
+
+      {:ok, []} =
+        ExAtlas.list_gpu_types(
+          opts ++ [req_options: [base_url: "http://localhost:#{bypass.port}/"]]
+        )
+
+      assert_receive {:url, url}
+      refute url =~ "api_key"
+      refute url =~ "test-key"
+    end
+  end
+
   describe "spot" do
     test "spot: true returns :unsupported and sends no request", %{bypass: bypass, ctx_opts: opts} do
       # Runpod no longer sells spot pods and v2 has no field for them. Any
