@@ -60,23 +60,23 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   end
 
   @doc """
-  Turn RunPod's pod response body into an `ExAtlas.Spec.Compute`.
+  Turn a REST v2 `Pod` body into an `ExAtlas.Spec.Compute`.
 
   Optional `auth` is threaded through unchanged from the spawn path.
   """
   @spec pod_to_compute(map(), map() | nil) :: Spec.Compute.t()
   def pod_to_compute(pod, auth \\ nil) when is_map(pod) do
     %Spec.Compute{
-      id: Map.get(pod, "id") || Map.get(pod, "podId"),
+      id: Map.get(pod, "id"),
       provider: :runpod,
-      status: pod_status(pod),
-      public_ip: Map.get(pod, "publicIp"),
+      status: pod_status(Map.get(pod, "status")),
+      public_ip: public_ip(pod),
       ports: pod_ports(pod),
-      gpu_type: first_gpu_type(pod),
-      gpu_count: Map.get(pod, "gpuCount", 1),
-      cost_per_hour: Map.get(pod, "costPerHr") || Map.get(pod, "adjustedCostPerHr"),
+      gpu_type: gpu(pod)["id"],
+      gpu_count: gpu(pod)["count"] || 1,
+      cost_per_hour: Map.get(pod, "cost"),
       region: Map.get(pod, "dataCenterId"),
-      image: Map.get(pod, "imageName"),
+      image: Map.get(pod, "image"),
       name: Map.get(pod, "name"),
       auth: auth,
       created_at: parse_created_at(pod),
@@ -224,85 +224,90 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # a command argument can never be read as shell syntax by the wrapper.
   defp shell_quote(arg), do: "'" <> String.replace(arg, "'", "'\\''") <> "'"
 
-  # RunPod's `desiredStatus` enum is exactly RUNNING | EXITED | TERMINATED —
-  # and it is a *desired* state, so it changes only when somebody asks. Nothing
-  # in REST v1 reports container state, which is why a pod whose
-  # `dockerStartCmd` has exited still reads as RUNNING.
-  #
-  # A value outside the enum falls through to `:provisioning` on purpose: an
-  # unclassifiable pod is not a dead one, and `UpstreamStatus` counts
-  # `:provisioning` as alive rather than tearing the resource down.
-  defp pod_status(%{"desiredStatus" => "RUNNING"}), do: :running
-  defp pod_status(%{"desiredStatus" => "EXITED"}), do: :stopped
-  defp pod_status(%{"desiredStatus" => "TERMINATED"}), do: :terminated
+  defp pod_status("RUNNING"), do: :running
+  defp pod_status("EXITED"), do: :stopped
+  defp pod_status("ERROR"), do: :failed
+  defp pod_status("TERMINATED"), do: :terminated
+
+  # PROVISIONING and STARTING land here, and so does any status outside the
+  # v2 enum, on purpose: an unclassifiable pod is not a dead one, and
+  # `UpstreamStatus` counts `:provisioning` as alive rather than tearing the
+  # resource down.
   defp pod_status(_), do: :provisioning
 
-  defp pod_ports(%{"portMappings" => mappings}) when is_list(mappings) do
-    Enum.map(mappings, fn m ->
-      internal = m["privatePort"] || m["internal"]
-      external = m["publicPort"] || m["external"]
-      protocol = m["type"] |> to_string() |> String.downcase() |> protocol_atom()
-      %{internal: internal, external: external, protocol: protocol, url: proxy_url(m, protocol)}
-    end)
-  end
+  # `ports` is what the pod was asked to expose; `runtime.ports` adds the
+  # public port and IP of each TCP mapping once the pod is RUNNING (it is null
+  # otherwise, and lists no HTTP ports at all).
+  defp pod_ports(%{"id" => pod_id, "ports" => specs} = pod) when is_list(specs) do
+    live = pod |> runtime_ports() |> Map.new(&{&1["private"], &1})
 
-  defp pod_ports(%{"id" => pod_id, "ports" => ports}) when is_binary(ports) do
-    ports
-    |> String.split(",", trim: true)
-    |> Enum.map(fn spec ->
-      [port_str, type] = spec |> String.trim() |> String.split("/", parts: 2)
-      {port, _} = Integer.parse(port_str)
-      protocol = protocol_atom(type)
+    Enum.flat_map(specs, fn spec ->
+      with true <- is_binary(spec),
+           [port_str, type] <- String.split(spec, "/", parts: 2),
+           {port, ""} <- Integer.parse(port_str) do
+        mapping = Map.get(live, port, %{})
+        protocol = protocol_atom(type)
+        external = mapping["public"]
 
-      %{
-        internal: port,
-        external: nil,
-        protocol: protocol,
-        url: http_proxy_url(pod_id, port, protocol)
-      }
+        [
+          %{
+            internal: port,
+            external: external,
+            protocol: protocol,
+            url: port_url(pod_id, protocol, port, mapping["ip"], external)
+          }
+        ]
+      else
+        _ -> []
+      end
     end)
   end
 
   defp pod_ports(_), do: []
 
-  defp protocol_atom("http"), do: :http
-  defp protocol_atom("https"), do: :http
-  defp protocol_atom("tcp"), do: :tcp
-  defp protocol_atom(_), do: :tcp
+  defp runtime_ports(%{"runtime" => %{"ports" => ports}}) when is_list(ports),
+    do: Enum.filter(ports, &is_map/1)
 
-  defp proxy_url(%{"publicIp" => ip, "publicPort" => port}, :tcp) when is_binary(ip),
-    do: "tcp://#{ip}:#{port}"
+  defp runtime_ports(_), do: []
 
-  defp proxy_url(%{"podId" => pod_id, "privatePort" => port}, :http),
-    do: http_proxy_url(pod_id, port, :http)
+  # A status poller runs `pod_to_compute/2` in a loop, so a field of the wrong
+  # type reads as absent rather than raising.
+  defp gpu(%{"gpu" => %{} = gpu}), do: gpu
+  defp gpu(_pod), do: %{}
 
-  defp proxy_url(_, _), do: nil
+  defp public_ip(pod), do: pod |> runtime_ports() |> Enum.find_value(& &1["ip"])
 
-  defp http_proxy_url(pod_id, port, :http) when is_binary(pod_id),
-    do: "https://#{pod_id}-#{port}.proxy.runpod.net"
-
-  defp http_proxy_url(_, _, _), do: nil
-
-  defp first_gpu_type(%{"gpuTypeIds" => [first | _]}), do: first
-  defp first_gpu_type(%{"gpuTypeId" => id}), do: id
-  defp first_gpu_type(%{"machine" => %{"gpuTypeId" => id}}), do: id
-  defp first_gpu_type(_), do: nil
-
-  # RunPod's REST v1 `Pod` schema has no `createdAt`. Its only machine-readable
-  # timestamp is `lastStartedAt` ("The UTC timestamp when a Pod was last
-  # started"); `lastStatusChange` is prose, not a date. So last-start is what
-  # `Compute.created_at` can honestly report — and it is the better input for
-  # the question the field is actually asked, `Reaper` deciding whether a
-  # resource is too young to judge: a pod that was just (re)started is freshly
-  # rented no matter when its record was first written.
-  defp parse_created_at(%{"lastStartedAt" => s}) when is_binary(s) do
-    case DateTime.from_iso8601(s) do
-      {:ok, dt, _} -> dt
-      _ -> nil
+  defp protocol_atom(type) when is_binary(type) do
+    case String.downcase(type) do
+      t when t in ["http", "https"] -> :http
+      _ -> :tcp
     end
   end
 
-  defp parse_created_at(_), do: nil
+  defp protocol_atom(_), do: :tcp
+
+  defp port_url(pod_id, :http, port, _ip, _external) when is_binary(pod_id),
+    do: "https://#{pod_id}-#{port}.proxy.runpod.net"
+
+  defp port_url(_pod_id, :tcp, _port, ip, external) when is_binary(ip) and is_integer(external),
+    do: "tcp://#{ip}:#{external}"
+
+  defp port_url(_, _, _, _, _), do: nil
+
+  # `startedAt` first: the Reaper asks whether a resource is too young to
+  # judge, and a pod that was just (re)started is freshly rented no matter when
+  # its record was first written. v1 answered the same question with
+  # `lastStartedAt`.
+  defp parse_created_at(pod) do
+    Enum.find_value(["startedAt", "createdAt"], fn key ->
+      with s when is_binary(s) <- Map.get(pod, key),
+           {:ok, dt, _} <- DateTime.from_iso8601(s) do
+        dt
+      else
+        _ -> nil
+      end
+    end)
+  end
 
   # --- job helpers ---
 

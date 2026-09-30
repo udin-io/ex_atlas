@@ -248,68 +248,122 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
   end
 
   describe "pod_to_compute/2" do
-    test "maps desiredStatus to normalized status" do
-      pod = %{"id" => "abc", "desiredStatus" => "RUNNING", "gpuCount" => 2}
-      compute = Translate.pod_to_compute(pod)
-      assert compute.id == "abc"
-      assert compute.status == :running
-      assert compute.gpu_count == 2
-    end
-
     test "threads auth through" do
       auth = %{scheme: :bearer, token: "t", hash: "h", header: "Authorization: Bearer t"}
-      compute = Translate.pod_to_compute(%{"id" => "abc", "desiredStatus" => "RUNNING"}, auth)
+      compute = Translate.pod_to_compute(fixture("running"), auth)
       assert compute.auth == auth
     end
 
-    test "builds proxy URL from pod id + port string" do
-      pod = %{"id" => "pod_42", "desiredStatus" => "RUNNING", "ports" => "8000/http,22/tcp"}
-      compute = Translate.pod_to_compute(pod)
-      http_port = Enum.find(compute.ports, &(&1.protocol == :http))
-      assert http_port.url == "https://pod_42-8000.proxy.runpod.net"
+    for {status, expected} <- [
+          provisioning: :provisioning,
+          starting: :provisioning,
+          running: :running,
+          exited: :stopped,
+          error: :failed,
+          terminated: :terminated
+        ] do
+      test "a #{status} pod reads as #{inspect(expected)}" do
+        assert Translate.pod_to_compute(fixture(unquote(to_string(status)))).status ==
+                 unquote(expected)
+      end
     end
 
-    test "reads created_at from lastStartedAt, the only timestamp REST v1 carries" do
-      pod = %{
-        "id" => "abc",
-        "desiredStatus" => "RUNNING",
-        "lastStartedAt" => "2024-07-12T19:14:40.144Z"
-      }
-
-      compute = Translate.pod_to_compute(pod)
-
-      assert compute.created_at == ~U[2024-07-12 19:14:40.144Z]
-    end
-
-    test "created_at is nil when the pod carries no usable timestamp" do
-      # `lastStatusChange` is prose ("Rented by User: Fri Jul 12 2024 …"), not a
-      # timestamp, so a pod that only has that one still has no age.
-      pod = %{
-        "id" => "abc",
-        "desiredStatus" => "RUNNING",
-        "lastStatusChange" => "Rented by User: Fri Jul 12 2024 15:14:40 GMT-0400"
-      }
-
-      assert Translate.pod_to_compute(pod).created_at == nil
-      assert Translate.pod_to_compute(%{"id" => "abc"}).created_at == nil
-    end
-
-    test "an unparseable lastStartedAt is nil rather than a crash" do
-      pod = %{"id" => "abc", "desiredStatus" => "RUNNING", "lastStartedAt" => "not a date"}
-
-      assert Translate.pod_to_compute(pod).created_at == nil
-    end
-
-    test "a desiredStatus outside the enum reads as :provisioning, never as dead" do
-      # The enum is RUNNING | EXITED | TERMINATED. Anything else is a pod we
-      # cannot classify, and `UpstreamStatus` counts :provisioning as alive —
-      # the same "uncertainty never tears a resource down" rule the poller runs
-      # on.
+    test "a status outside the v2 enum reads as :provisioning, never as dead" do
+      # An unclassifiable pod is not a dead one, and `UpstreamStatus` counts
+      # :provisioning as alive: uncertainty never tears a resource down.
       assert Translate.pod_to_compute(%{"id" => "abc"}).status == :provisioning
 
-      assert Translate.pod_to_compute(%{"id" => "abc", "desiredStatus" => "FAILED"}).status ==
+      assert Translate.pod_to_compute(%{fixture("running") | "status" => "HIBERNATING"}).status ==
                :provisioning
     end
+
+    test "carries id, name, image, gpu, cost and data center" do
+      compute = Translate.pod_to_compute(fixture("running"))
+
+      assert compute.id == "7h9k2m4n6p"
+      assert compute.name == "pytorch-training"
+      assert compute.image == "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
+      assert compute.gpu_type == "NVIDIA GeForce RTX 4090"
+      assert compute.gpu_count == 1
+      assert compute.cost_per_hour == 0.44
+      assert compute.region == "US-KS-2"
+    end
+
+    test "created_at is startedAt, the last time the pod started" do
+      assert Translate.pod_to_compute(fixture("running")).created_at == ~U[2026-06-01 12:02:00Z]
+    end
+
+    test "created_at falls back to createdAt before the pod has started" do
+      assert Translate.pod_to_compute(fixture("provisioning")).created_at ==
+               ~U[2026-06-01 12:00:00Z]
+    end
+
+    test "an unparseable timestamp is nil rather than a crash" do
+      pod = %{"id" => "abc", "startedAt" => "not a date", "createdAt" => nil}
+      assert Translate.pod_to_compute(pod).created_at == nil
+    end
+
+    test "a running pod's ports carry the proxy URL and the public TCP mapping" do
+      compute = Translate.pod_to_compute(fixture("running"))
+
+      assert compute.public_ip == "195.26.233.3"
+
+      assert compute.ports == [
+               %{
+                 internal: 8888,
+                 external: nil,
+                 protocol: :http,
+                 url: "https://7h9k2m4n6p-8888.proxy.runpod.net"
+               },
+               %{internal: 22, external: 34446, protocol: :tcp, url: "tcp://195.26.233.3:34446"}
+             ]
+    end
+
+    test "a pod that is not running still lists its configured ports" do
+      compute = Translate.pod_to_compute(fixture("provisioning"))
+
+      assert compute.public_ip == nil
+
+      assert compute.ports == [
+               %{
+                 internal: 8888,
+                 external: nil,
+                 protocol: :http,
+                 url: "https://7h9k2m4n6p-8888.proxy.runpod.net"
+               },
+               %{internal: 22, external: nil, protocol: :tcp, url: nil}
+             ]
+    end
+
+    test "fields of the wrong type read as absent, not a crash" do
+      pod = %{
+        "id" => "abc",
+        "status" => 5,
+        "gpu" => "RTX 4090",
+        "runtime" => "up",
+        "ports" => "8000/http",
+        "startedAt" => 7,
+        "createdAt" => nil
+      }
+
+      compute = Translate.pod_to_compute(pod)
+
+      assert compute.status == :provisioning
+      assert compute.gpu_type == nil
+      assert compute.gpu_count == 1
+      assert compute.ports == []
+      assert compute.public_ip == nil
+      assert compute.created_at == nil
+    end
+
+    test "a malformed port entry is skipped, not a crash" do
+      pod = %{fixture("provisioning") | "ports" => ["8000/http", "nonsense", 42, "x/tcp"]}
+      assert [%{internal: 8000}] = Translate.pod_to_compute(pod).ports
+    end
+  end
+
+  defp fixture(name) do
+    "test/fixtures/runpod/v2/pod_#{name}.json" |> File.read!() |> Jason.decode!()
   end
 
   describe "job_response_to_job/2" do

@@ -34,10 +34,10 @@ defmodule ExAtlas.Providers.RunPodTest do
 
         response = %{
           "id" => "pod_abc123",
-          "desiredStatus" => "RUNNING",
-          "ports" => "8000/http",
-          "gpuCount" => 1,
-          "imageName" => body["imageName"]
+          "status" => "RUNNING",
+          "ports" => ["8000/http"],
+          "gpu" => %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1},
+          "image" => body["image"]
         }
 
         conn
@@ -66,7 +66,7 @@ defmodule ExAtlas.Providers.RunPodTest do
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(
           200,
-          Jason.encode!(%{"id" => "pod_abc", "desiredStatus" => "RUNNING"})
+          Jason.encode!(%{"id" => "pod_abc", "status" => "RUNNING"})
         )
       end)
 
@@ -85,8 +85,8 @@ defmodule ExAtlas.Providers.RunPodTest do
           200,
           Jason.encode!(%{
             "id" => "pod_abc",
-            "desiredStatus" => "RUNNING",
-            "lastStartedAt" => "2024-07-12T19:14:40.144Z"
+            "status" => "RUNNING",
+            "startedAt" => "2024-07-12T19:14:40.144Z"
           })
         )
       end)
