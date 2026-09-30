@@ -226,6 +226,154 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
+  describe "list_compute/1" do
+    setup %{bypass: bypass} do
+      pods = [
+        pod("p1", "RUNNING", "atlas-a"),
+        pod("p2", "STARTING", "atlas-b"),
+        pod("p3", "ERROR", "atlas-c"),
+        pod("p4", "EXITED", "other")
+      ]
+
+      # Two pages: the first names a cursor, the second ends the walk.
+      Bypass.expect(bypass, "GET", "/pods", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        assert conn.query_params["limit"] == "1000"
+
+        case conn.query_params["cursor"] do
+          nil ->
+            json(conn, 200, %{
+              "pods" => Enum.take(pods, 2),
+              "pagination" => %{"nextCursor" => "c2", "hasNextPage" => true}
+            })
+
+          "c2" ->
+            json(conn, 200, %{
+              "pods" => Enum.drop(pods, 2),
+              "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
+            })
+        end
+      end)
+
+      :ok
+    end
+
+    test "returns the pods of every page", %{ctx_opts: opts} do
+      assert {:ok, computes} = ExAtlas.list_compute(opts)
+      assert Enum.map(computes, & &1.id) == ~w(p1 p2 p3 p4)
+    end
+
+    test "status: :failed returns the ERROR pod (issue 37)", %{ctx_opts: opts} do
+      assert {:ok, [%{id: "p3", status: :failed}]} =
+               ExAtlas.list_compute([status: :failed] ++ opts)
+    end
+
+    test "status: :running excludes a STARTING pod", %{ctx_opts: opts} do
+      assert {:ok, [%{id: "p1"}]} = ExAtlas.list_compute([status: :running] ++ opts)
+    end
+
+    test "name: filters by exact name", %{ctx_opts: opts} do
+      assert {:ok, [%{id: "p4"}]} = ExAtlas.list_compute([name: "other"] ++ opts)
+    end
+
+    test "gpu: and region: filter too", %{ctx_opts: opts} do
+      assert {:ok, [_, _, _, _]} = ExAtlas.list_compute([gpu: :rtx_4090] ++ opts)
+      assert {:ok, []} = ExAtlas.list_compute([gpu: :h100] ++ opts)
+      assert {:ok, []} = ExAtlas.list_compute([region: "EU-RO-1"] ++ opts)
+    end
+  end
+
+  describe "list_compute/1 failures" do
+    test "a failed second page fails the call instead of returning half a list", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect(bypass, "GET", "/pods", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        case conn.query_params["cursor"] do
+          nil ->
+            json(conn, 200, %{
+              "pods" => [pod("p1", "RUNNING", "atlas-a")],
+              "pagination" => %{"nextCursor" => "c2", "hasNextPage" => true}
+            })
+
+          "c2" ->
+            json(conn, 404, %{"title" => "Not Found", "status" => 404, "detail" => "bad cursor"})
+        end
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.list_compute(opts)
+    end
+
+    for {label, cursor} <- [{"repeats", "same"}, {"is null", nil}] do
+      test "a next page whose cursor #{label} is a :provider error", %{
+        bypass: bypass,
+        ctx_opts: opts
+      } do
+        Bypass.expect(bypass, "GET", "/pods", fn conn ->
+          json(conn, 200, %{
+            "pods" => [pod("p1", "RUNNING", "atlas-a")],
+            "pagination" => %{"nextCursor" => unquote(cursor), "hasNextPage" => true}
+          })
+        end)
+
+        assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_compute(opts)
+      end
+    end
+
+    test "a cursor that never ends stops after 100 pages", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect(bypass, "GET", "/pods", fn conn ->
+        json(conn, 200, %{
+          "pods" => [],
+          "pagination" => %{
+            "nextCursor" => Integer.to_string(System.unique_integer([:positive])),
+            "hasNextPage" => true
+          }
+        })
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
+               ExAtlas.list_compute(opts)
+
+      assert message =~ "100 pages"
+    end
+
+    test "a page holding a non-object entry is a :provider error", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/pods", fn conn ->
+        json(conn, 200, %{
+          "pods" => [pod("p1", "RUNNING", "atlas-a"), nil],
+          "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
+        })
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_compute(opts)
+    end
+
+    test "a body that is not a pod list is a :provider error", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/pods", fn conn -> json(conn, 200, [%{"id" => "p1"}]) end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_compute(opts)
+    end
+  end
+
+  defp pod(id, status, name) do
+    %{
+      "id" => id,
+      "name" => name,
+      "status" => status,
+      "gpu" => %{"id" => "NVIDIA GeForce RTX 4090", "count" => 1},
+      "dataCenterId" => "US-KS-2",
+      "ports" => [],
+      "runtime" => nil,
+      "createdAt" => "2026-06-01T12:00:00Z",
+      "startedAt" => nil
+    }
+  end
+
   defp json(conn, status, body) do
     conn
     |> Plug.Conn.put_resp_header("content-type", "application/json")

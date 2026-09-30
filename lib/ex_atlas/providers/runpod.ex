@@ -114,12 +114,14 @@ defmodule ExAtlas.Providers.RunPod do
   end
 
   @impl true
+  # REST v2 filters nothing server-side, so every filter applies here, to the
+  # translated `Compute`, the same way `ExAtlas.Providers.Mock` applies them.
   def list_compute(filters, ctx) do
-    params = list_filters_to_params(filters)
-
-    with {:ok, pods} <- Pods.list(ctx, params) do
-      data = normalize_list_body(pods)
-      {:ok, Enum.map(data, &Translate.pod_to_compute/1)}
+    with {:ok, pods} <- Pods.list(ctx) do
+      {:ok,
+       pods
+       |> Enum.map(&Translate.pod_to_compute/1)
+       |> Enum.filter(&matches_filters?(&1, filters))}
     end
   end
 
@@ -249,21 +251,22 @@ defmodule ExAtlas.Providers.RunPod do
 
   # --- helpers ---
 
-  defp list_filters_to_params(filters) do
-    Enum.flat_map(filters, fn
-      {:status, :running} -> [desiredStatus: "RUNNING"]
-      {:status, :stopped} -> [desiredStatus: "EXITED"]
-      {:status, :terminated} -> [desiredStatus: "TERMINATED"]
-      {:status, :failed} -> [desiredStatus: "FAILED"]
-      {:name, n} when is_binary(n) -> [name: n]
-      _ -> []
+  defp matches_filters?(compute, filters) do
+    Enum.all?(filters, fn
+      {:status, s} -> compute.status == s
+      {:name, n} -> compute.name == n
+      {:region, r} -> compute.region == r
+      {:gpu, g} -> gpu_matches?(compute.gpu_type, g)
+      _ -> true
     end)
   end
 
-  defp normalize_list_body(%{"pods" => pods}) when is_list(pods), do: pods
-  defp normalize_list_body(%{"data" => pods}) when is_list(pods), do: pods
-  defp normalize_list_body(pods) when is_list(pods), do: pods
-  defp normalize_list_body(_), do: []
+  defp gpu_matches?(gpu_type, canonical) do
+    case Spec.GpuCatalog.for_provider(canonical, :runpod) do
+      {:ok, id} -> gpu_type == id
+      {:error, _} -> false
+    end
+  end
 
   defp to_gpu_type(gpu) do
     low = gpu["lowestPrice"] || %{}
