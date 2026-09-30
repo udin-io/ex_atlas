@@ -7,6 +7,61 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Changed: Runpod REST v2 (breaking, v0.6.0)
+
+Runpod retires REST v1 on 2026-11-15. Every Runpod management call now goes to
+`https://api.runpod.io/v2` (#34). Callers keep the same `ExAtlas` functions.
+What you will see:
+
+- `spot: true` on `:runpod` returns `{:error, %ExAtlas.Error{kind: :unsupported}}`
+  before any request, and `:spot` leaves Runpod's `capabilities/0`. Runpod no
+  longer sells spot pods, and v2 has no field for them. An adopted spot task that
+  is preempted after the upgrade cannot respawn: it emits
+  `{:respawn_failed, {:preempted, %Error{kind: :unsupported}}}`.
+- A pod in Runpod's new `ERROR` state reads as `:failed`, and
+  `list_compute(status: :failed)` returns it instead of always returning `[]`
+  (#37).
+- `list_compute` on Runpod honours `gpu:` and `region:` as well as `status:` and
+  `name:`. v2 filters nothing server-side, so ExAtlas pages through every pod and
+  filters locally. `gpu: :h100` returned every pod before; it now returns H100
+  pods only.
+- A pod spawned with no `container_disk_gb` asks for `disk: 50`, v1's default.
+  v2 refused a body with no `disk` in a live probe.
+- A pod spawned with no `volume_gb` gets no `/workspace` volume. A 0.5.x pod got
+  a 20 GB host-local volume there. Pass `volume_gb` to keep one (10 GB minimum).
+- ExAtlas adds no volume checks of its own. Runpod rejects `volume_gb` below 10,
+  and a persistent plus a network volume together. The caller gets
+  `{:error, %ExAtlas.Error{kind: :provider}}` carrying Runpod's `detail`.
+- `provider_opts` for Runpod now take v2 keys and merge into the body deeply:
+  `%{"gpu" => %{"minCudaVersion" => "12.1"}}` keeps `gpu.id`. `Compute.raw` is the
+  v2 pod body.
+- Runpod serverless endpoints, network volumes and billing use their v2 paths
+  (`/serverless`, `/network-volumes`, `/billing/serverless`,
+  `/billing/network-volumes`).
+- `Compute.created_at` reads the pod's `startedAt`, then `createdAt`.
+
+Upgrade notes:
+
+- A pod spawned by 0.5.x carries the v1 URL in its self-delete trap. If one is
+  still running after 2026-11-15, its self-delete fails, and `:max_runtime_ms` or
+  `terminate/2` (now v2) ends it.
+- Pods created through v1 keep working: v2 resolves their ids, and `DELETE`
+  answers 204 (live probe, 2026-09-30). `TrackingStore` adoption needs no change.
+- A command that exits leaves the pod `RUNNING` on v2, as on v1: Runpod restarts
+  the container. Self-termination and `:max_runtime_ms` stay the only ways a task
+  ends.
+
+### Fixed
+
+- Provider errors read RFC 9457 `detail` and string `errors`, so a Runpod v2
+  failure carries Runpod's own words.
+- A pod create is never retried. A create that timed out or answered 5xx could
+  rent a second pod that nothing tracked.
+- Request telemetry no longer carries the query string, which held the GraphQL
+  `api_key`.
+- The Reaper keeps `:provisioning` pods in its orphan list, as v1's
+  `desiredStatus=RUNNING` filter did.
+
 ### Added
 
 - **Re-adoption instead of reaping after a restart** (#23). Nothing in the

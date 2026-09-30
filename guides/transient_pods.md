@@ -240,10 +240,11 @@ def handle_info({:atlas_compute, _id, {:poll_failed, _error}}, socket) do
 end
 ```
 
-`:preempted` only ever appears for pods you spawned with `spot: true`. RunPod
-publishes no preemption signal — no field, no event, no status — so ExAtlas
-infers it: an interruptible pod that stopped or vanished without you asking
-was almost certainly reclaimed. Treat it as a strong hint, not a fact.
+`:preempted` only ever appears for pods you spawned with `spot: true`, and
+Runpod no longer sells spot pods (`spot: true` on `:runpod` returns an
+`:unsupported` error). Providers that still sell spot publish no preemption
+signal, so ExAtlas infers it: an interruptible pod that stopped or vanished
+without you asking was almost certainly reclaimed. Treat it as a strong hint, not a fact.
 
 ### Spot capacity for unattended work
 
@@ -326,11 +327,10 @@ so a handler that only cares about "is it over?" needs no changes.
 
 ### The pod must end itself
 
-This is the part that surprises people. RunPod's REST API reports no container
-state at all — the `Pod` schema has no `runtime` object, no `currentStatus`
-and no exit code, and `desiredStatus` is only `RUNNING | EXITED | TERMINATED`,
-a *desired* state that changes when somebody asks it to. So when your command
-exits, **the pod stays `RUNNING` and keeps billing**, and no amount of polling
+This is the part that surprises people. Runpod's REST v2 API reports no exit
+code and no restart count. When your command exits, **the pod stays `RUNNING`
+and keeps billing**: Runpod restarts the container (a live probe on 2026-09-30
+saw a 30-second command start 6 times in 180 seconds), and no amount of polling
 will tell you the work is done.
 
 So `:self_terminate` (on by default whenever you pass `:command`) wraps your
@@ -339,7 +339,7 @@ command in a shell that deletes the pod when it ends:
 ```sh
 atlas_self_terminate() {
   curl -sS -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
-    "https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID"
+    "https://api.runpod.io/v2/pods/$RUNPOD_POD_ID"
 }
 trap atlas_self_terminate EXIT INT TERM
 /app/train.sh --epochs 3

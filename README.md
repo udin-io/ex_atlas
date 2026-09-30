@@ -491,7 +491,7 @@ config :ex_atlas, :orchestrator,
 
 | Provider      | Module                           | Version shipped | Capabilities                                                                        |
 | ------------- | -------------------------------- | --------------- | ----------------------------------------------------------------------------------- |
-| `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
+| `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
 | `:fly`        | `ExAtlas.Providers.Fly`            | v0.2 (stub)     | `:http_proxy, :raw_tcp, :global_networking`                                         |
 | `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.2 (stub)     | `:raw_tcp`                                                                          |
 | `:vast`       | `ExAtlas.Providers.Vast`           | v0.3 (stub)     | `:spot, :raw_tcp`                                                                   |
@@ -696,9 +696,9 @@ continues. Tearing down a live GPU because one request failed is far more
 expensive than noticing a death a minute late.
 
 **Preemption is inferred, not reported.** No provider publishes a "you were
-outbid" signal — RunPod's REST API has no preemption field, event or status,
-and its `desiredStatus` is only `RUNNING | EXITED | TERMINATED`. So a resource
-you spawned with `spot: true` that stops, is terminated, or vanishes without
+outbid" signal, and Runpod no longer sells spot pods at all (`spot: true` on
+`:runpod` returns `{:error, %ExAtlas.Error{kind: :unsupported}}`). So a resource
+on a provider that still sells spot, spawned with `spot: true`, that stops, is terminated, or vanishes without
 you asking is reported as `{:status, :preempted}`. On-demand resources keep
 the literal reason (`:stopped`, `:terminated`, `:vanished`).
 
@@ -776,7 +776,7 @@ Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
 
 | Option              | Default    | Meaning                                                    |
 | ------------------- | ---------- | ---------------------------------------------------------- |
-| `:command`          | `nil`      | Overrides the image's start command (`dockerStartCmd`)      |
+| `:command`          | `nil`      | Overrides the image's start command (`cmd` on Runpod)       |
 | `:self_terminate`   | `true`     | Wrap `:command` so the resource destroys itself on exit     |
 | `:max_runtime_ms`   | 60 min     | Wall-clock deadline **from spawn**; then `DELETE`           |
 | `:ready_timeout_ms` | 15 min     | Fail as `:never_ready` if still provisioning when it fires  |
@@ -798,12 +798,12 @@ option. Three things differ:
 
 #### Why exit detection needs the container's help
 
-RunPod's REST API exposes **no container state**: the `Pod` schema has no
-`runtime` object, no `currentStatus` and no exit code, and `desiredStatus` is
-only `RUNNING | EXITED | TERMINATED` — a *desired* state that changes when
-somebody asks it to. So when `dockerStartCmd` exits the pod stays `RUNNING`,
-the GPU stays reserved, and no amount of polling can tell that the work is
-done.
+Runpod's REST v2 API exposes **no exit code and no restart count**: the `Pod`
+body has a `runtime` object (uptime, GPUs, ports), but `status` stays `RUNNING`
+when your command exits, and Runpod restarts the container. A live probe
+(2026-09-30) read `RUNNING` 180 seconds after a 30-second command, which had
+started 6 times. The GPU stays reserved, and no amount of polling can tell that
+the work is done.
 
 The only party that knows is the container. With `self_terminate: true`
 ex_atlas wraps your command in a shell that deletes the pod when it ends:
@@ -811,7 +811,7 @@ ex_atlas wraps your command in a shell that deletes the pod when it ends:
 ```sh
 atlas_self_terminate() {
   curl -sS -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
-    "https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID"
+    "https://api.runpod.io/v2/pods/$RUNPOD_POD_ID"
 }
 trap atlas_self_terminate EXIT INT TERM
 /app/train.sh --epochs 3

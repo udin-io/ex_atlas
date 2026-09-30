@@ -2,8 +2,8 @@
 
 RunPod has no API for pod logs — the console is the only place they exist, and
 [it has been an open request upstream for years](https://github.com/runpod/runpod-python/issues/400).
-Its REST API also reports no container state at all: a pod whose command has
-exited keeps answering `desiredStatus: "RUNNING"` and keeps billing.
+Its REST v2 API also reports no exit code: a pod whose command has exited keeps
+answering `status: "RUNNING"`, restarts the container and keeps billing.
 
 So for unattended work, the only party that knows what is happening inside the
 container is the container. This guide is the supported way for it to say so.
