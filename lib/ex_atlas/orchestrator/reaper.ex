@@ -88,6 +88,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   @default_interval_ms 60 * 1_000
 
+  # A pod that is still booting bills too. Runpod v1's `desiredStatus=RUNNING`
+  # filter included booting pods; v2's `status` splits them out.
+  @billing_statuses [:provisioning, :running]
+
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -170,7 +174,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
   end
 
   defp reap_provider(provider, prefix, grace_ms) do
-    case ExAtlas.list_compute(provider: provider, status: :running) do
+    case ExAtlas.list_compute(provider: provider) do
       {:ok, computes} ->
         tracked = registered_ids()
         store = TrackingStore.impl()
@@ -188,7 +192,8 @@ defmodule ExAtlas.Orchestrator.Reaper do
   end
 
   defp orphan?(compute, tracked, store, prefix, now, grace_ms) do
-    not MapSet.member?(tracked, compute.id) and
+    compute.status in @billing_statuses and
+      not MapSet.member?(tracked, compute.id) and
       not ours?(store, compute.id) and
       is_binary(compute.name) and
       String.starts_with?(compute.name, prefix) and

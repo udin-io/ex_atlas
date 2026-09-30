@@ -28,6 +28,31 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
   end
 
+  test "an untracked resource still provisioning past the grace window is reclaimed" do
+    # A booting pod bills. Runpod v1's desiredStatus=RUNNING listing included
+    # it; v2 reports it as PROVISIONING or STARTING.
+    TestOrchestrator.put_env(reap_grace_ms: 0)
+    {:ok, compute} = spawn_untracked()
+    ExAtlas.Providers.Mock.set_status(compute.id, :provisioning)
+
+    :ok = Reaper.reap_now("atlas-", [:mock])
+
+    assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+  end
+
+  for status <- [:stopped, :failed] do
+    test "an untracked #{status} resource is left alone" do
+      TestOrchestrator.put_env(reap_grace_ms: 0)
+      {:ok, compute} = spawn_untracked()
+      ExAtlas.Providers.Mock.set_status(compute.id, unquote(status))
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: unquote(status)}} =
+               ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
   test "a resource whose name lacks the prefix is never touched" do
     TestOrchestrator.put_env(reap_grace_ms: 0)
     {:ok, compute} = spawn_untracked(name: "someone-elses-pod")
