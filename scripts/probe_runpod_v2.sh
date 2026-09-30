@@ -344,22 +344,29 @@ case $code in
   *) echo "GET /v2/pods answered HTTP $code: $(problem)" >&2; exit 1 ;;
 esac
 
+# GPUS[i] is a GPU type id; GPU_DCS[i] is the comma-separated data centers where
+# the catalog lists it in stock (empty: let Runpod choose).
+GPUS=()
+GPU_DCS=()
 if [[ -n ${PROBE_GPU_ID:-} ]]; then
   GPUS=("$PROBE_GPU_ID")
+  GPU_DCS=("")
 else
   code=$(api GET "$V2/catalog/gpus?include=AVAILABILITY&product=POD&cloud=$CLOUD")
   [[ $code == 200 ]] || { echo "GPU catalog answered HTTP $code: $(problem)" >&2; exit 1; }
   lower=$(printf '%s' "$CLOUD" | tr '[:upper:]' '[:lower:]')
-  GPUS=()
-  while IFS= read -r g; do GPUS+=("$g"); done < <(
+  while IFS=$'\t' read -r g dcs; do GPUS+=("$g"); GPU_DCS+=("$dcs"); done < <(
     jq -r --arg c "$lower" '
       .gpus
       | map(select(.[$c] == true and (.availability // "NONE") != "NONE" and (.price[$c] // 0) > 0))
-      | sort_by(.price[$c]) | .[0:4][] | .id' "$RESP"
+      | sort_by(.price[$c]) | .[0:4][]
+      | [.id, ([.dataCenters[]? | select((.availability // "NONE") != "NONE") | .id] | join(","))] | @tsv' "$RESP"
   )
   [[ ${#GPUS[@]} -gt 0 ]] || { echo "no $CLOUD GPU has stock right now; set PROBE_GPU_ID" >&2; exit 1; }
 fi
-log "GPU candidates, cheapest first: ${GPUS[*]}"
+for ((i = 0; i < ${#GPUS[@]}; i++)); do
+  log "GPU candidate $((i + 1)): ${GPUS[$i]} (in stock in: ${GPU_DCS[$i]:-any data center})"
+done
 
 # create ROLE URL BODY_FILE -> 0 and POD_ID set when the pod was made.
 create() {
@@ -383,15 +390,19 @@ create() {
 # CREATE_FAIL naming the last refusal. No DISK_GB leaves `disk` to Runpod's
 # default. Each candidate GPU gets a body built from scratch.
 create_v2() {
-  local role=$1 script=$2 disk=${3:-} gpu body=$WORK/body.json
-  for gpu in "${GPUS[@]}"; do
+  local role=$1 script=$2 disk=${3:-} gpu body=$WORK/body.json k
+  for ((k = 0; k < ${#GPUS[@]}; k++)); do
+    gpu=${GPUS[$k]}
+    # dataCenterIds: the data centers the catalog lists this GPU in. Omitted
+    # when unknown, which lets the scheduler choose.
     jq -n --arg name "$TAG-$role" --arg image "$IMAGE" --arg gpu "$gpu" --arg cloud "$CLOUD" \
-      --arg script "$script" --arg disk "$disk" '{
+      --arg script "$script" --arg disk "$disk" --arg dcs "${GPU_DCS[$k]}" '{
         name: $name, image: $image, cloud: $cloud,
         gpu: {id: $gpu, count: 1},
         entrypoint: ["/bin/sh", "-c"],
         cmd: [$script]
-      } + (if $disk == "" then {} else {disk: ($disk | tonumber)} end)' >"$body"
+      } + (if $disk == "" then {} else {disk: ($disk | tonumber)} end)
+        + (if $dcs == "" then {} else {dataCenterIds: ($dcs | split(","))} end)' >"$body"
     create "$role" "$V2/pods" "$body" && return 0
     CREATE_FAIL="$(problem)"
     log "$role body sent for $gpu: $(jq -c 'keys' "$body") ($(wc -c <"$body" | tr -d ' ') bytes)"
@@ -426,17 +437,21 @@ wait_started() {
 log "Q4: creating a pod through v1"
 v1_body=$WORK/v1.json
 V1_ID=""
-for gpu in "${GPUS[@]}"; do
-  jq -n --arg name "$TAG-v1" --arg image "$IMAGE" --arg gpu "$gpu" --arg cloud "$CLOUD" '{
+# v1 takes every candidate in one create and places the pod on whichever is
+# free (gpuTypePriority defaults to "availability"). Its dataCenterIds default to
+# a fixed list, so the catalog's in-stock data centers go in when known.
+v1_gpus=$(printf '%s\n' "${GPUS[@]}" | jq -R . | jq -sc .)
+v1_dcs=$(printf '%s\n' "${GPU_DCS[@]}" | tr ',' '\n' | jq -R 'select(. != "")' | jq -sc 'unique')
+jq -n --arg name "$TAG-v1" --arg image "$IMAGE" --arg cloud "$CLOUD" \
+  --argjson gpus "$v1_gpus" --argjson dcs "$v1_dcs" '{
     name: $name, imageName: $image, computeType: "GPU", cloudType: $cloud,
-    gpuTypeIds: [$gpu], gpuCount: 1,
+    gpuTypeIds: $gpus, gpuCount: 1,
     dockerEntrypoint: ["/bin/sh", "-c"], dockerStartCmd: ["sleep 600"]
-  }' >"$v1_body"
-  if create "created via v1" "$V1/pods" "$v1_body"; then
-    V1_ID=$POD_ID
-    break
-  fi
-done
+  } + (if ($dcs | length) == 0 then {} else {dataCenterIds: $dcs} end)' >"$v1_body"
+log "Q4 v1 body sent: $(jq -c . "$v1_body")"
+if create "created via v1" "$V1/pods" "$v1_body"; then
+  V1_ID=$POD_ID
+fi
 
 if [[ -n $V1_ID ]]; then
   s=$(pod_state "$V1_ID")
@@ -454,7 +469,7 @@ if [[ -n $V1_ID ]]; then
   d=$(delete_pod "$V1_ID")
   EXTRA+=("Q4 extra: DELETE of the v1 pod answered $d")
 else
-  A4="NOT RUN (v1 create failed on every GPU; see the log above)"
+  A4="NOT RUN (v1 create failed; see the log above)"
 fi
 
 # --- Q1, Q2, Q3: two v2 pods run side by side --------------------------------
