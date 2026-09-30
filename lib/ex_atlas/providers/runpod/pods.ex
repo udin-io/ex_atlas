@@ -1,6 +1,6 @@
 defmodule ExAtlas.Providers.RunPod.Pods do
   @moduledoc """
-  Thin wrappers over RunPod's REST `/pods` endpoints. Each function returns
+  Thin wrappers over Runpod's REST v2 `/pods` endpoints. Each function returns
   `{:ok, body} | {:error, ExAtlas.Error.t()}`.
 
   Translation between `ExAtlas.Spec.ComputeRequest` and RunPod's native payload
@@ -30,14 +30,17 @@ defmodule ExAtlas.Providers.RunPod.Pods do
     |> Client.handle_response()
   end
 
-  @doc "POST /pods/:id/stop — stop a pod (keeps volume)."
-  def stop(ctx, id) do
-    ctx |> Client.management() |> Req.post(url: "/pods/#{id}/stop") |> Client.handle_response()
-  end
+  @doc "POST /pods/:id/action `stop` — stop a pod (keeps its disk)."
+  def stop(ctx, id), do: action(ctx, id, "stop")
 
-  @doc "POST /pods/:id/start — resume a stopped pod."
-  def start(ctx, id) do
-    ctx |> Client.management() |> Req.post(url: "/pods/#{id}/start") |> Client.handle_response()
+  @doc "POST /pods/:id/action `start` — resume a stopped pod."
+  def start(ctx, id), do: action(ctx, id, "start")
+
+  defp action(ctx, id, action) do
+    ctx
+    |> Client.management()
+    |> Req.post(url: "/pods/#{id}/action", json: %{action: action})
+    |> Client.handle_response()
   end
 
   @doc "DELETE /pods/:id — terminate a pod."

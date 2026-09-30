@@ -64,7 +64,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       assert File.read!(Path.join(tmp, "ran")) == "ran\n"
       assert log =~ "-X DELETE"
-      assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
+      assert log =~ "https://api.runpod.io/v2/pods/pod_abc"
       assert log =~ "Authorization: Bearer pod-scoped-key"
       # A hung DELETE must not hold the pod, and its bill, open for ever.
       assert log =~ "-m 30"
@@ -79,7 +79,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {body, _} = Translate.compute_request_to_pod_create(req)
 
       assert {3, log} = run_start_cmd(body["cmd"], tmp)
-      assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
+      assert log =~ "https://api.runpod.io/v2/pods/pod_abc"
     end
 
     @tag :tmp_dir

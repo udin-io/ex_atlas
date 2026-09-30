@@ -5,7 +5,7 @@ defmodule ExAtlas.Providers.RunPod do
   Wraps three RunPod APIs through the single ExAtlas contract:
 
     * **REST management** — pod/endpoint/template/network-volume CRUD and pod
-      lifecycle operations. Base URL `https://rest.runpod.io/v1`.
+      lifecycle operations. Base URL `https://api.runpod.io/v2`.
     * **Serverless runtime** — job submission, status, streaming against a
       specific endpoint. Base URL `https://api.runpod.ai/v2/<endpoint_id>`.
     * **Legacy GraphQL** — the only surface that exposes GPU catalog pricing.

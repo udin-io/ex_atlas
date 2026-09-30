@@ -2,8 +2,8 @@ defmodule ExAtlas.Providers.RunPod.Client do
   @moduledoc """
   Shared `Req` client factories for RunPod's three APIs:
 
-    * REST management — `https://rest.runpod.io/v1` — pods, endpoints, templates,
-      network volumes, container registry auth, billing.
+    * REST management — `https://api.runpod.io/v2` — pods, serverless
+      endpoints, templates, network volumes, billing.
     * Serverless runtime — `https://api.runpod.ai/v2/<endpoint>` — job submission,
       status polling, streaming.
     * Legacy GraphQL — `https://api.runpod.io/graphql` — GPU pricing catalog
@@ -14,7 +14,7 @@ defmodule ExAtlas.Providers.RunPod.Client do
   `Req.merge/2` or pass extra options per call.
   """
 
-  @management_url "https://rest.runpod.io/v1"
+  @management_url "https://api.runpod.io/v2"
   @runtime_url "https://api.runpod.ai/v2"
   @graphql_url "https://api.runpod.io/graphql"
 

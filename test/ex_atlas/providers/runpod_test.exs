@@ -113,7 +113,7 @@ defmodule ExAtlas.Providers.RunPodTest do
   describe "terminate/2" do
     test "DELETEs /pods/:id", %{bypass: bypass, ctx_opts: opts} do
       Bypass.expect_once(bypass, "DELETE", "/pods/pod_abc", fn conn ->
-        Plug.Conn.resp(conn, 200, "{}")
+        Plug.Conn.resp(conn, 204, "")
       end)
 
       assert :ok = ExAtlas.terminate("pod_abc", opts)
@@ -129,6 +129,58 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:error, %ExAtlas.Error{kind: :unsupported, provider: :runpod}} =
                ExAtlas.spawn_compute([gpu: :h100, image: "x", spot: true] ++ opts)
     end
+  end
+
+  describe "REST v2" do
+    test "the management API is REST v2" do
+      assert ExAtlas.Providers.RunPod.Client.management_url() == "https://api.runpod.io/v2"
+    end
+
+    for action <- [:stop, :start] do
+      test "#{action}/2 POSTs the #{action} action", %{bypass: bypass, ctx_opts: opts} do
+        action = unquote(to_string(action))
+
+        Bypass.expect_once(bypass, "POST", "/pods/pod_abc/action", fn conn ->
+          {:ok, raw, conn} = Plug.Conn.read_body(conn)
+          assert Jason.decode!(raw) == %{"action" => action}
+          json(conn, 200, %{"id" => "pod_abc", "status" => "EXITED"})
+        end)
+
+        assert :ok = apply(ExAtlas, unquote(action), ["pod_abc", opts])
+      end
+    end
+
+    test "a 404 problem body becomes :not_found with its detail", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/pods/gone", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/problem+json")
+        |> Plug.Conn.resp(
+          404,
+          Jason.encode!(%{"title" => "Not Found", "status" => 404, "detail" => "pod not found"})
+        )
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found, message: "pod not found"}} =
+               ExAtlas.get_compute("gone", opts)
+    end
+
+    test "an ERROR pod is observed dead and :failed", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn ->
+        json(conn, 200, %{"id" => "pod_abc", "status" => "ERROR"})
+      end)
+
+      assert {:dead, :failed, %{id: "pod_abc"}} =
+               ExAtlas.Orchestrator.UpstreamStatus.observe("pod_abc", opts)
+    end
+  end
+
+  defp json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_header("content-type", "application/json")
+    |> Plug.Conn.resp(status, Jason.encode!(body))
   end
 
   describe "error handling" do
