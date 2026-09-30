@@ -22,6 +22,7 @@
 #   PROBE_CLOUD      COMMUNITY (default) or SECURE
 #   PROBE_TIMEOUT    seconds to wait for a pod to start (default 900)
 #   PROBE_EXIT_WATCH seconds to watch the exiting pod (default 180)
+#   PROBE_ONLY       q3: rent only the exiting pod and answer only Q3
 #
 # Needs bash 3.2+, curl and jq. The key never appears on a command line, in a
 # URL, in output or in a file: curl reads the Authorization header from stdin,
@@ -57,6 +58,7 @@ CLOUD=${PROBE_CLOUD:-COMMUNITY}
 TIMEOUT=${PROBE_TIMEOUT:-900}
 EXIT_WATCH=${PROBE_EXIT_WATCH:-180}
 POLL=${PROBE_POLL:-10}
+ONLY=${PROBE_ONLY:-}
 TAG="ex-atlas-probe-$(date +%s)-$RANDOM"
 
 for tool in curl jq; do
@@ -67,6 +69,8 @@ for n in "$TIMEOUT" "$EXIT_WATCH" "$POLL"; do
   [[ $n =~ ^[0-9]+$ ]] || { echo "PROBE_TIMEOUT, PROBE_EXIT_WATCH and PROBE_POLL take whole seconds" >&2; exit 2; }
 done
 ((POLL >= 1)) || { echo "PROBE_POLL must be at least 1" >&2; exit 2; }
+
+case $ONLY in "" | q3) ;; *) echo "PROBE_ONLY must be empty or q3" >&2; exit 2 ;; esac
 
 case $CLOUD in SECURE | COMMUNITY) ;; *) echo "PROBE_CLOUD must be SECURE or COMMUNITY" >&2; exit 2 ;; esac
 
@@ -434,6 +438,9 @@ wait_started() {
 
 # Disk and volume are left out, as ex_atlas 0.5 leaves them out when the caller
 # does not set them, so the extra lines show what v1 gave such a pod.
+if [[ -n $ONLY ]]; then
+  A4="NOT RUN (PROBE_ONLY=$ONLY)"
+else
 log "Q4: creating a pod through v1"
 v1_body=$WORK/v1.json
 V1_ID=""
@@ -471,6 +478,7 @@ if [[ -n $V1_ID ]]; then
 else
   A4="NOT RUN (v1 create failed; see the log above)"
 fi
+fi
 
 # --- Q1, Q2, Q3: two v2 pods run side by side --------------------------------
 
@@ -482,18 +490,26 @@ SELF_SCRIPT='echo "probe-key-present=$([ -n "$RUNPOD_API_KEY" ] && echo yes || e
 # Pod B runs 30 s, so a poll sees it RUNNING, then exits 0 with no trap.
 EXIT_SCRIPT='echo probe-started; sleep 30; echo probe-exited; exit 0'
 
-log "Q1-Q3: creating two v2 pods"
+log "Q1-Q3: creating the v2 pods"
 # The two pods answer separate questions: a failed create leaves the other
 # pod's questions to run.
 A_ID=""
 B_ID=""
-if create_v2 selfdelete "$SELF_SCRIPT" 5; then
+if [[ -n $ONLY ]]; then
+  A1="NOT RUN (PROBE_ONLY=$ONLY)"
+  A2="NOT RUN (PROBE_ONLY=$ONLY)"
+elif create_v2 selfdelete "$SELF_SCRIPT" 5; then
   A_ID=$POD_ID
 else
   A1="NOT ANSWERED (selfdelete pod not created: $CREATE_FAIL)"
   A2="NOT ANSWERED (selfdelete pod not created)"
 fi
-if create_v2 exits "$EXIT_SCRIPT"; then
+# The exits pod sends the same `disk` as the selfdelete pod. The v2 docs mark
+# `disk` optional, but three owner runs refused the one body without it with
+# "You must either provide a template id or pod configuration parameters" (22:07
+# and the 8d2a3ca8 run, on L40 and RTX 6000 Ada), while the selfdelete body with
+# `disk: 5` was accepted on RTX 5000 Ada a second earlier.
+if create_v2 exits "$EXIT_SCRIPT" 5; then
   B_ID=$POD_ID
 else
   A3="NOT ANSWERED (exits pod not created: $CREATE_FAIL)"
@@ -503,7 +519,7 @@ fi
 # gives a pod created with no disk and no mounts.
 if [[ -n $B_ID && $(api GET "$V2/pods/$B_ID") == 200 ]]; then
   EXTRA+=("v2 pod fields: $(jq -r 'keys | join(",")' "$RESP" 2>/dev/null)")
-  EXTRA+=("v2 defaults: disk=$(field .disk) mounts=$(jq -c '.mounts' "$RESP" 2>/dev/null)")
+  EXTRA+=("v2 pod read back: disk=$(field .disk) mounts=$(jq -c '.mounts' "$RESP" 2>/dev/null)")
 fi
 
 if [[ -n $B_ID ]]; then
