@@ -19,8 +19,11 @@ defmodule ExAtlas.Providers.RunPod do
 
   RunPod reports the following capability atoms:
 
-      [:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp,
+      [:serverless, :network_volumes, :http_proxy, :raw_tcp,
        :symmetric_ports, :webhooks, :global_networking, :self_terminate]
+
+  Runpod no longer sells spot pods, so `spot: true` returns
+  `{:error, %ExAtlas.Error{kind: :unsupported}}` before any request.
 
   ## Spawn example
 
@@ -60,7 +63,6 @@ defmodule ExAtlas.Providers.RunPod do
   @impl true
   def capabilities do
     [
-      :spot,
       :serverless,
       :network_volumes,
       :http_proxy,
@@ -73,6 +75,14 @@ defmodule ExAtlas.Providers.RunPod do
   end
 
   @impl true
+  def spawn_compute(%Spec.ComputeRequest{spot: true}, _ctx) do
+    {:error,
+     ExAtlas.Error.new(:unsupported,
+       provider: :runpod,
+       message: "Runpod no longer offers spot pods; spawn with spot: false"
+     )}
+  end
+
   def spawn_compute(%Spec.ComputeRequest{} = req, ctx) do
     {body, auth} = Translate.compute_request_to_pod_create(req)
 

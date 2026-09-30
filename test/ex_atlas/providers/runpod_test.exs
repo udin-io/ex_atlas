@@ -19,7 +19,7 @@ defmodule ExAtlas.Providers.RunPodTest do
       caps = ExAtlas.capabilities(:runpod)
       assert :serverless in caps
       assert :http_proxy in caps
-      assert :spot in caps
+      refute :spot in caps
       assert :self_terminate in caps
     end
   end
@@ -117,6 +117,17 @@ defmodule ExAtlas.Providers.RunPodTest do
       end)
 
       assert :ok = ExAtlas.terminate("pod_abc", opts)
+    end
+  end
+
+  describe "spot" do
+    test "spot: true returns :unsupported and sends no request", %{bypass: bypass, ctx_opts: opts} do
+      # Runpod no longer sells spot pods and v2 has no field for them. Any
+      # request reaching the server fails this test.
+      Bypass.down(bypass)
+
+      assert {:error, %ExAtlas.Error{kind: :unsupported, provider: :runpod}} =
+               ExAtlas.spawn_compute([gpu: :h100, image: "x", spot: true] ++ opts)
     end
   end
 
