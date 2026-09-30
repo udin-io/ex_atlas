@@ -379,8 +379,9 @@ create() {
   return 1
 }
 
-# create_v2 ROLE SCRIPT [DISK_GB] -> sets POD_ID, or exits. No DISK_GB leaves
-# `disk` to Runpod's default.
+# create_v2 ROLE SCRIPT [DISK_GB] -> sets POD_ID and returns 0, or returns 1 with
+# CREATE_FAIL naming the last refusal. No DISK_GB leaves `disk` to Runpod's
+# default. Each candidate GPU gets a body built from scratch.
 create_v2() {
   local role=$1 script=$2 disk=${3:-} gpu body=$WORK/body.json
   for gpu in "${GPUS[@]}"; do
@@ -391,10 +392,13 @@ create_v2() {
         entrypoint: ["/bin/sh", "-c"],
         cmd: [$script]
       } + (if $disk == "" then {} else {disk: ($disk | tonumber)} end)' >"$body"
-    create "$role" "$V2/pods" "$body" && return
+    create "$role" "$V2/pods" "$body" && return 0
+    CREATE_FAIL="$(problem)"
+    log "$role body sent for $gpu: $(jq -c 'keys' "$body") ($(wc -c <"$body" | tr -d ' ') bytes)"
   done
-  echo "could not create the $role pod on any candidate GPU" >&2
-  exit 1
+  CREATE_FAIL="no candidate GPU accepted it; last answer: ${CREATE_FAIL:-none}"
+  log "could not create the $role pod: $CREATE_FAIL"
+  return 1
 }
 
 # wait_started ID -> echoes the first state past PROVISIONING and STARTING:
@@ -464,18 +468,30 @@ SELF_SCRIPT='echo "probe-key-present=$([ -n "$RUNPOD_API_KEY" ] && echo yes || e
 EXIT_SCRIPT='echo probe-started; sleep 30; echo probe-exited; exit 0'
 
 log "Q1-Q3: creating two v2 pods"
-create_v2 selfdelete "$SELF_SCRIPT" 5
-A_ID=$POD_ID
-create_v2 exits "$EXIT_SCRIPT"
-B_ID=$POD_ID
+# The two pods answer separate questions: a failed create leaves the other
+# pod's questions to run.
+A_ID=""
+B_ID=""
+if create_v2 selfdelete "$SELF_SCRIPT" 5; then
+  A_ID=$POD_ID
+else
+  A1="NOT ANSWERED (selfdelete pod not created: $CREATE_FAIL)"
+  A2="NOT ANSWERED (selfdelete pod not created)"
+fi
+if create_v2 exits "$EXIT_SCRIPT"; then
+  B_ID=$POD_ID
+else
+  A3="NOT ANSWERED (exits pod not created: $CREATE_FAIL)"
+fi
 
 # The field names of a real v2 pod body, for the test fixtures, and what v2
 # gives a pod created with no disk and no mounts.
-if [[ $(api GET "$V2/pods/$B_ID") == 200 ]]; then
+if [[ -n $B_ID && $(api GET "$V2/pods/$B_ID") == 200 ]]; then
   EXTRA+=("v2 pod fields: $(jq -r 'keys | join(",")' "$RESP" 2>/dev/null)")
   EXTRA+=("v2 defaults: disk=$(field .disk) mounts=$(jq -c '.mounts' "$RESP" 2>/dev/null)")
 fi
 
+if [[ -n $B_ID ]]; then
 log "Q3: waiting for pod $B_ID to run and exit its command"
 if st=$(wait_started "$B_ID"); then
   seen=${st#200 }
@@ -498,7 +514,9 @@ if st=$(wait_started "$B_ID"); then
 else
   A3="NOT ANSWERED (pod $B_ID never started: $st)"
 fi
+fi
 
+if [[ -n $A_ID ]]; then
 log "Q1: waiting for pod $A_ID to delete itself"
 deleted_by="the pod itself"
 if st=$(wait_started "$A_ID"); then
@@ -551,6 +569,8 @@ if st=$(wait_started "$A_ID"); then
   fi
 else
   A1="NOT ANSWERED (pod $A_ID never started: $st)"
+  A2="NOT ANSWERED (pod $A_ID never started)"
+fi
 fi
 
 log "done; cleaning up"
