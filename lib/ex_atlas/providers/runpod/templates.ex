@@ -1,5 +1,5 @@
 defmodule ExAtlas.Providers.RunPod.Templates do
-  @moduledoc "Thin wrappers over RunPod's REST `/templates`."
+  @moduledoc "Thin wrappers over Runpod's REST v2 `/templates`."
 
   alias ExAtlas.Providers.RunPod.Client
 
