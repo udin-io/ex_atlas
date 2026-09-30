@@ -13,8 +13,16 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Spec
 
+  # v2 requires a name. This one never starts with the Reaper's default
+  # `"atlas-"` prefix, so an unnamed pod is never reaped as an orphan.
+  @default_pod_name "ex-atlas-pod"
+
+  # v1's default `volumeMountPath`; v2 makes the path required.
+  @mount_path "/workspace"
+
   @doc """
-  Turn a `ComputeRequest` into a body ready for `POST /pods`.
+  Turn a `ComputeRequest` into a REST v2 `CreatePodRequest` body for
+  `POST /v2/pods`.
 
   When `request.auth == :bearer`, also mints a token and returns it so the
   caller can thread it into the resulting `Compute` struct.
@@ -29,27 +37,23 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       req.env
       |> Map.merge(auth_env)
       |> Map.merge(callback_env(req.callback))
-      |> atomize_for_runpod_env()
+      |> Map.new(fn {k, v} -> {to_string(k), to_string(v)} end)
 
     body =
       %{
-        "cloudType" => cloud_type(req.cloud_type),
-        "computeType" => "GPU",
-        "gpuCount" => req.gpu_count,
-        "gpuTypeIds" => [gpu_type_id!(req.gpu)],
-        "interruptible" => req.spot,
-        "imageName" => req.image,
+        "name" => req.name || @default_pod_name,
+        "image" => req.image,
+        "gpu" => %{"id" => gpu_type_id!(req.gpu), "count" => req.gpu_count},
+        "cloud" => cloud(req.cloud_type),
         "ports" => Enum.map(req.ports, &format_port/1),
         "env" => env,
-        "name" => req.name,
-        "containerDiskInGb" => req.container_disk_gb,
-        "volumeInGb" => req.volume_gb,
-        "networkVolumeId" => req.network_volume_id,
+        "disk" => req.container_disk_gb,
+        "mounts" => mounts(req),
         "templateId" => req.template_id,
         "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints),
-        "dockerStartCmd" => docker_start_cmd(req)
+        "cmd" => start_cmd(req)
       }
-      |> Map.merge(stringify(req.provider_opts))
+      |> deep_merge(deep_stringify(req.provider_opts))
       |> drop_nils()
 
     {body, auth_handle}
@@ -110,9 +114,22 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # --- pod helpers ---
 
-  defp cloud_type(:any), do: "ALL"
-  defp cloud_type(:secure), do: "SECURE"
-  defp cloud_type(:community), do: "COMMUNITY"
+  # v2 has no "any cloud" value. Omitting the field takes Runpod's default,
+  # SECURE.
+  defp cloud(:any), do: nil
+  defp cloud(:secure), do: "SECURE"
+  defp cloud(:community), do: "COMMUNITY"
+
+  defp mounts(%Spec.ComputeRequest{volume_gb: nil, network_volume_id: nil}), do: nil
+
+  defp mounts(%Spec.ComputeRequest{} = req) do
+    %{
+      "persistent" => req.volume_gb && %{"size" => req.volume_gb, "path" => @mount_path},
+      "network" =>
+        req.network_volume_id && [%{"volumeId" => req.network_volume_id, "path" => @mount_path}]
+    }
+    |> drop_nils()
+  end
 
   defp gpu_type_id!(canonical) do
     case Spec.GpuCatalog.for_provider(canonical, :runpod) do
@@ -131,24 +148,22 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # --- start command + self-termination ---
 
-  # RunPod treats an absent and an empty `dockerStartCmd` alike: the image's own
-  # CMD runs. Wrapping an empty command would fire the trap immediately and
-  # delete the pod before anything ran, so both mean "leave it unset".
-  defp docker_start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
-  defp docker_start_cmd(%Spec.ComputeRequest{command: []}), do: nil
+  # An absent and an empty `cmd` alike leave the image's own CMD to run.
+  # Wrapping an empty command would fire the trap immediately and delete the
+  # pod before anything ran, so both mean "leave it unset".
+  defp start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
+  defp start_cmd(%Spec.ComputeRequest{command: []}), do: nil
 
   # Nothing to trap for: no self-termination asked for and nothing to report.
-  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false, callback: nil}),
+  defp start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false, callback: nil}),
     do: cmd
 
-  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd} = req),
+  defp start_cmd(%Spec.ComputeRequest{command: cmd} = req),
     do: ["sh", "-c", wrapped(req, cmd)]
 
-  # A pod whose start command has exited does not stop: RunPod's REST v1 `Pod`
-  # schema carries no container state — no `runtime`, no `currentStatus`, no
-  # exit code — and `desiredStatus` is a *desired* state that changes only when
-  # somebody asks. So the pod keeps reporting `RUNNING` and keeps billing, and
-  # no amount of polling `GET /pods/:id` can tell that the work is done.
+  # Nothing outside the container learns the command's exit code: REST v2's
+  # `runtime` carries uptime and utilisation, not container state, and under
+  # v1 a pod whose command exited went on reading `RUNNING` and billing.
   #
   # The only party that knows the container ended is the container. RunPod
   # injects `RUNPOD_POD_ID` and a pod-scoped `RUNPOD_API_KEY` into every
@@ -187,7 +202,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp self_delete(true) do
     url = "#{Client.management_url()}/pods/$RUNPOD_POD_ID"
 
-    "curl -sS -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\";"
+    "curl -sS -m 30 -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\";"
   end
 
   defp finish_report(nil), do: nil
@@ -208,9 +223,6 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # Single-quote everything and escape embedded single quotes the POSIX way, so
   # a command argument can never be read as shell syntax by the wrapper.
   defp shell_quote(arg), do: "'" <> String.replace(arg, "'", "'\\''") <> "'"
-
-  defp atomize_for_runpod_env(env) when is_map(env),
-    do: Enum.map(env, fn {k, v} -> %{"key" => to_string(k), "value" => to_string(v)} end)
 
   # RunPod's `desiredStatus` enum is exactly RUNNING | EXITED | TERMINATED —
   # and it is a *desired* state, so it changes only when somebody asks. Nothing
@@ -325,6 +337,20 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   defp stringify(map) when is_map(map),
     do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
+
+  defp deep_stringify(map) when is_map(map) and not is_struct(map),
+    do: Map.new(map, fn {k, v} -> {to_string(k), deep_stringify(v)} end)
+
+  defp deep_stringify(other), do: other
+
+  # `provider_opts` reach into nested objects: `%{"gpu" => %{"minCudaVersion"
+  # => "12.1"}}` adds to `gpu` and keeps its `id`.
+  defp deep_merge(left, right) do
+    Map.merge(left, right, fn
+      _key, %{} = l, %{} = r -> deep_merge(l, r)
+      _key, _l, r -> r
+    end)
+  end
 
   defp drop_nils(map) when is_map(map),
     do: :maps.filter(fn _, v -> v != nil end, map)

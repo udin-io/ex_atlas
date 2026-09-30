@@ -9,9 +9,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     test "maps canonical GPU to RunPod id" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _auth} = Translate.compute_request_to_pod_create(req)
-      assert body["gpuTypeIds"] == ["NVIDIA H100 80GB HBM3"]
-      assert body["computeType"] == "GPU"
-      assert body["cloudType"] == "ALL"
+      assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1}
     end
 
     test "renders ports into '<port>/<proto>' strings" do
@@ -29,13 +27,13 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     test "maps cloud_type atoms" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", cloud_type: :secure)
       {body, _} = Translate.compute_request_to_pod_create(req)
-      assert body["cloudType"] == "SECURE"
+      assert body["cloud"] == "SECURE"
     end
 
-    test "no :command leaves dockerStartCmd unset so the image's own CMD runs" do
+    test "no :command leaves cmd unset so the image's own CMD runs" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
-      refute Map.has_key?(body, "dockerStartCmd")
+      refute Map.has_key?(body, "cmd")
     end
 
     test "self_terminate: false sends the command through verbatim" do
@@ -48,7 +46,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
         )
 
       {body, _} = Translate.compute_request_to_pod_create(req)
-      assert body["dockerStartCmd"] == ["/app/train.sh", "--epochs", "3"]
+      assert body["cmd"] == ["/app/train.sh", "--epochs", "3"]
     end
 
     @tag :tmp_dir
@@ -62,12 +60,14 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert {0, log} = run_start_cmd(body["cmd"], tmp)
 
       assert File.read!(Path.join(tmp, "ran")) == "ran\n"
       assert log =~ "-X DELETE"
       assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
       assert log =~ "Authorization: Bearer pod-scoped-key"
+      # A hung DELETE must not hold the pod, and its bill, open for ever.
+      assert log =~ "-m 30"
     end
 
     @tag :tmp_dir
@@ -78,7 +78,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", command: ["sh", "-c", "exit 3"])
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {3, log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert {3, log} = run_start_cmd(body["cmd"], tmp)
       assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
     end
 
@@ -93,7 +93,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, _log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert {0, _log} = run_start_cmd(body["cmd"], tmp)
       assert File.read!(Path.join(tmp, "arg")) == "it's a $PATH; rm -rf /"
     end
 
@@ -127,16 +127,115 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {body, auth} = Translate.compute_request_to_pod_create(req)
       assert %{scheme: :bearer, token: _, hash: _, header: _} = auth
 
-      key = Enum.find(body["env"], &(&1["key"] == "ATLAS_PRESHARED_KEY"))
-      assert key["value"] == auth.token
+      assert body["env"]["ATLAS_PRESHARED_KEY"] == auth.token
     end
 
     test "drops nil fields so RunPod doesn't complain" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
-      refute Map.has_key?(body, "volumeInGb")
-      refute Map.has_key?(body, "networkVolumeId")
+      refute Map.has_key?(body, "mounts")
+      refute Map.has_key?(body, "disk")
       refute Map.has_key?(body, "templateId")
+      refute Map.has_key?(body, "cloud")
+    end
+
+    test "the body carries no v1 keys, which v2 rejects" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["/app/train.sh"],
+          volume_gb: 20,
+          container_disk_gb: 30
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      for key <-
+            ~w(interruptible gpuTypeIds gpuCount imageName computeType cloudType dockerStartCmd containerDiskInGb volumeInGb networkVolumeId) do
+        refute Map.has_key?(body, key), "v1 key #{key} is still sent"
+      end
+
+      assert body["image"] == "x"
+      assert ["sh", "-c", _] = body["cmd"]
+    end
+
+    test "gpu_count lands in gpu.count" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, gpu_count: 4, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 4}
+    end
+
+    test "env goes out as a map of strings" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", env: %{"MODEL" => "llama"})
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["env"] == %{"MODEL" => "llama"}
+    end
+
+    test "volume_gb becomes a persistent mount at /workspace" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", volume_gb: 20)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["mounts"] == %{"persistent" => %{"size" => 20, "path" => "/workspace"}}
+    end
+
+    test "network_volume_id becomes a network mount at /workspace" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", network_volume_id: "vol_1")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert body["mounts"] == %{
+               "network" => [%{"volumeId" => "vol_1", "path" => "/workspace"}]
+             }
+    end
+
+    test "container_disk_gb becomes disk" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", container_disk_gb: 30)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["disk"] == 30
+    end
+
+    test "cloud_type :community maps to COMMUNITY" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", cloud_type: :community)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["cloud"] == "COMMUNITY"
+    end
+
+    test "cloud_type :any sends no cloud key, so Runpod picks its default, SECURE" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", cloud_type: :any)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body |> Map.keys() |> Enum.filter(&(&1 =~ ~r/cloud/i)) == []
+    end
+
+    test "an unnamed pod gets a name the Reaper's default prefix never matches" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert is_binary(body["name"]) and body["name"] != ""
+      refute String.starts_with?(body["name"], "atlas-")
+    end
+
+    test "a given name is sent as is" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", name: "atlas-train-1")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["name"] == "atlas-train-1"
+    end
+
+    test "provider_opts merge into nested objects and keep gpu.id" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          provider_opts: %{gpu: %{minCudaVersion: "12.1"}, globalNetworking: true}
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert body["gpu"] == %{
+               "id" => "NVIDIA H100 80GB HBM3",
+               "count" => 1,
+               "minCudaVersion" => "12.1"
+             }
+
+      assert body["globalNetworking"] == true
     end
 
     test "raises for GPU atom with no RunPod mapping" do
@@ -236,12 +335,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       %{callback: opts[:callback]}
     end
 
-    defp env_value(body, key) do
-      case Enum.find(body["env"], &(&1["key"] == key)) do
-        nil -> nil
-        pair -> pair["value"]
-      end
-    end
+    defp env_value(body, key), do: body["env"][key]
 
     defp callback_env(tmp) do
       [
@@ -259,7 +353,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert env_value(body, "ATLAS_CALLBACK_URL") == nil
       assert env_value(body, "ATLAS_CALLBACK_TOKEN") == nil
       assert env_value(body, "ATLAS_TASK_ID") == nil
-      refute body["dockerStartCmd"] |> List.last() =~ "ATLAS_CALLBACK_URL"
+      refute body["cmd"] |> List.last() =~ "ATLAS_CALLBACK_URL"
     end
 
     test "a callback injects the three documented variables", %{callback: callback} do
@@ -295,7 +389,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", callback: callback)
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      refute Map.has_key?(body, "dockerStartCmd")
+      refute Map.has_key?(body, "cmd")
       assert env_value(body, "ATLAS_TASK_ID") == callback.task_id
     end
 
@@ -312,7 +406,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
 
       assert log =~ ~s({"exit_code":0})
       assert log =~ "https://app.example.com/atlas/cb/finish"
@@ -338,7 +432,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {3, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {3, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
       assert log =~ ~s({"exit_code":3})
     end
 
@@ -358,7 +452,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
       assert log =~ ~s({"exit_code":0})
       refute log =~ "-X DELETE"
     end
@@ -379,7 +473,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {body, _} = Translate.compute_request_to_pod_create(req)
       failing_curl(tmp)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
       assert log =~ "-X DELETE"
     end
 

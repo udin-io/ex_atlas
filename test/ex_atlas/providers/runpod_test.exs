@@ -30,7 +30,7 @@ defmodule ExAtlas.Providers.RunPodTest do
         assert ["Bearer test-key"] = Plug.Conn.get_req_header(conn, "authorization")
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         body = Jason.decode!(raw)
-        assert body["gpuTypeIds"] == ["NVIDIA H100 80GB HBM3"]
+        assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1}
 
         response = %{
           "id" => "pod_abc123",
