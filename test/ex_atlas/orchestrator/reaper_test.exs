@@ -2,6 +2,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
   use ExUnit.Case, async: false
 
   alias ExAtlas.Orchestrator.Reaper
+  alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.FaultyProvider
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
   alias ExAtlas.Test.TrackingStore.Memory
@@ -33,7 +34,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     # it; v2 reports it as PROVISIONING or STARTING.
     TestOrchestrator.put_env(reap_grace_ms: 0)
     {:ok, compute} = spawn_untracked()
-    ExAtlas.Providers.Mock.set_status(compute.id, :provisioning)
+    Mock.set_status(compute.id, :provisioning)
 
     :ok = Reaper.reap_now("atlas-", [:mock])
 
@@ -44,7 +45,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     test "an untracked #{status} resource is left alone" do
       TestOrchestrator.put_env(reap_grace_ms: 0)
       {:ok, compute} = spawn_untracked()
-      ExAtlas.Providers.Mock.set_status(compute.id, unquote(status))
+      Mock.set_status(compute.id, unquote(status))
 
       :ok = Reaper.reap_now("atlas-", [:mock])
 

@@ -328,7 +328,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
                  protocol: :http,
                  url: "https://7h9k2m4n6p-8888.proxy.runpod.net"
                },
-               %{internal: 22, external: 34446, protocol: :tcp, url: "tcp://195.26.233.3:34446"}
+               %{internal: 22, external: 34_446, protocol: :tcp, url: "tcp://195.26.233.3:34446"}
              ]
     end
 

@@ -1,6 +1,9 @@
 defmodule ExAtlas.Providers.RunPodTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Orchestrator.UpstreamStatus
+  alias ExAtlas.Providers.RunPod.Client
+
   setup do
     bypass = Bypass.open()
     base_url = "http://localhost:#{bypass.port}"
@@ -183,7 +186,7 @@ defmodule ExAtlas.Providers.RunPodTest do
 
   describe "REST v2" do
     test "the management API is REST v2" do
-      assert ExAtlas.Providers.RunPod.Client.management_url() == "https://api.runpod.io/v2"
+      assert Client.management_url() == "https://api.runpod.io/v2"
     end
 
     for action <- [:stop, :start] do
@@ -223,7 +226,7 @@ defmodule ExAtlas.Providers.RunPodTest do
       end)
 
       assert {:dead, :failed, %{id: "pod_abc"}} =
-               ExAtlas.Orchestrator.UpstreamStatus.observe("pod_abc", opts)
+               UpstreamStatus.observe("pod_abc", opts)
     end
   end
 
