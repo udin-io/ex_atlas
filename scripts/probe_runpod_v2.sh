@@ -347,7 +347,7 @@ esac
 if [[ -n ${PROBE_GPU_ID:-} ]]; then
   GPUS=("$PROBE_GPU_ID")
 else
-  code=$(api GET "$V2/catalog/gpus?include=AVAILABILITY&cloud=$CLOUD")
+  code=$(api GET "$V2/catalog/gpus?include=AVAILABILITY&product=POD&cloud=$CLOUD")
   [[ $code == 200 ]] || { echo "GPU catalog answered HTTP $code: $(problem)" >&2; exit 1; }
   lower=$(printf '%s' "$CLOUD" | tr '[:upper:]' '[:lower:]')
   GPUS=()
