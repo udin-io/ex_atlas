@@ -9,11 +9,16 @@ defmodule ExAtlas.Providers.RunPod.Pods do
 
   alias ExAtlas.Providers.RunPod.Client
 
-  @doc "POST /pods — create a pod. `body` is already in RunPod's native shape."
+  @doc """
+  POST /pods — create a pod. `body` is already in Runpod's native shape.
+
+  Never retried: a create that timed out or answered 5xx may still have made a
+  pod, and a retry would rent a second one that nothing tracks.
+  """
   def create(ctx, body) do
     ctx
     |> Client.management()
-    |> Req.post(url: "/pods", json: body)
+    |> Req.post(url: "/pods", json: body, retry: false)
     |> Client.handle_response(201)
   end
 

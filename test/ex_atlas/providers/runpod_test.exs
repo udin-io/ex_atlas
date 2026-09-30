@@ -120,6 +120,21 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
+  describe "spawn_compute/1 failures" do
+    test "a 503 on create is returned, never retried into a second pod", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      # expect_once fails the test if a retry reaches the server.
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        json(conn, 503, %{"title" => "Service Unavailable", "status" => 503, "detail" => "busy"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, status: 503}} =
+               ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
+    end
+  end
+
   describe "spot" do
     test "spot: true returns :unsupported and sends no request", %{bypass: bypass, ctx_opts: opts} do
       # Runpod no longer sells spot pods and v2 has no field for them. Any
