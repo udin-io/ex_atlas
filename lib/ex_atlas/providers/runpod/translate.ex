@@ -13,8 +13,20 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Spec
 
+  # v2 requires a name. This one never starts with the Reaper's default
+  # `"atlas-"` prefix, so an unnamed pod is never reaped as an orphan.
+  @default_pod_name "ex-atlas-pod"
+
+  # v1's default `volumeMountPath`; v2 makes the path required.
+  @mount_path "/workspace"
+
+  # v1's default `containerDiskInGb`. The 2026-09-30 probe showed v2 refusing a
+  # body with no `disk`, although the docs mark it optional.
+  @default_disk_gb 50
+
   @doc """
-  Turn a `ComputeRequest` into a body ready for `POST /pods`.
+  Turn a `ComputeRequest` into a REST v2 `CreatePodRequest` body for
+  `POST /v2/pods`.
 
   When `request.auth == :bearer`, also mints a token and returns it so the
   caller can thread it into the resulting `Compute` struct.
@@ -29,50 +41,46 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       req.env
       |> Map.merge(auth_env)
       |> Map.merge(callback_env(req.callback))
-      |> atomize_for_runpod_env()
+      |> Map.new(fn {k, v} -> {to_string(k), to_string(v)} end)
 
     body =
       %{
-        "cloudType" => cloud_type(req.cloud_type),
-        "computeType" => "GPU",
-        "gpuCount" => req.gpu_count,
-        "gpuTypeIds" => [gpu_type_id!(req.gpu)],
-        "interruptible" => req.spot,
-        "imageName" => req.image,
+        "name" => req.name || @default_pod_name,
+        "image" => req.image,
+        "gpu" => %{"id" => gpu_type_id!(req.gpu), "count" => req.gpu_count},
+        "cloud" => cloud(req.cloud_type),
         "ports" => Enum.map(req.ports, &format_port/1),
         "env" => env,
-        "name" => req.name,
-        "containerDiskInGb" => req.container_disk_gb,
-        "volumeInGb" => req.volume_gb,
-        "networkVolumeId" => req.network_volume_id,
+        "disk" => req.container_disk_gb || @default_disk_gb,
+        "mounts" => mounts(req),
         "templateId" => req.template_id,
         "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints),
-        "dockerStartCmd" => docker_start_cmd(req)
+        "cmd" => start_cmd(req)
       }
-      |> Map.merge(stringify(req.provider_opts))
+      |> deep_merge(deep_stringify(req.provider_opts))
       |> drop_nils()
 
     {body, auth_handle}
   end
 
   @doc """
-  Turn RunPod's pod response body into an `ExAtlas.Spec.Compute`.
+  Turn a REST v2 `Pod` body into an `ExAtlas.Spec.Compute`.
 
   Optional `auth` is threaded through unchanged from the spawn path.
   """
   @spec pod_to_compute(map(), map() | nil) :: Spec.Compute.t()
   def pod_to_compute(pod, auth \\ nil) when is_map(pod) do
     %Spec.Compute{
-      id: Map.get(pod, "id") || Map.get(pod, "podId"),
+      id: Map.get(pod, "id"),
       provider: :runpod,
-      status: pod_status(pod),
-      public_ip: Map.get(pod, "publicIp"),
+      status: pod_status(Map.get(pod, "status")),
+      public_ip: public_ip(pod),
       ports: pod_ports(pod),
-      gpu_type: first_gpu_type(pod),
-      gpu_count: Map.get(pod, "gpuCount", 1),
-      cost_per_hour: Map.get(pod, "costPerHr") || Map.get(pod, "adjustedCostPerHr"),
+      gpu_type: gpu(pod)["id"],
+      gpu_count: gpu(pod)["count"] || 1,
+      cost_per_hour: Map.get(pod, "cost"),
       region: Map.get(pod, "dataCenterId"),
-      image: Map.get(pod, "imageName"),
+      image: Map.get(pod, "image"),
       name: Map.get(pod, "name"),
       auth: auth,
       created_at: parse_created_at(pod),
@@ -110,9 +118,22 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # --- pod helpers ---
 
-  defp cloud_type(:any), do: "ALL"
-  defp cloud_type(:secure), do: "SECURE"
-  defp cloud_type(:community), do: "COMMUNITY"
+  # v2 has no "any cloud" value. Omitting the field takes Runpod's default,
+  # SECURE.
+  defp cloud(:any), do: nil
+  defp cloud(:secure), do: "SECURE"
+  defp cloud(:community), do: "COMMUNITY"
+
+  defp mounts(%Spec.ComputeRequest{volume_gb: nil, network_volume_id: nil}), do: nil
+
+  defp mounts(%Spec.ComputeRequest{} = req) do
+    %{
+      "persistent" => req.volume_gb && %{"size" => req.volume_gb, "path" => @mount_path},
+      "network" =>
+        req.network_volume_id && [%{"volumeId" => req.network_volume_id, "path" => @mount_path}]
+    }
+    |> drop_nils()
+  end
 
   defp gpu_type_id!(canonical) do
     case Spec.GpuCatalog.for_provider(canonical, :runpod) do
@@ -131,24 +152,22 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # --- start command + self-termination ---
 
-  # RunPod treats an absent and an empty `dockerStartCmd` alike: the image's own
-  # CMD runs. Wrapping an empty command would fire the trap immediately and
-  # delete the pod before anything ran, so both mean "leave it unset".
-  defp docker_start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
-  defp docker_start_cmd(%Spec.ComputeRequest{command: []}), do: nil
+  # An absent and an empty `cmd` alike leave the image's own CMD to run.
+  # Wrapping an empty command would fire the trap immediately and delete the
+  # pod before anything ran, so both mean "leave it unset".
+  defp start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
+  defp start_cmd(%Spec.ComputeRequest{command: []}), do: nil
 
   # Nothing to trap for: no self-termination asked for and nothing to report.
-  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false, callback: nil}),
+  defp start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false, callback: nil}),
     do: cmd
 
-  defp docker_start_cmd(%Spec.ComputeRequest{command: cmd} = req),
+  defp start_cmd(%Spec.ComputeRequest{command: cmd} = req),
     do: ["sh", "-c", wrapped(req, cmd)]
 
-  # A pod whose start command has exited does not stop: RunPod's REST v1 `Pod`
-  # schema carries no container state — no `runtime`, no `currentStatus`, no
-  # exit code — and `desiredStatus` is a *desired* state that changes only when
-  # somebody asks. So the pod keeps reporting `RUNNING` and keeps billing, and
-  # no amount of polling `GET /pods/:id` can tell that the work is done.
+  # Nothing outside the container learns the command's exit code: REST v2's
+  # `runtime` carries uptime and utilisation, not container state, and under
+  # v1 a pod whose command exited went on reading `RUNNING` and billing.
   #
   # The only party that knows the container ended is the container. RunPod
   # injects `RUNPOD_POD_ID` and a pod-scoped `RUNPOD_API_KEY` into every
@@ -187,7 +206,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp self_delete(true) do
     url = "#{Client.management_url()}/pods/$RUNPOD_POD_ID"
 
-    "curl -sS -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\";"
+    "curl -sS -m 30 -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\";"
   end
 
   defp finish_report(nil), do: nil
@@ -209,88 +228,90 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # a command argument can never be read as shell syntax by the wrapper.
   defp shell_quote(arg), do: "'" <> String.replace(arg, "'", "'\\''") <> "'"
 
-  defp atomize_for_runpod_env(env) when is_map(env),
-    do: Enum.map(env, fn {k, v} -> %{"key" => to_string(k), "value" => to_string(v)} end)
+  defp pod_status("RUNNING"), do: :running
+  defp pod_status("EXITED"), do: :stopped
+  defp pod_status("ERROR"), do: :failed
+  defp pod_status("TERMINATED"), do: :terminated
 
-  # RunPod's `desiredStatus` enum is exactly RUNNING | EXITED | TERMINATED —
-  # and it is a *desired* state, so it changes only when somebody asks. Nothing
-  # in REST v1 reports container state, which is why a pod whose
-  # `dockerStartCmd` has exited still reads as RUNNING.
-  #
-  # A value outside the enum falls through to `:provisioning` on purpose: an
-  # unclassifiable pod is not a dead one, and `UpstreamStatus` counts
-  # `:provisioning` as alive rather than tearing the resource down.
-  defp pod_status(%{"desiredStatus" => "RUNNING"}), do: :running
-  defp pod_status(%{"desiredStatus" => "EXITED"}), do: :stopped
-  defp pod_status(%{"desiredStatus" => "TERMINATED"}), do: :terminated
+  # PROVISIONING and STARTING land here, and so does any status outside the
+  # v2 enum, on purpose: an unclassifiable pod is not a dead one, and
+  # `UpstreamStatus` counts `:provisioning` as alive rather than tearing the
+  # resource down.
   defp pod_status(_), do: :provisioning
 
-  defp pod_ports(%{"portMappings" => mappings}) when is_list(mappings) do
-    Enum.map(mappings, fn m ->
-      internal = m["privatePort"] || m["internal"]
-      external = m["publicPort"] || m["external"]
-      protocol = m["type"] |> to_string() |> String.downcase() |> protocol_atom()
-      %{internal: internal, external: external, protocol: protocol, url: proxy_url(m, protocol)}
-    end)
-  end
+  # `ports` is what the pod was asked to expose; `runtime.ports` adds the
+  # public port and IP of each TCP mapping once the pod is RUNNING (it is null
+  # otherwise, and lists no HTTP ports at all).
+  defp pod_ports(%{"id" => pod_id, "ports" => specs} = pod) when is_list(specs) do
+    live = pod |> runtime_ports() |> Map.new(&{&1["private"], &1})
 
-  defp pod_ports(%{"id" => pod_id, "ports" => ports}) when is_binary(ports) do
-    ports
-    |> String.split(",", trim: true)
-    |> Enum.map(fn spec ->
-      [port_str, type] = spec |> String.trim() |> String.split("/", parts: 2)
-      {port, _} = Integer.parse(port_str)
-      protocol = protocol_atom(type)
+    Enum.flat_map(specs, fn spec ->
+      with true <- is_binary(spec),
+           [port_str, type] <- String.split(spec, "/", parts: 2),
+           {port, ""} <- Integer.parse(port_str) do
+        mapping = Map.get(live, port, %{})
+        protocol = protocol_atom(type)
+        external = mapping["public"]
 
-      %{
-        internal: port,
-        external: nil,
-        protocol: protocol,
-        url: http_proxy_url(pod_id, port, protocol)
-      }
+        [
+          %{
+            internal: port,
+            external: external,
+            protocol: protocol,
+            url: port_url(pod_id, protocol, port, mapping["ip"], external)
+          }
+        ]
+      else
+        _ -> []
+      end
     end)
   end
 
   defp pod_ports(_), do: []
 
-  defp protocol_atom("http"), do: :http
-  defp protocol_atom("https"), do: :http
-  defp protocol_atom("tcp"), do: :tcp
-  defp protocol_atom(_), do: :tcp
+  defp runtime_ports(%{"runtime" => %{"ports" => ports}}) when is_list(ports),
+    do: Enum.filter(ports, &is_map/1)
 
-  defp proxy_url(%{"publicIp" => ip, "publicPort" => port}, :tcp) when is_binary(ip),
-    do: "tcp://#{ip}:#{port}"
+  defp runtime_ports(_), do: []
 
-  defp proxy_url(%{"podId" => pod_id, "privatePort" => port}, :http),
-    do: http_proxy_url(pod_id, port, :http)
+  # A status poller runs `pod_to_compute/2` in a loop, so a field of the wrong
+  # type reads as absent rather than raising.
+  defp gpu(%{"gpu" => %{} = gpu}), do: gpu
+  defp gpu(_pod), do: %{}
 
-  defp proxy_url(_, _), do: nil
+  defp public_ip(pod), do: pod |> runtime_ports() |> Enum.find_value(& &1["ip"])
 
-  defp http_proxy_url(pod_id, port, :http) when is_binary(pod_id),
-    do: "https://#{pod_id}-#{port}.proxy.runpod.net"
-
-  defp http_proxy_url(_, _, _), do: nil
-
-  defp first_gpu_type(%{"gpuTypeIds" => [first | _]}), do: first
-  defp first_gpu_type(%{"gpuTypeId" => id}), do: id
-  defp first_gpu_type(%{"machine" => %{"gpuTypeId" => id}}), do: id
-  defp first_gpu_type(_), do: nil
-
-  # RunPod's REST v1 `Pod` schema has no `createdAt`. Its only machine-readable
-  # timestamp is `lastStartedAt` ("The UTC timestamp when a Pod was last
-  # started"); `lastStatusChange` is prose, not a date. So last-start is what
-  # `Compute.created_at` can honestly report — and it is the better input for
-  # the question the field is actually asked, `Reaper` deciding whether a
-  # resource is too young to judge: a pod that was just (re)started is freshly
-  # rented no matter when its record was first written.
-  defp parse_created_at(%{"lastStartedAt" => s}) when is_binary(s) do
-    case DateTime.from_iso8601(s) do
-      {:ok, dt, _} -> dt
-      _ -> nil
+  defp protocol_atom(type) when is_binary(type) do
+    case String.downcase(type) do
+      t when t in ["http", "https"] -> :http
+      _ -> :tcp
     end
   end
 
-  defp parse_created_at(_), do: nil
+  defp protocol_atom(_), do: :tcp
+
+  defp port_url(pod_id, :http, port, _ip, _external) when is_binary(pod_id),
+    do: "https://#{pod_id}-#{port}.proxy.runpod.net"
+
+  defp port_url(_pod_id, :tcp, _port, ip, external) when is_binary(ip) and is_integer(external),
+    do: "tcp://#{ip}:#{external}"
+
+  defp port_url(_, _, _, _, _), do: nil
+
+  # `startedAt` first: the Reaper asks whether a resource is too young to
+  # judge, and a pod that was just (re)started is freshly rented no matter when
+  # its record was first written. v1 answered the same question with
+  # `lastStartedAt`.
+  defp parse_created_at(pod) do
+    Enum.find_value(["startedAt", "createdAt"], fn key ->
+      with s when is_binary(s) <- Map.get(pod, key),
+           {:ok, dt, _} <- DateTime.from_iso8601(s) do
+        dt
+      else
+        _ -> nil
+      end
+    end)
+  end
 
   # --- job helpers ---
 
@@ -325,6 +346,20 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   defp stringify(map) when is_map(map),
     do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
+
+  defp deep_stringify(map) when is_map(map) and not is_struct(map),
+    do: Map.new(map, fn {k, v} -> {to_string(k), deep_stringify(v)} end)
+
+  defp deep_stringify(other), do: other
+
+  # `provider_opts` reach into nested objects: `%{"gpu" => %{"minCudaVersion"
+  # => "12.1"}}` adds to `gpu` and keeps its `id`.
+  defp deep_merge(left, right) do
+    Map.merge(left, right, fn
+      _key, %{} = l, %{} = r -> deep_merge(l, r)
+      _key, _l, r -> r
+    end)
+  end
 
   defp drop_nils(map) when is_map(map),
     do: :maps.filter(fn _, v -> v != nil end, map)

@@ -5,7 +5,7 @@ defmodule ExAtlas.Providers.RunPod do
   Wraps three RunPod APIs through the single ExAtlas contract:
 
     * **REST management** — pod/endpoint/template/network-volume CRUD and pod
-      lifecycle operations. Base URL `https://rest.runpod.io/v1`.
+      lifecycle operations. Base URL `https://api.runpod.io/v2`.
     * **Serverless runtime** — job submission, status, streaming against a
       specific endpoint. Base URL `https://api.runpod.ai/v2/<endpoint_id>`.
     * **Legacy GraphQL** — the only surface that exposes GPU catalog pricing.
@@ -19,8 +19,11 @@ defmodule ExAtlas.Providers.RunPod do
 
   RunPod reports the following capability atoms:
 
-      [:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp,
+      [:serverless, :network_volumes, :http_proxy, :raw_tcp,
        :symmetric_ports, :webhooks, :global_networking, :self_terminate]
+
+  Runpod no longer sells spot pods, so `spot: true` returns
+  `{:error, %ExAtlas.Error{kind: :unsupported}}` before any request.
 
   ## Spawn example
 
@@ -60,7 +63,6 @@ defmodule ExAtlas.Providers.RunPod do
   @impl true
   def capabilities do
     [
-      :spot,
       :serverless,
       :network_volumes,
       :http_proxy,
@@ -73,6 +75,14 @@ defmodule ExAtlas.Providers.RunPod do
   end
 
   @impl true
+  def spawn_compute(%Spec.ComputeRequest{spot: true}, _ctx) do
+    {:error,
+     ExAtlas.Error.new(:unsupported,
+       provider: :runpod,
+       message: "Runpod no longer offers spot pods; spawn with spot: false"
+     )}
+  end
+
   def spawn_compute(%Spec.ComputeRequest{} = req, ctx) do
     {body, auth} = Translate.compute_request_to_pod_create(req)
 
@@ -104,12 +114,14 @@ defmodule ExAtlas.Providers.RunPod do
   end
 
   @impl true
+  # REST v2 filters nothing server-side, so every filter applies here, to the
+  # translated `Compute`, the same way `ExAtlas.Providers.Mock` applies them.
   def list_compute(filters, ctx) do
-    params = list_filters_to_params(filters)
-
-    with {:ok, pods} <- Pods.list(ctx, params) do
-      data = normalize_list_body(pods)
-      {:ok, Enum.map(data, &Translate.pod_to_compute/1)}
+    with {:ok, pods} <- Pods.list(ctx) do
+      {:ok,
+       pods
+       |> Enum.map(&Translate.pod_to_compute/1)
+       |> Enum.filter(&matches_filters?(&1, filters))}
     end
   end
 
@@ -239,21 +251,22 @@ defmodule ExAtlas.Providers.RunPod do
 
   # --- helpers ---
 
-  defp list_filters_to_params(filters) do
-    Enum.flat_map(filters, fn
-      {:status, :running} -> [desiredStatus: "RUNNING"]
-      {:status, :stopped} -> [desiredStatus: "EXITED"]
-      {:status, :terminated} -> [desiredStatus: "TERMINATED"]
-      {:status, :failed} -> [desiredStatus: "FAILED"]
-      {:name, n} when is_binary(n) -> [name: n]
-      _ -> []
+  defp matches_filters?(compute, filters) do
+    Enum.all?(filters, fn
+      {:status, s} -> compute.status == s
+      {:name, n} -> compute.name == n
+      {:region, r} -> compute.region == r
+      {:gpu, g} -> gpu_matches?(compute.gpu_type, g)
+      _ -> true
     end)
   end
 
-  defp normalize_list_body(%{"pods" => pods}) when is_list(pods), do: pods
-  defp normalize_list_body(%{"data" => pods}) when is_list(pods), do: pods
-  defp normalize_list_body(pods) when is_list(pods), do: pods
-  defp normalize_list_body(_), do: []
+  defp gpu_matches?(gpu_type, canonical) do
+    case Spec.GpuCatalog.for_provider(canonical, :runpod) do
+      {:ok, id} -> gpu_type == id
+      {:error, _} -> false
+    end
+  end
 
   defp to_gpu_type(gpu) do
     low = gpu["lowestPrice"] || %{}

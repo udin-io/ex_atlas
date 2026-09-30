@@ -1,5 +1,5 @@
 defmodule ExAtlas.Providers.RunPod.NetworkVolumes do
-  @moduledoc "Thin wrappers over RunPod's REST `/networkvolumes`."
+  @moduledoc "Thin wrappers over RunPod's REST v2 `/network-volumes`."
 
   alias ExAtlas.Providers.RunPod.Client
 
@@ -7,23 +7,23 @@ defmodule ExAtlas.Providers.RunPod.NetworkVolumes do
     do:
       ctx
       |> Client.management()
-      |> Req.post(url: "/networkvolumes", json: body)
+      |> Req.post(url: "/network-volumes", json: body)
       |> Client.handle_response(201)
 
   def list(ctx),
-    do: ctx |> Client.management() |> Req.get(url: "/networkvolumes") |> Client.handle_response()
+    do: ctx |> Client.management() |> Req.get(url: "/network-volumes") |> Client.handle_response()
 
   def get(ctx, id),
     do:
       ctx
       |> Client.management()
-      |> Req.get(url: "/networkvolumes/#{id}")
+      |> Req.get(url: "/network-volumes/#{id}")
       |> Client.handle_response()
 
   def delete(ctx, id),
     do:
       ctx
       |> Client.management()
-      |> Req.delete(url: "/networkvolumes/#{id}")
+      |> Req.delete(url: "/network-volumes/#{id}")
       |> Client.handle_response(200..204)
 end

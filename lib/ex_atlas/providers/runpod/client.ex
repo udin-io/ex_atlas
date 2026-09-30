@@ -2,8 +2,8 @@ defmodule ExAtlas.Providers.RunPod.Client do
   @moduledoc """
   Shared `Req` client factories for RunPod's three APIs:
 
-    * REST management — `https://rest.runpod.io/v1` — pods, endpoints, templates,
-      network volumes, container registry auth, billing.
+    * REST management — `https://api.runpod.io/v2` — pods, serverless
+      endpoints, templates, network volumes, billing.
     * Serverless runtime — `https://api.runpod.ai/v2/<endpoint>` — job submission,
       status polling, streaming.
     * Legacy GraphQL — `https://api.runpod.io/graphql` — GPU pricing catalog
@@ -14,7 +14,7 @@ defmodule ExAtlas.Providers.RunPod.Client do
   `Req.merge/2` or pass extra options per call.
   """
 
-  @management_url "https://rest.runpod.io/v1"
+  @management_url "https://api.runpod.io/v2"
   @runtime_url "https://api.runpod.ai/v2"
   @graphql_url "https://api.runpod.io/graphql"
 
@@ -135,13 +135,16 @@ defmodule ExAtlas.Providers.RunPod.Client do
          :telemetry.execute(
            @telemetry_prefix ++ [:request],
            %{status: response.status},
-           %{api: api, method: request.method, url: URI.to_string(request.url)}
+           %{api: api, method: request.method, url: telemetry_url(request.url)}
          )
 
          {request, response}
        end}
     ])
   end
+
+  # GraphQL sends the API key as `?api_key=`, so telemetry never sees a query.
+  defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
 
   defp merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
     Req.merge(req, opts)

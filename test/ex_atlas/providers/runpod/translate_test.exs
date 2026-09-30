@@ -9,9 +9,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     test "maps canonical GPU to RunPod id" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _auth} = Translate.compute_request_to_pod_create(req)
-      assert body["gpuTypeIds"] == ["NVIDIA H100 80GB HBM3"]
-      assert body["computeType"] == "GPU"
-      assert body["cloudType"] == "ALL"
+      assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1}
     end
 
     test "renders ports into '<port>/<proto>' strings" do
@@ -29,13 +27,13 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     test "maps cloud_type atoms" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", cloud_type: :secure)
       {body, _} = Translate.compute_request_to_pod_create(req)
-      assert body["cloudType"] == "SECURE"
+      assert body["cloud"] == "SECURE"
     end
 
-    test "no :command leaves dockerStartCmd unset so the image's own CMD runs" do
+    test "no :command leaves cmd unset so the image's own CMD runs" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
-      refute Map.has_key?(body, "dockerStartCmd")
+      refute Map.has_key?(body, "cmd")
     end
 
     test "self_terminate: false sends the command through verbatim" do
@@ -48,7 +46,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
         )
 
       {body, _} = Translate.compute_request_to_pod_create(req)
-      assert body["dockerStartCmd"] == ["/app/train.sh", "--epochs", "3"]
+      assert body["cmd"] == ["/app/train.sh", "--epochs", "3"]
     end
 
     @tag :tmp_dir
@@ -62,12 +60,14 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert {0, log} = run_start_cmd(body["cmd"], tmp)
 
       assert File.read!(Path.join(tmp, "ran")) == "ran\n"
       assert log =~ "-X DELETE"
-      assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
+      assert log =~ "https://api.runpod.io/v2/pods/pod_abc"
       assert log =~ "Authorization: Bearer pod-scoped-key"
+      # A hung DELETE must not hold the pod, and its bill, open for ever.
+      assert log =~ "-m 30"
     end
 
     @tag :tmp_dir
@@ -78,8 +78,8 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", command: ["sh", "-c", "exit 3"])
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {3, log} = run_start_cmd(body["dockerStartCmd"], tmp)
-      assert log =~ "https://rest.runpod.io/v1/pods/pod_abc"
+      assert {3, log} = run_start_cmd(body["cmd"], tmp)
+      assert log =~ "https://api.runpod.io/v2/pods/pod_abc"
     end
 
     @tag :tmp_dir
@@ -93,7 +93,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, _log} = run_start_cmd(body["dockerStartCmd"], tmp)
+      assert {0, _log} = run_start_cmd(body["cmd"], tmp)
       assert File.read!(Path.join(tmp, "arg")) == "it's a $PATH; rm -rf /"
     end
 
@@ -127,16 +127,128 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {body, auth} = Translate.compute_request_to_pod_create(req)
       assert %{scheme: :bearer, token: _, hash: _, header: _} = auth
 
-      key = Enum.find(body["env"], &(&1["key"] == "ATLAS_PRESHARED_KEY"))
-      assert key["value"] == auth.token
+      assert body["env"]["ATLAS_PRESHARED_KEY"] == auth.token
     end
 
     test "drops nil fields so RunPod doesn't complain" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
-      refute Map.has_key?(body, "volumeInGb")
-      refute Map.has_key?(body, "networkVolumeId")
+      refute Map.has_key?(body, "mounts")
       refute Map.has_key?(body, "templateId")
+      refute Map.has_key?(body, "cloud")
+    end
+
+    # Runpod v2 refused every body sent without `disk` in the 2026-09-30 probe
+    # (issue 34), so a spawn with no size asks for v1's default, 50 GB.
+    test "no container_disk_gb sends disk: 50, v1's default" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["disk"] == 50
+    end
+
+    test "no volume_gb and no network_volume_id sends no mounts, so no /workspace volume" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      refute Map.has_key?(body, "mounts")
+    end
+
+    test "the body carries no v1 keys, which v2 rejects" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          command: ["/app/train.sh"],
+          volume_gb: 20,
+          container_disk_gb: 30
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      for key <-
+            ~w(interruptible gpuTypeIds gpuCount imageName computeType cloudType dockerStartCmd containerDiskInGb volumeInGb networkVolumeId) do
+        refute Map.has_key?(body, key), "v1 key #{key} is still sent"
+      end
+
+      assert body["image"] == "x"
+      assert ["sh", "-c", _] = body["cmd"]
+    end
+
+    test "gpu_count lands in gpu.count" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, gpu_count: 4, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 4}
+    end
+
+    test "env goes out as a map of strings" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", env: %{"MODEL" => "llama"})
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["env"] == %{"MODEL" => "llama"}
+    end
+
+    test "volume_gb becomes a persistent mount at /workspace" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", volume_gb: 20)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["mounts"] == %{"persistent" => %{"size" => 20, "path" => "/workspace"}}
+    end
+
+    test "network_volume_id becomes a network mount at /workspace" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", network_volume_id: "vol_1")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert body["mounts"] == %{
+               "network" => [%{"volumeId" => "vol_1", "path" => "/workspace"}]
+             }
+    end
+
+    test "container_disk_gb becomes disk" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", container_disk_gb: 30)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["disk"] == 30
+    end
+
+    test "cloud_type :community maps to COMMUNITY" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", cloud_type: :community)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["cloud"] == "COMMUNITY"
+    end
+
+    test "cloud_type :any sends no cloud key, so Runpod picks its default, SECURE" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", cloud_type: :any)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body |> Map.keys() |> Enum.filter(&(&1 =~ ~r/cloud/i)) == []
+    end
+
+    test "an unnamed pod gets a name the Reaper's default prefix never matches" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert is_binary(body["name"]) and body["name"] != ""
+      refute String.starts_with?(body["name"], "atlas-")
+    end
+
+    test "a given name is sent as is" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", name: "atlas-train-1")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["name"] == "atlas-train-1"
+    end
+
+    test "provider_opts merge into nested objects and keep gpu.id" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          provider_opts: %{gpu: %{minCudaVersion: "12.1"}, globalNetworking: true}
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+
+      assert body["gpu"] == %{
+               "id" => "NVIDIA H100 80GB HBM3",
+               "count" => 1,
+               "minCudaVersion" => "12.1"
+             }
+
+      assert body["globalNetworking"] == true
     end
 
     test "raises for GPU atom with no RunPod mapping" do
@@ -149,68 +261,122 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
   end
 
   describe "pod_to_compute/2" do
-    test "maps desiredStatus to normalized status" do
-      pod = %{"id" => "abc", "desiredStatus" => "RUNNING", "gpuCount" => 2}
-      compute = Translate.pod_to_compute(pod)
-      assert compute.id == "abc"
-      assert compute.status == :running
-      assert compute.gpu_count == 2
-    end
-
     test "threads auth through" do
       auth = %{scheme: :bearer, token: "t", hash: "h", header: "Authorization: Bearer t"}
-      compute = Translate.pod_to_compute(%{"id" => "abc", "desiredStatus" => "RUNNING"}, auth)
+      compute = Translate.pod_to_compute(fixture("running"), auth)
       assert compute.auth == auth
     end
 
-    test "builds proxy URL from pod id + port string" do
-      pod = %{"id" => "pod_42", "desiredStatus" => "RUNNING", "ports" => "8000/http,22/tcp"}
-      compute = Translate.pod_to_compute(pod)
-      http_port = Enum.find(compute.ports, &(&1.protocol == :http))
-      assert http_port.url == "https://pod_42-8000.proxy.runpod.net"
+    for {status, expected} <- [
+          provisioning: :provisioning,
+          starting: :provisioning,
+          running: :running,
+          exited: :stopped,
+          error: :failed,
+          terminated: :terminated
+        ] do
+      test "a #{status} pod reads as #{inspect(expected)}" do
+        assert Translate.pod_to_compute(fixture(unquote(to_string(status)))).status ==
+                 unquote(expected)
+      end
     end
 
-    test "reads created_at from lastStartedAt, the only timestamp REST v1 carries" do
-      pod = %{
-        "id" => "abc",
-        "desiredStatus" => "RUNNING",
-        "lastStartedAt" => "2024-07-12T19:14:40.144Z"
-      }
-
-      compute = Translate.pod_to_compute(pod)
-
-      assert compute.created_at == ~U[2024-07-12 19:14:40.144Z]
-    end
-
-    test "created_at is nil when the pod carries no usable timestamp" do
-      # `lastStatusChange` is prose ("Rented by User: Fri Jul 12 2024 …"), not a
-      # timestamp, so a pod that only has that one still has no age.
-      pod = %{
-        "id" => "abc",
-        "desiredStatus" => "RUNNING",
-        "lastStatusChange" => "Rented by User: Fri Jul 12 2024 15:14:40 GMT-0400"
-      }
-
-      assert Translate.pod_to_compute(pod).created_at == nil
-      assert Translate.pod_to_compute(%{"id" => "abc"}).created_at == nil
-    end
-
-    test "an unparseable lastStartedAt is nil rather than a crash" do
-      pod = %{"id" => "abc", "desiredStatus" => "RUNNING", "lastStartedAt" => "not a date"}
-
-      assert Translate.pod_to_compute(pod).created_at == nil
-    end
-
-    test "a desiredStatus outside the enum reads as :provisioning, never as dead" do
-      # The enum is RUNNING | EXITED | TERMINATED. Anything else is a pod we
-      # cannot classify, and `UpstreamStatus` counts :provisioning as alive —
-      # the same "uncertainty never tears a resource down" rule the poller runs
-      # on.
+    test "a status outside the v2 enum reads as :provisioning, never as dead" do
+      # An unclassifiable pod is not a dead one, and `UpstreamStatus` counts
+      # :provisioning as alive: uncertainty never tears a resource down.
       assert Translate.pod_to_compute(%{"id" => "abc"}).status == :provisioning
 
-      assert Translate.pod_to_compute(%{"id" => "abc", "desiredStatus" => "FAILED"}).status ==
+      assert Translate.pod_to_compute(%{fixture("running") | "status" => "HIBERNATING"}).status ==
                :provisioning
     end
+
+    test "carries id, name, image, gpu, cost and data center" do
+      compute = Translate.pod_to_compute(fixture("running"))
+
+      assert compute.id == "7h9k2m4n6p"
+      assert compute.name == "pytorch-training"
+      assert compute.image == "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
+      assert compute.gpu_type == "NVIDIA GeForce RTX 4090"
+      assert compute.gpu_count == 1
+      assert compute.cost_per_hour == 0.44
+      assert compute.region == "US-KS-2"
+    end
+
+    test "created_at is startedAt, the last time the pod started" do
+      assert Translate.pod_to_compute(fixture("running")).created_at == ~U[2026-06-01 12:02:00Z]
+    end
+
+    test "created_at falls back to createdAt before the pod has started" do
+      assert Translate.pod_to_compute(fixture("provisioning")).created_at ==
+               ~U[2026-06-01 12:00:00Z]
+    end
+
+    test "an unparseable timestamp is nil rather than a crash" do
+      pod = %{"id" => "abc", "startedAt" => "not a date", "createdAt" => nil}
+      assert Translate.pod_to_compute(pod).created_at == nil
+    end
+
+    test "a running pod's ports carry the proxy URL and the public TCP mapping" do
+      compute = Translate.pod_to_compute(fixture("running"))
+
+      assert compute.public_ip == "195.26.233.3"
+
+      assert compute.ports == [
+               %{
+                 internal: 8888,
+                 external: nil,
+                 protocol: :http,
+                 url: "https://7h9k2m4n6p-8888.proxy.runpod.net"
+               },
+               %{internal: 22, external: 34_446, protocol: :tcp, url: "tcp://195.26.233.3:34446"}
+             ]
+    end
+
+    test "a pod that is not running still lists its configured ports" do
+      compute = Translate.pod_to_compute(fixture("provisioning"))
+
+      assert compute.public_ip == nil
+
+      assert compute.ports == [
+               %{
+                 internal: 8888,
+                 external: nil,
+                 protocol: :http,
+                 url: "https://7h9k2m4n6p-8888.proxy.runpod.net"
+               },
+               %{internal: 22, external: nil, protocol: :tcp, url: nil}
+             ]
+    end
+
+    test "fields of the wrong type read as absent, not a crash" do
+      pod = %{
+        "id" => "abc",
+        "status" => 5,
+        "gpu" => "RTX 4090",
+        "runtime" => "up",
+        "ports" => "8000/http",
+        "startedAt" => 7,
+        "createdAt" => nil
+      }
+
+      compute = Translate.pod_to_compute(pod)
+
+      assert compute.status == :provisioning
+      assert compute.gpu_type == nil
+      assert compute.gpu_count == 1
+      assert compute.ports == []
+      assert compute.public_ip == nil
+      assert compute.created_at == nil
+    end
+
+    test "a malformed port entry is skipped, not a crash" do
+      pod = %{fixture("provisioning") | "ports" => ["8000/http", "nonsense", 42, "x/tcp"]}
+      assert [%{internal: 8000}] = Translate.pod_to_compute(pod).ports
+    end
+  end
+
+  defp fixture(name) do
+    "test/fixtures/runpod/v2/pod_#{name}.json" |> File.read!() |> Jason.decode!()
   end
 
   describe "job_response_to_job/2" do
@@ -236,12 +402,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       %{callback: opts[:callback]}
     end
 
-    defp env_value(body, key) do
-      case Enum.find(body["env"], &(&1["key"] == key)) do
-        nil -> nil
-        pair -> pair["value"]
-      end
-    end
+    defp env_value(body, key), do: body["env"][key]
 
     defp callback_env(tmp) do
       [
@@ -259,7 +420,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert env_value(body, "ATLAS_CALLBACK_URL") == nil
       assert env_value(body, "ATLAS_CALLBACK_TOKEN") == nil
       assert env_value(body, "ATLAS_TASK_ID") == nil
-      refute body["dockerStartCmd"] |> List.last() =~ "ATLAS_CALLBACK_URL"
+      refute body["cmd"] |> List.last() =~ "ATLAS_CALLBACK_URL"
     end
 
     test "a callback injects the three documented variables", %{callback: callback} do
@@ -295,7 +456,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", callback: callback)
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      refute Map.has_key?(body, "dockerStartCmd")
+      refute Map.has_key?(body, "cmd")
       assert env_value(body, "ATLAS_TASK_ID") == callback.task_id
     end
 
@@ -312,7 +473,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
 
       assert log =~ ~s({"exit_code":0})
       assert log =~ "https://app.example.com/atlas/cb/finish"
@@ -338,7 +499,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {3, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {3, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
       assert log =~ ~s({"exit_code":3})
     end
 
@@ -358,7 +519,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
       assert log =~ ~s({"exit_code":0})
       refute log =~ "-X DELETE"
     end
@@ -379,7 +540,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {body, _} = Translate.compute_request_to_pod_create(req)
       failing_curl(tmp)
 
-      assert {0, log} = run_start_cmd(body["dockerStartCmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
       assert log =~ "-X DELETE"
     end
 

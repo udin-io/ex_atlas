@@ -216,8 +216,8 @@ defmodule ExAtlas.Orchestrator do
 
   ## Two mechanisms, both required
 
-  RunPod reports no container state at all, so a pod whose command has exited
-  keeps answering `desiredStatus: "RUNNING"` and keeps billing. Self-termination
+  Runpod reports no exit code, so a pod whose command has exited keeps
+  answering `status: "RUNNING"` (Runpod restarts the container) and keeps billing. Self-termination
   (`:self_terminate`, on by default whenever `:command` is set) is the only
   thing that produces a normal-exit signal. `:max_runtime_ms` is the only cover
   for the cases where nothing in the container can run: a SIGKILL or OOM kill,

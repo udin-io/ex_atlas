@@ -125,13 +125,13 @@ test "spawn_compute POSTs /pods", %{bypass: bypass, opts: opts} do
   Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
     {:ok, raw, conn} = Plug.Conn.read_body(conn)
     body = Jason.decode!(raw)
-    assert body["gpuTypeIds"] == ["NVIDIA H100 80GB HBM3"]
+    assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1}
 
     conn
     |> Plug.Conn.put_resp_header("content-type", "application/json")
     |> Plug.Conn.resp(
       201,
-      Jason.encode!(%{"id" => "pod_abc", "desiredStatus" => "RUNNING"})
+      Jason.encode!(%{"id" => "pod_abc", "status" => "RUNNING"})
     )
   end)
 

@@ -75,13 +75,56 @@ defmodule ExAtlas.Error do
         _ -> :unknown
       end
 
-    new(kind, provider: provider, status: status, message: extract_message(body), raw: body)
+    new(kind,
+      provider: provider,
+      status: status,
+      message: extract_message(body),
+      raw: drop_error_values(body)
+    )
+  end
+
+  # RFC 9457 problem details (Runpod REST v2): `detail` says what went wrong,
+  # `errors` lists each invalid field.
+  defp extract_message(%{"detail" => d} = body) when is_binary(d) do
+    case body |> Map.get("errors") |> error_texts() do
+      [] -> d
+      texts -> "#{d} (#{Enum.join(texts, "; ")})"
+    end
   end
 
   defp extract_message(%{"error" => %{"message" => m}}) when is_binary(m), do: m
   defp extract_message(%{"error" => m}) when is_binary(m), do: m
   defp extract_message(%{"message" => m}) when is_binary(m), do: m
   defp extract_message(%{"errors" => [%{"message" => m} | _]}) when is_binary(m), do: m
+  defp extract_message(%{"errors" => [m | _]}) when is_binary(m), do: m
   defp extract_message(body) when is_binary(body), do: body
   defp extract_message(_), do: nil
+
+  # An RFC 9457 error object's `value` echoes the rejected input, which can be
+  # a secret from the request body; `raw` keeps everything else.
+  defp drop_error_values(%{"errors" => errors} = body) when is_list(errors) do
+    %{body | "errors" => Enum.map(errors, &drop_value/1)}
+  end
+
+  defp drop_error_values(body), do: body
+
+  defp drop_value(%{} = error), do: Map.delete(error, "value")
+  defp drop_value(error), do: error
+
+  # An error entry may be a string or an object. An object's `value` is the
+  # rejected input, which can be a secret from the request, so only its
+  # `location` and `message` reach the text.
+  defp error_texts(errors) when is_list(errors), do: Enum.flat_map(errors, &error_text/1)
+  defp error_texts(_), do: []
+
+  defp error_text(text) when is_binary(text), do: [text]
+
+  defp error_text(%{"message" => m} = e) when is_binary(m) do
+    case e["location"] do
+      loc when is_binary(loc) -> ["#{loc}: #{m}"]
+      _ -> [m]
+    end
+  end
+
+  defp error_text(_), do: []
 end

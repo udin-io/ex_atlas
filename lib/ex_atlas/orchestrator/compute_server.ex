@@ -71,9 +71,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   ## Why a task needs both a self-terminating container and a deadline
 
-  RunPod's REST API reports no container state at all — see
+  Runpod's REST API reports no exit code — see
   `ExAtlas.Spec.ComputeRequest`'s `:self_terminate`. A pod whose command has
-  exited keeps answering `desiredStatus: "RUNNING"`, so polling can never
+  exited keeps answering `status: "RUNNING"`, so polling can never
   detect a normal finish; only the container deleting itself can, and that
   arrives here as a 404, i.e. `{:dead, :vanished, nil}`.
 
@@ -662,7 +662,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   # A death does not always mean the resource is gone. A reclaimed spot pod
-  # reads as `desiredStatus: EXITED` — dead to us, still present upstream,
+  # reads as `status: EXITED` — dead to us, still present upstream,
   # still billable, and invisible to the Reaper, which lists only running
   # resources. The failed-respawn branch already stops (and so terminates it
   # via `terminate/2`); the success branch must delete it explicitly, or a

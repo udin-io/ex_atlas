@@ -14,13 +14,13 @@ defmodule ExAtlas.Providers.RunPod.Billing do
     do:
       ctx
       |> Client.management()
-      |> Req.get(url: "/billing/endpoints", params: params)
+      |> Req.get(url: "/billing/serverless", params: params)
       |> Client.handle_response()
 
   def network_volumes(ctx, params \\ []),
     do:
       ctx
       |> Client.management()
-      |> Req.get(url: "/billing/networkvolumes", params: params)
+      |> Req.get(url: "/billing/network-volumes", params: params)
       |> Client.handle_response()
 end

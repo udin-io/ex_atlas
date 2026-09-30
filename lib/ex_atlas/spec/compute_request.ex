@@ -8,7 +8,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
 
   ## Running a command to completion
 
-  `:command` overrides the image's start command (RunPod's `dockerStartCmd`),
+  `:command` overrides the image's start command (Runpod's `cmd`),
   which is how you run batch work rather than a long-lived service:
 
       command: ["/app/train.sh", "--epochs", "3"]
@@ -17,9 +17,9 @@ defmodule ExAtlas.Spec.ComputeRequest do
   asks the provider's translator to wrap that command in a shell that destroys
   the resource once it ends — on a clean exit, a non-zero exit, or a signal.
 
-  It defaults to on because the alternative is a bill. RunPod's REST API
-  exposes no container state at all: when `dockerStartCmd` exits the pod stays
-  `desiredStatus: "RUNNING"`, the GPU stays reserved, and nothing polling the
+  It defaults to on because the alternative is a bill. Runpod's REST API
+  exposes no exit code: when `cmd` exits the pod stays `status: "RUNNING"`
+  (Runpod restarts the container), the GPU stays reserved, and nothing polling the
   API can tell the difference. Self-termination is the only thing that turns a
   finished container into an observable event.
 
