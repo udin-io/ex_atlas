@@ -20,6 +20,10 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # v1's default `volumeMountPath`; v2 makes the path required.
   @mount_path "/workspace"
 
+  # v1's default `containerDiskInGb`. The 2026-09-30 probe showed v2 refusing a
+  # body with no `disk`, although the docs mark it optional.
+  @default_disk_gb 50
+
   @doc """
   Turn a `ComputeRequest` into a REST v2 `CreatePodRequest` body for
   `POST /v2/pods`.
@@ -47,7 +51,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
         "cloud" => cloud(req.cloud_type),
         "ports" => Enum.map(req.ports, &format_port/1),
         "env" => env,
-        "disk" => req.container_disk_gb,
+        "disk" => req.container_disk_gb || @default_disk_gb,
         "mounts" => mounts(req),
         "templateId" => req.template_id,
         "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints),

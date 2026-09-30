@@ -134,9 +134,22 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
       refute Map.has_key?(body, "mounts")
-      refute Map.has_key?(body, "disk")
       refute Map.has_key?(body, "templateId")
       refute Map.has_key?(body, "cloud")
+    end
+
+    # Runpod v2 refused every body sent without `disk` in the 2026-09-30 probe
+    # (issue 34), so a spawn with no size asks for v1's default, 50 GB.
+    test "no container_disk_gb sends disk: 50, v1's default" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["disk"] == 50
+    end
+
+    test "no volume_gb and no network_volume_id sends no mounts, so no /workspace volume" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      refute Map.has_key?(body, "mounts")
     end
 
     test "the body carries no v1 keys, which v2 rejects" do
