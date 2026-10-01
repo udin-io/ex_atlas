@@ -7,6 +7,17 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: per-pod spend through the public API (#58, slice 3 of #27)
+
+`ExAtlas.compute_spend/2` returns a `%ExAtlas.Spec.Spend{}`: one pod's
+`total_usd`, `gpu_usd`, `cpu_usd` and `disk_usd`, read from RunPod's
+`metadata.totals`. With no `from:` or `to:` the call sends neither `startTime`
+nor `endTime`, so RunPod covers its last 30 days; the result's `from` and `to`
+show the window. A `from:` or `to:` that is not a `DateTime` returns
+`:validation`. A provider without the new optional `compute_spend/3` callback
+returns `{:error, %ExAtlas.Error{kind: :unsupported}}`. RunPod declares the new
+capability `:billing`.
+
 ### Added: templates through the public API (#57, slice 2 of #27)
 
 `ExAtlas.list_templates/1`, `get_template/2`, `create_template/1` and

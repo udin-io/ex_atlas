@@ -16,8 +16,8 @@ defmodule ExAtlas.Providers.RunPod do
 
   RunPod reports the following capability atoms:
 
-      [:serverless, :network_volumes, :manage_network_volumes, :manage_templates, :http_proxy,
-       :raw_tcp, :symmetric_ports, :webhooks, :global_networking, :self_terminate]
+      [:serverless, :network_volumes, :manage_network_volumes, :manage_templates, :billing,
+       :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking, :self_terminate]
 
   Runpod no longer sells spot pods, so `spot: true` returns
   `{:error, %ExAtlas.Error{kind: :unsupported}}` before any request.
@@ -55,6 +55,7 @@ defmodule ExAtlas.Providers.RunPod do
   @behaviour ExAtlas.Provider
 
   alias ExAtlas.Providers.RunPod.{
+    Billing,
     Catalog,
     Endpoints,
     Jobs,
@@ -73,6 +74,7 @@ defmodule ExAtlas.Providers.RunPod do
       :network_volumes,
       :manage_network_volumes,
       :manage_templates,
+      :billing,
       :http_proxy,
       :raw_tcp,
       :symmetric_ports,
@@ -299,6 +301,24 @@ defmodule ExAtlas.Providers.RunPod do
     case Templates.delete(ctx, id) do
       {:ok, _} -> :ok
       {:error, _} = err -> err
+    end
+  end
+
+  @impl true
+  # With no `:from`/`:to` the request carries neither `startTime` nor
+  # `endTime`, and RunPod covers its own default, the last 30 days.
+  def compute_spend(id, opts, ctx) do
+    params =
+      [podId: id] ++
+        for {key, param} <- [from: :startTime, to: :endTime],
+            %DateTime{} = at <- [opts[key]],
+            do: {param, DateTime.to_iso8601(at)}
+
+    with {:ok, body} <- Billing.pods(ctx, params) do
+      case Translate.pod_billing_to_spend(body, id) do
+        {:ok, spend} -> {:ok, spend}
+        :error -> unexpected_body(body, "GET /billing/pods")
+      end
     end
   end
 

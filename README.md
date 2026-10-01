@@ -543,6 +543,7 @@ Every provider implements one callback per operation. See
 | `list_gpu_types/1`          | Catalog + pricing                                 |
 | `list/get/create/delete_network_volume` | Optional: manage network volumes     |
 | `list/get/create/delete_template` | Optional: manage templates                 |
+| `compute_spend/3`           | Optional: one compute resource's spend            |
 
 Callers can check `ExAtlas.capabilities(:runpod)` before relying on an
 optional feature:
@@ -594,6 +595,27 @@ RunPod starts SSH and Jupyter in a template's pods by default. Pass
 `ssh: false` or `jupyter: false` to `create_template/1` to turn one off.
 `inspect/1` of a `%ExAtlas.Spec.Template{}` leaves out `env` and `raw`.
 
+### Spend
+
+What one pod has cost, in US dollars, split into GPU, CPU and disk:
+
+```elixir
+{:ok, spend} = ExAtlas.compute_spend("pod_9", provider: :runpod)
+spend.total_usd
+# => 12.34
+spend.from
+# => ~U[2026-09-01 00:00:00Z]
+
+ExAtlas.compute_spend("pod_9", provider: :runpod, from: ~U[2026-09-30 00:00:00Z])
+ExAtlas.compute_spend("pod_9", provider: :fly)
+# => {:error, %ExAtlas.Error{kind: :unsupported}}
+```
+
+With no `from:` or `to:`, RunPod covers its last 30 days. `from` and `to` on
+the result are the window RunPod resolved, `[from, to)`, snapped to its
+billing buckets. RunPod's docs do not say how soon a new hour of spend shows
+up, so do not read the total as a live cost.
+
 ### Capability atoms
 
 | Atom                | Meaning                                                               |
@@ -603,6 +625,7 @@ RunPod starts SSH and Jupyter in a template's pods by default. Pass
 | `:network_volumes`  | Attach persistent volumes                                             |
 | `:manage_network_volumes` | Create, list, get and delete volumes                            |
 | `:manage_templates` | Create, list, get and delete templates                                |
+| `:billing`          | `compute_spend/2`                                                     |
 | `:http_proxy`       | Provider terminates TLS on a `*.proxy.*` hostname                     |
 | `:raw_tcp`          | Public IP + mapped TCP ports                                          |
 | `:symmetric_ports`  | `internal == external` port guarantee                                 |

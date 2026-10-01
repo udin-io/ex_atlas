@@ -111,6 +111,21 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   end
 
   describe "billing" do
+    test "pod usage uses the v2 path and passes the query through", %{bypass: bypass, ctx: ctx} do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+        send(test_pid, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(200, "{}")
+      end)
+
+      assert {:ok, _} = Billing.pods(ctx, podId: "pod_9")
+      assert_received {:query, "podId=pod_9"}
+    end
+
     test "serverless and network volume usage use the v2 paths", %{bypass: bypass, ctx: ctx} do
       expect_path(bypass, "GET", "/billing/serverless")
       assert {:ok, _} = Billing.endpoints(ctx)
