@@ -60,6 +60,50 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert url == "https://pod_abc123-8000.proxy.runpod.net"
       assert compute.auth.scheme == :bearer
     end
+
+    test "template_id with no ports and no disk POSTs neither key", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        assert body["templateId"] == "9x4m2p7v"
+        refute Map.has_key?(body, "ports")
+        refute Map.has_key?(body, "disk")
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, %{id: "p1"}} =
+               ExAtlas.spawn_compute([gpu: :h100, template_id: "9x4m2p7v"] ++ opts)
+    end
+
+    test "template_id with ports and container_disk_gb still POSTs both", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"ports" => ["8000/http"], "disk" => 20} = Jason.decode!(raw)
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, _} =
+               ExAtlas.spawn_compute(
+                 [gpu: :h100, template_id: "t", ports: [{8000, :http}], container_disk_gb: 20] ++
+                   opts
+               )
+    end
+
+    test "without template_id the body still carries disk 50", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"disk" => 50, "ports" => []} = Jason.decode!(raw)
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, _} = ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
+    end
   end
 
   describe "get_compute/2" do
