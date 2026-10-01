@@ -23,6 +23,25 @@ defmodule ExAtlas.Orchestrator.CostMeter do
   A rate that is `nil`, negative or not a number keeps the last known rate: one
   poll that lost the price must not stop the meter. A `Decimal` rate is read
   as a float.
+
+  ## The provider's bill
+
+  `reconcile/3` raises the spend to a provider's billed total for the current
+  pod, and never lowers it: billing lags by an amount RunPod does not state,
+  so a bill below the estimate may only be late. The meter remembers what the
+  session had spent when the current pod started (`new_pod/2`), so a bill for
+  one pod is compared with that pod's estimate, not the session's.
+
+      iex> alias ExAtlas.Orchestrator.CostMeter
+      iex> hour = 3_600_000
+      iex> meter = CostMeter.new(10, 2.0, 0)
+      iex> meter |> CostMeter.reconcile(1.5, div(hour, 2)) |> CostMeter.spent_usd(div(hour, 2))
+      1.5
+      iex> CostMeter.reconcile(meter, 0.4, div(hour, 2)) == meter
+      true
+
+  A meter resumed by `resume/4` counts its carried spend as the current pod's,
+  since an adopted record does not say which pod spent it.
   """
 
   @ms_per_hour 3_600_000
@@ -33,13 +52,14 @@ defmodule ExAtlas.Orchestrator.CostMeter do
   @max_timer_hours @max_timer_ms / @ms_per_hour
 
   @enforce_keys [:max_cost, :rate, :spent_before, :since_ms]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [pod_start_usd: 0.0]
 
   @type t :: %__MODULE__{
           max_cost: number(),
           rate: float(),
           spent_before: float(),
-          since_ms: integer()
+          since_ms: integer(),
+          pod_start_usd: float()
         }
 
   @doc """
@@ -86,6 +106,39 @@ defmodule ExAtlas.Orchestrator.CostMeter do
         %{meter | rate: rate, spent_before: spent_usd(meter, now_ms), since_ms: now_ms}
     end
   end
+
+  @doc """
+  Mark `now_ms` as the start of a new pod, such as a respawn's replacement.
+
+  Spend is unchanged; `pod_spent_usd/2` and `reconcile/3` count from here.
+  """
+  @spec new_pod(t(), integer()) :: t()
+  def new_pod(%__MODULE__{} = meter, now_ms),
+    do: %{meter | pod_start_usd: spent_usd(meter, now_ms)}
+
+  @doc "Dollars the current pod has spent up to `now_ms`, by the estimate."
+  @spec pod_spent_usd(t(), integer()) :: float()
+  def pod_spent_usd(%__MODULE__{} = meter, now_ms),
+    do: spent_usd(meter, now_ms) - meter.pod_start_usd
+
+  @doc """
+  Raise the current pod's spend to `billed_usd` at `now_ms`, when the bill is
+  above `pod_spent_usd/2`.
+
+  Returns the meter unchanged when the bill is at or below the estimate, or is
+  not a non-negative number, so a caller can compare the two to learn whether
+  the spend moved. The meter then keeps running at its rate.
+  """
+  @spec reconcile(t(), term(), integer()) :: t()
+  def reconcile(%__MODULE__{} = meter, billed_usd, now_ms) when is_number(billed_usd) do
+    gap = billed_usd - pod_spent_usd(meter, now_ms)
+
+    if gap > 0,
+      do: %{meter | spent_before: meter.spent_before + gap},
+      else: meter
+  end
+
+  def reconcile(%__MODULE__{} = meter, _not_a_bill, _now_ms), do: meter
 
   @doc "Dollars spent up to `now_ms`."
   @spec spent_usd(t(), integer()) :: float()

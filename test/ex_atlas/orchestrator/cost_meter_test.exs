@@ -111,6 +111,67 @@ defmodule ExAtlas.Orchestrator.CostMeterTest do
     end
   end
 
+  describe "reconcile/3" do
+    test "a bill above this pod's estimate raises the spend to the bill" do
+      meter = CostMeter.new(10, 2.0, 0) |> CostMeter.reconcile(1.5, div(@hour, 2))
+
+      # $1.00 estimated after half an hour; the bill says $1.50.
+      assert CostMeter.spent_usd(meter, div(@hour, 2)) == 1.5
+      # The meter keeps running at the pod's rate from there.
+      assert CostMeter.spent_usd(meter, @hour) == 2.5
+    end
+
+    test "a bill at or below this pod's estimate changes nothing" do
+      meter = CostMeter.new(10, 2.0, 0)
+
+      for billed <- [1.0, 0.4, 0.0] do
+        assert CostMeter.reconcile(meter, billed, div(@hour, 2)) == meter
+      end
+    end
+
+    test "a bill that is not a number changes nothing" do
+      meter = CostMeter.new(10, 2.0, 0)
+
+      for billed <- [nil, -1.0, "9.99"] do
+        assert CostMeter.reconcile(meter, billed, @hour) == meter
+      end
+    end
+
+    test "after a new pod it compares the bill with that pod's spend alone" do
+      # $2 on the first pod, then a new pod at the same rate.
+      meter = CostMeter.new(10, 2.0, 0) |> CostMeter.new_pod(@hour)
+
+      # Half an hour into the new pod: $1 estimated for it, $3 for the session.
+      assert CostMeter.pod_spent_usd(meter, @hour + div(@hour, 2)) == 1.0
+
+      # Its bill of $1.75 is above its own $1, though below the session's $3.
+      raised = CostMeter.reconcile(meter, 1.75, @hour + div(@hour, 2))
+      assert CostMeter.spent_usd(raised, @hour + div(@hour, 2)) == 3.75
+    end
+
+    test "a raised spend moves the cap closer" do
+      meter = CostMeter.new(2, 3600.0, 0) |> CostMeter.reconcile(1.5, 0)
+
+      # $0.50 left at $1 a second.
+      assert CostMeter.ms_to_cap(meter, 0) == 500
+    end
+
+    test "a bill over the cap at a price of 0 caps at once" do
+      meter = CostMeter.new(1, 0.0, 0) |> CostMeter.reconcile(1.2, @hour)
+
+      assert CostMeter.capped?(meter, @hour)
+      assert CostMeter.ms_to_cap(meter, @hour) == 0
+    end
+  end
+
+  describe "pod_spent_usd/2" do
+    test "is the whole spend until the first new pod" do
+      meter = CostMeter.resume(10, 1.5, 2.0, 0)
+
+      assert CostMeter.pod_spent_usd(meter, @hour) == 3.5
+    end
+  end
+
   describe "capped?/2" do
     test "is true from the moment spend reaches the cap" do
       meter = CostMeter.new(1, 3600.0, 0)
