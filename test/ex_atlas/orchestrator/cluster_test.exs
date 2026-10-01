@@ -92,8 +92,50 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
     end
   end
 
-  defp spawn_untracked,
-    do: ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x", name: "atlas-orphan")
+  describe "two connected nodes and this node's owner" do
+    # The pod is this node's own by name, untracked, running and past grace,
+    # so the peer's owner is the only thing that differs between the two tests.
+    setup do
+      TestOrchestrator.put_env(
+        reap_owner: "a",
+        tracking_store: false,
+        reap_grace_ms: 0,
+        reap_interval_ms: 60_000,
+        reap_providers: [:mock],
+        reap_name_prefix: "atlas-"
+      )
+
+      {:ok, reaper: start_supervised!(Reaper)}
+    end
+
+    test "a peer with the same owner stops reaping and logs one error",
+         %{reaper: reaper, node_b: node_b} do
+      Cluster.put_orchestrator_env(node_b, reap_owner: "a")
+      {:ok, compute} = spawn_untracked("atlas-a-orphan")
+
+      log =
+        capture_log(fn ->
+          :ok = tick(reaper)
+          :ok = tick(reaper)
+        end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert [_once] = Regex.scan(~r/\[error\].*:reap_owner "a" is also set on/, log)
+      assert log =~ Atom.to_string(node_b)
+    end
+
+    test "a peer with a different owner leaves reaping on", %{reaper: reaper, node_b: node_b} do
+      Cluster.put_orchestrator_env(node_b, reap_owner: "b")
+      {:ok, compute} = spawn_untracked("atlas-a-orphan")
+
+      :ok = tick(reaper)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
+  defp spawn_untracked(name \\ "atlas-orphan"),
+    do: ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x", name: name)
 
   defp tick(reaper) do
     send(reaper, :reap)

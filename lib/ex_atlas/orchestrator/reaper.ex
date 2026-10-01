@@ -92,6 +92,8 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # filter included booting pods; v2's `status` splits them out.
   @billing_statuses [:provisioning, :running]
 
+  @peer_owner_timeout_ms 5_000
+
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -151,7 +153,27 @@ defmodule ExAtlas.Orchestrator.Reaper do
     if Node.list() == [], do: {:ok, nil}, else: {:closed, :clustered_without_owner}
   end
 
-  defp ownership_gate({:ok, owner}), do: {:ok, owner}
+  defp ownership_gate({:ok, owner}) do
+    case peers_with_owner(owner) do
+      [] -> {:ok, owner}
+      nodes -> {:closed, {:duplicate_owner, owner, nodes}}
+    end
+  end
+
+  # Two nodes with one owner each read the other's pods as their own. A peer
+  # that cannot answer (an older ex_atlas, a timeout) is not counted: only a
+  # reported match stops reaping.
+  defp peers_with_owner(owner) do
+    peers = Enum.sort(Node.list())
+
+    peers
+    |> :erpc.multicall(Ownership, :owner, [], @peer_owner_timeout_ms)
+    |> Enum.zip(peers)
+    |> Enum.flat_map(fn
+      {{:ok, {:ok, ^owner}}, node} -> [node]
+      _other -> []
+    end)
+  end
 
   # Once per state change, not once per tick: an operator needs to know the
   # Reaper is off, and needs it to still be readable an hour later.
@@ -180,6 +202,15 @@ defmodule ExAtlas.Orchestrator.Reaper do
     Logger.error(
       "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED: #{Exception.message(error)}. " <>
         "Untracked compute will keep billing until you fix :reap_owner."
+    )
+  end
+
+  defp log_closed({:duplicate_owner, owner, nodes}) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED: :reap_owner #{inspect(owner)} is also " <>
+        "set on #{Enum.map_join(nodes, ", ", &Atom.to_string/1)}. Nodes that share an owner " <>
+        "delete each other's pods. Give each node its own owner, for example " <>
+        ~s|System.get_env("FLY_MACHINE_ID").|
     )
   end
 
