@@ -200,10 +200,7 @@ defmodule ExAtlas.Fly.Dispatcher do
   def dispatch(topic, message) do
     case mode() do
       :registry ->
-        Registry.dispatch(@registry, topic, fn entries ->
-          for {pid, _} <- entries, do: send(pid, message)
-        end)
-
+        dispatch_registry(topic, message)
         :ok
 
       :phoenix_pubsub ->
@@ -224,6 +221,12 @@ defmodule ExAtlas.Fly.Dispatcher do
   @spec needs_registry?() :: boolean()
   def needs_registry? do
     mode() == :registry
+  end
+
+  defp dispatch_registry(topic, message) do
+    Registry.dispatch(@registry, topic, fn entries ->
+      for {pid, _} <- entries, do: send(pid, message)
+    end)
   end
 
   # A host-supplied MFA must never take down the caller (most often the
