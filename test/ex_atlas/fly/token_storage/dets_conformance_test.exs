@@ -80,18 +80,15 @@ defmodule ExAtlas.Fly.TokenStorage.DetsConformanceTest do
     Process.put(:dets_proxy_cached_table, cached_table)
     Process.put(:dets_proxy_manual_table, manual_table)
 
-    {:ok, pid} =
-      Dets.start_link(
-        name: process_name,
-        storage_path: storage_dir,
-        cached_table: cached_table,
-        manual_table: manual_table
-      )
+    start_supervised!(
+      {Dets,
+       name: process_name,
+       storage_path: storage_dir,
+       cached_table: cached_table,
+       manual_table: manual_table}
+    )
 
-    ExUnit.Callbacks.on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
-      File.rm_rf!(storage_dir)
-    end)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(storage_dir) end)
 
     :ok
   end

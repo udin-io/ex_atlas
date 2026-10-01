@@ -63,13 +63,13 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
 
       # Cached path SHOULD recover — losing the cache is a perf regression
       # only, and we want the server to come up so manual tokens stay reachable.
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
     end
   end
 
   describe "clean start" do
     test "opens both tables with empty storage dir", context do
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
 
       assert File.exists?(Path.join(context.dir, "cached.dets"))
       assert File.exists?(Path.join(context.dir, "manual.dets"))
@@ -110,7 +110,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
     @describetag :unix
 
     test "storage dir is 0700 after init", context do
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
 
       %File.Stat{mode: mode} = File.stat!(context.dir)
       # Low 9 bits are the rwx permission triad.
@@ -119,7 +119,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
     end
 
     test "DETS files are 0600 after init", context do
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
 
       for file <- ["cached.dets", "manual.dets"] do
         path = Path.join(context.dir, file)
