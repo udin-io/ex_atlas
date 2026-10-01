@@ -206,8 +206,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       {:ok, record} = Memory.get(compute.id)
       :ok = Memory.put(%{record | v: TrackingStore.version() + 1})
 
-      :ok = Adopter.run(notify: self())
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
       assert_receive :adoption_complete, 2_000
+      assert log =~ "not adopting #{compute.id}: unknown schema version 4"
 
       # No tracker: we cannot know what the fields mean. But the record stays,
       # because deleting it is what lets the Reaper delete a live pod that a
@@ -248,6 +249,61 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
       assert {:ok, ^v1} = Memory.get(compute.id)
+    end
+  end
+
+  # What a node of this release before the cost cap wrote: `v: 2`, an owner,
+  # and no cost fields.
+  defp downgrade_to_v2!(id) do
+    {:ok, record} = Memory.get(id)
+
+    :ok =
+      Memory.put(
+        record
+        |> Map.drop([:max_cost, :spent_usd, :cost_rate, :cost_since_ms])
+        |> Map.put(:v, 2)
+      )
+
+    {:ok, v2} = Memory.get(id)
+    v2
+  end
+
+  describe "records written before the cost cap (v2)" do
+    test "adopt with no cost cap and resume what is left of max_runtime_ms" do
+      compute = orphaned_task_of("a")
+      v2 = downgrade_to_v2!(compute.id)
+      backdate!(compute.id, 30 * 60 * 1_000)
+
+      boot_as("a")
+
+      assert {:ok, %{max_cost: false, max_runtime_remaining_ms: remaining}} =
+               Orchestrator.info(compute.id)
+
+      assert remaining > 55 * 60 * 1_000
+      assert remaining < 65 * 60 * 1_000
+
+      # Read as it is; nothing migrates it on disk.
+      assert {:ok, %{v: 2} = stored} = Memory.get(compute.id)
+      assert stored == %{v2 | spawned_at_ms: stored.spawned_at_ms}
+    end
+
+    test "a claimed v2 record is written back as a full v3 record" do
+      compute = orphaned_task_of(nil)
+      downgrade_to_v2!(compute.id)
+
+      boot_as("b")
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+
+      assert {:ok,
+              %{
+                v: 3,
+                owner: "b",
+                max_cost: false,
+                spent_usd: +0.0,
+                cost_rate: nil,
+                cost_since_ms: nil
+              }} = Memory.get(compute.id)
     end
   end
 
@@ -303,7 +359,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       boot_as("b")
 
       assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
-      assert {:ok, %{v: 2, owner: "b"}} = Memory.get(compute.id)
+
+      assert {:ok, %{v: 3, owner: "b", max_cost: false, spent_usd: +0.0}} =
+               Memory.get(compute.id)
     end
 
     test "a claimed record is left alone by the next owner to boot" do

@@ -44,7 +44,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, record} = Memory.get(compute.id)
 
       assert %{
-               v: 2,
+               v: 3,
                id: id,
                provider: :mock,
                mode: :task,
@@ -60,18 +60,25 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert_in_delta record.spawned_at_ms, System.system_time(:millisecond), 5_000
     end
 
+    test "an uncapped task records no cost cap and no meter" do
+      {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
+
+      assert {:ok, %{max_cost: false, spent_usd: +0.0, cost_rate: nil, cost_since_ms: nil}} =
+               Memory.get(compute.id)
+    end
+
     test "stamps the spawning node's owner into the record" do
       ExAtlas.Test.Orchestrator.put_env(reap_owner: "a")
 
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 
-      assert {:ok, %{v: 2, owner: "a"}} = Memory.get(compute.id)
+      assert {:ok, %{v: 3, owner: "a"}} = Memory.get(compute.id)
     end
 
     test "records no owner when the node has none" do
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 
-      assert {:ok, %{v: 2, owner: nil}} = Memory.get(compute.id)
+      assert {:ok, %{v: 3, owner: nil}} = Memory.get(compute.id)
     end
 
     test "records the callback task id so in-flight pod callbacks survive" do

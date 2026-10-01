@@ -90,6 +90,12 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       respawn something that already reported" rule survives too.
     * `:mode`, `:user_id` — the task/interactive branch, and host-side
       ownership.
+    * `:max_cost`, `:spent_usd`, `:cost_rate`, `:cost_since_ms` — the cost
+      cap and its meter, so a restart does not refill the budget either.
+      `:spent_usd` is the spend of closed segments; the open segment runs at
+      `:cost_rate` dollars per hour from `:cost_since_ms`, wall clock like
+      `:spawned_at_ms`. An uncapped record holds `false`, `0.0`, `nil`, `nil`.
+      Version 1 and 2 records carry none of them and read as uncapped.
 
   Never stored: `compute.auth.token` (the raw preshared key — see
   `ExAtlas.Auth.Token`), `:api_key` (re-resolved from config at adoption,
@@ -169,7 +175,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
           required(:callback_task_id) => String.t() | nil,
           required(:report) => map() | nil,
           required(:mode) => :interactive | :task,
-          required(:user_id) => term()
+          required(:user_id) => term(),
+          required(:max_cost) => number() | false,
+          required(:spent_usd) => float(),
+          required(:cost_rate) => float() | nil,
+          required(:cost_since_ms) => integer() | nil
         }
 
   @doc "Write `record`, replacing any record with the same `:id`."
@@ -194,7 +204,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a
   # half-understood record could arm the wrong deadline on a live GPU.
-  @version 2
+  @version 3
+
+  # What a record older than `@version` lacks. Version 1 had no owner; neither
+  # 1 nor 2 could carry a cost cap, since `persist: true` refused `max_cost`.
+  @upgrade_defaults %{
+    owner: nil,
+    max_cost: false,
+    spent_usd: 0.0,
+    cost_rate: nil,
+    cost_since_ms: nil
+  }
 
   # Opts that are credentials, or that could carry one. `:req_options` gets its
   # own treatment below because the secret is nested inside it.
@@ -203,6 +223,20 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   @doc "The current record schema version."
   @spec version() :: version()
   def version, do: @version
+
+  @doc "Whether this build can read a record of schema version `v`."
+  @spec readable?(term()) :: boolean()
+  def readable?(v), do: v in 1..@version//1
+
+  @doc """
+  A readable record of an older version, as a current one.
+
+  Fills the fields the older version lacks with the values that version
+  implied, and leaves a current record as it is.
+  """
+  @spec upgrade(map()) :: record()
+  def upgrade(%{v: @version} = record), do: record
+  def upgrade(record), do: @upgrade_defaults |> Map.merge(record) |> Map.put(:v, @version)
 
   @doc """
   The configured implementation, or `nil` when persistence is disabled.
@@ -239,7 +273,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       callback_task_id: callback_task_id(Keyword.get(tracking, :callback)),
       report: nil,
       mode: Keyword.get(tracking, :mode, :interactive),
-      user_id: Keyword.get(tracking, :user_id)
+      user_id: Keyword.get(tracking, :user_id),
+      max_cost: false,
+      spent_usd: 0.0,
+      cost_rate: nil,
+      cost_since_ms: nil
     }
   end
 

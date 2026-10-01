@@ -58,7 +58,7 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
 
       defp conformance_record(id, overrides \\ %{}) do
         %{
-          v: 2,
+          v: 3,
           id: id,
           owner: "a",
           provider: :mock,
@@ -69,7 +69,11 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
           callback_task_id: "task-" <> id,
           report: nil,
           mode: :task,
-          user_id: nil
+          user_id: nil,
+          max_cost: 2.5,
+          spent_usd: 0.75,
+          cost_rate: 1.5,
+          cost_since_ms: 1_700_000_600_000
         }
         |> Map.merge(overrides)
       end
@@ -92,6 +96,32 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
 
           assert {:ok, %{owner: "b"}} = @store.get("compute-o1")
           assert {:ok, %{owner: nil}} = @store.get("compute-o2")
+        end
+
+        test "put/1 round-trips the cost fields, including no cap" do
+          :ok = @store.put(conformance_record("compute-m1"))
+
+          :ok =
+            @store.put(
+              conformance_record("compute-m2", %{
+                max_cost: false,
+                spent_usd: 0.0,
+                cost_rate: nil,
+                cost_since_ms: nil
+              })
+            )
+
+          assert {:ok,
+                  %{
+                    max_cost: 2.5,
+                    spent_usd: 0.75,
+                    cost_rate: 1.5,
+                    cost_since_ms: 1_700_000_600_000
+                  }} =
+                   @store.get("compute-m1")
+
+          assert {:ok, %{max_cost: false, spent_usd: +0.0, cost_rate: nil, cost_since_ms: nil}} =
+                   @store.get("compute-m2")
         end
 
         test "put/1 overwrites the record for an id" do
