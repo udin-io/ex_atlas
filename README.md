@@ -973,7 +973,7 @@ What an adopted task keeps:
 | A landed `finish` report | So work that already reported is never re-run. |
 | The callback `task_id` | In-flight pod callbacks stop answering `410 Gone`. |
 
-Four things to know before you rely on it:
+Seven things to know before you rely on it:
 
 - **Tasks only.** `persist: true` requires `mode: :task` and is refused
   otherwise. An interactive session's bearer token is never written to disk, so
@@ -995,6 +995,25 @@ Four things to know before you rely on it:
   store plus leases. A store shared by several nodes makes every node adopt
   every node's tasks (issue #46). Several machines on one account each need
   their own `:reap_owner` (see "More than one node").
+- **A graceful deploy keeps the pod; your kill signal decides the rest.** On
+  SIGTERM the BEAM stops the app and every tracker runs `terminate/2`. A
+  `persist: true` task whose container has not reported an exit code keeps its
+  pod and its record; every other tracker deletes its pod, as does a persisted
+  task whose record is missing from the store. Fly's default
+  `kill_signal` is SIGINT, which on OTP 27 halts the VM with no `terminate/2`
+  at all: persisted pods survive and unpersisted ones are left to the Reaper.
+  `fly launch` writes `kill_signal = "SIGTERM"` for Phoenix apps. Use it, with
+  a `kill_timeout` of at least 30 s (Fly's default is 5 s) so unpersisted
+  trackers finish their DELETE.
+- **A machine removed for good keeps its persisted pods too.** `fly scale
+  count` down and `fly machine destroy` send the same SIGTERM as a deploy, and
+  the app cannot tell them apart. The pod runs with no tracker and no
+  `:max_runtime_ms` cap until its container exits or you delete it. The Reaper
+  on the remaining machines leaves it alone and logs it as another owner's.
+- **`stop_tracked/1` is how you end one.** It deletes the pod and the record,
+  persisted or not. `DynamicSupervisor.terminate_child/2` on
+  `ExAtlas.Orchestrator.ComputeSupervisor` counts as a node stop and keeps a
+  persisted pod.
 
 Nothing here is on by default. With `persist: false` — the default — the
 orchestrator behaves exactly as it did before the store existed.

@@ -32,6 +32,42 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     assert gone.status == :terminated
   end
 
+  test "stop_tracked/1 ends the tracker with its own reason, not a node stop's" do
+    {:ok, _pid, compute} =
+      ExAtlas.Orchestrator.spawn(provider: :mock, gpu: :h100, image: "x", status_poll_ms: false)
+
+    id = compute.id
+    Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+    :ok = ExAtlas.Orchestrator.stop_tracked(id)
+
+    assert_receive {:atlas_compute, ^id, {:terminating, {:shutdown, :stopped}}}, 2_000
+  end
+
+  test "a crash log shows the tracker's state without its secrets" do
+    key = "sk-crash-log-must-not-show"
+
+    {:ok, pid, compute} =
+      ExAtlas.Orchestrator.spawn(
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        status_poll_ms: false,
+        api_key: key,
+        auth: :bearer,
+        req_options: [auth: {:bearer, key}]
+      )
+
+    log = ExUnit.CaptureLog.capture_log(fn -> GenServer.stop(pid, :boom) end)
+
+    # The state was logged at all, so the refutes below are not vacuous.
+    assert log =~ "terminating"
+    assert log =~ compute.id
+    refute log =~ key
+    assert is_binary(compute.auth.token)
+    refute log =~ compute.auth.token
+  end
+
   test "idle timeout triggers termination" do
     if Code.ensure_loaded?(Phoenix.PubSub),
       do: Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:")

@@ -141,6 +141,10 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       id = compute.id
       assert_receive {:atlas_compute, ^id, {:status, :failed}}, 2_000
       assert_receive {:atlas_compute, ^id, {:task, {:failed, :failed}}}, 2_000
+
+      # `{:task, _}` goes out before `terminate/2` forgets the record, so wait
+      # for the tracker itself to exit.
+      await_exit(id)
       assert :error = Memory.get(id)
     end
 
@@ -214,6 +218,17 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     test "settles immediately so the Reaper is not blocked" do
       assert :ok = Adopter.run(notify: self())
       assert_receive :adoption_complete, 2_000
+    end
+  end
+
+  defp await_exit(id) do
+    case Orchestrator.lookup(id) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+
+      :error ->
+        :ok
     end
   end
 end

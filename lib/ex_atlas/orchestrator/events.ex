@@ -48,12 +48,17 @@ defmodule ExAtlas.Orchestrator.Events do
       it is proven: the container said `exit_code: 0`. A non-zero exit arrives
       as `{:task, {:failed, {:exit_code, n}}}`. See
       `ExAtlas.Orchestrator.run_task/1`.
-    * `{:terminating, reason}` — server is shutting down.
+    * `{:terminating, reason}` — server is shutting down. `reason` is
+      `{:shutdown, :stopped}` after `ExAtlas.Orchestrator.stop_tracked/1`,
+      `:shutdown` when its supervisor stops it (a node stop), `:normal` when
+      the session ended itself, and anything else on a crash.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 
   Statuses are ordinary state changes, not necessarily endings: a session that
   ends emits `{:terminating, _}` and a final `{:status, :terminated}`, so
   that pair — not any individual status — is the reliable "it's over" signal.
+  A `persist: true` task on a node stop sends `{:terminating, :shutdown}`
+  alone: its resource keeps running for the next boot to adopt.
 
   If `phoenix_pubsub` is not available in the host app, broadcasts are silently
   skipped.

@@ -7,8 +7,9 @@ defmodule ExAtlas.Orchestrator do
 
     * Holds the resource's metadata (id, auth handle, proxy URL, user context).
     * Heartbeats the resource via `touch/1` so idle sessions auto-terminate.
-    * Traps exits and calls `ExAtlas.terminate/2` on shutdown, guaranteeing no
-      leaked pods.
+    * Traps exits and calls `ExAtlas.terminate/2` on shutdown, so no pod
+      leaks. A graceful node stop keeps `persist: true` tasks running for the
+      next boot to adopt.
     * Broadcasts state changes over `Phoenix.PubSub` so LiveViews can react.
 
   The full supervision tree (`Registry` + `DynamicSupervisor` + `PubSub` + `Reaper`)
@@ -473,8 +474,7 @@ defmodule ExAtlas.Orchestrator do
   def stop_tracked(id) do
     case lookup(id) do
       {:ok, pid} ->
-        DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
-        :ok
+        ComputeServer.stop(pid)
 
       :error ->
         {:error, :not_tracked}

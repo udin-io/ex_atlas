@@ -12,13 +12,16 @@ defmodule ExAtlas.Orchestrator.DeployTest do
   use ExUnit.Case, async: false
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Adopter, TrackingStore}
+  alias ExAtlas.Orchestrator.{Adopter, Events, Reaper, TrackingStore}
+  alias ExAtlas.Providers.Mock
+  alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: dir} do
     Application.put_env(:ex_atlas, :start_orchestrator, true)
     Application.put_env(:ex_atlas, :default_provider, :mock)
+    Application.put_env(:ex_atlas, :callback, secret: TestOrchestrator.callback_secret())
 
     Application.put_env(:ex_atlas, :orchestrator,
       tracking_store: TrackingStore.Dets,
@@ -27,11 +30,12 @@ defmodule ExAtlas.Orchestrator.DeployTest do
       reap_grace_ms: 0
     )
 
-    ExAtlas.Providers.Mock.reset()
+    Mock.reset()
 
     on_exit(fn ->
       Application.delete_env(:ex_atlas, :start_orchestrator)
       Application.delete_env(:ex_atlas, :default_provider)
+      Application.delete_env(:ex_atlas, :callback)
       Application.delete_env(:ex_atlas, :orchestrator)
     end)
 
@@ -76,8 +80,139 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     # and past its grace window, now finds a tracker for it and leaves it
     # alone. (That an *unadopted* record also spares it is covered by
     # `ExAtlas.Orchestrator.ReaperTest`.)
-    :ok = ExAtlas.Orchestrator.Reaper.reap_now("atlas-", [:mock])
+    :ok = Reaper.reap_now("atlas-", [:mock])
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+  end
+
+  # `stop_supervised!/1` sends the tree the same `:shutdown` exit that
+  # `init:stop/0` sends on SIGTERM, so every tracker's `terminate/2` runs.
+  describe "a graceful stop (SIGTERM)" do
+    test "keeps a persisted task's pod, and the next boot adopts it" do
+      boot()
+      {:ok, _tracker, compute} = run_task(persist: true)
+
+      shutdown()
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+      boot()
+      assert {:ok, %{compute: %{id: id}}} = Orchestrator.info(compute.id)
+      assert id == compute.id
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "deletes an unpersisted task's pod" do
+      boot()
+      {:ok, _tracker, compute} = run_task(persist: false)
+
+      shutdown()
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "deletes an interactive session's pod" do
+      boot()
+
+      {:ok, _tracker, compute} =
+        Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "ghcr.io/acme/notebook:latest",
+          name: "atlas-session-7",
+          status_poll_ms: false
+        )
+
+      shutdown()
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "deletes a persisted task's pod once its container reported an exit code" do
+      boot()
+
+      {:ok, _tracker, compute} =
+        run_task(
+          persist: true,
+          callback: "https://app.example.com/atlas/cb",
+          finish_grace_ms: 60_000
+        )
+
+      # Subscribing links this process to the PubSub registry, which the tree
+      # stop below takes down with it.
+      Process.flag(:trap_exit, true)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {:ok, %{callback_task_id: task_id}} = TrackingStore.Dets.get(compute.id)
+      :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+
+      shutdown()
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
+  describe "an adopted task on the next graceful stop" do
+    test "survives a second deploy" do
+      boot()
+      {:ok, _tracker, compute} = run_task(persist: true)
+      shutdown()
+
+      boot()
+      assert {:ok, _} = Orchestrator.info(compute.id)
+      shutdown()
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+      boot()
+      assert {:ok, %{compute: %{id: id}}} = Orchestrator.info(compute.id)
+      assert id == compute.id
+    end
+
+    test "deletes its pod once it carries an exit code reported before the restart" do
+      boot()
+
+      {:ok, tracker, compute} =
+        run_task(
+          persist: true,
+          callback: "https://app.example.com/atlas/cb",
+          finish_grace_ms: 60_000
+        )
+
+      # Subscribing links this process to the PubSub registry, which each tree
+      # stop below takes down with it.
+      Process.flag(:trap_exit, true)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {:ok, %{callback_task_id: task_id}} = TrackingStore.Dets.get(compute.id)
+      :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+
+      # The VM goes away inside the finish grace window: no `terminate/2`.
+      ref = Process.monitor(tracker)
+      Process.exit(tracker, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^tracker, :killed}, 2_000
+      shutdown()
+
+      boot()
+      assert {:ok, _} = Orchestrator.info(compute.id)
+      shutdown()
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
+  defp run_task(overrides) do
+    Orchestrator.run_task(
+      Keyword.merge(
+        [
+          provider: :mock,
+          gpu: :h100,
+          image: "ghcr.io/acme/trainer:latest",
+          command: ["/app/train.sh"],
+          name: "atlas-train-42",
+          max_runtime_ms: 6 * 60 * 60 * 1_000,
+          status_poll_ms: false
+        ],
+        overrides
+      )
+    )
   end
 
   defp boot do

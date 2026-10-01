@@ -6,8 +6,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     * Hold the resource's normalized `ExAtlas.Spec.Compute`, its `:user_id`,
       `:idle_ttl_ms`, last-activity timestamp, and spawn opts.
-    * Trap exits so `terminate/2` always calls `ExAtlas.terminate/2` on the
-      upstream provider — even on supervisor shutdown or crash.
+    * Trap exits so `terminate/2` calls `ExAtlas.terminate/2` on the
+      upstream provider — even on supervisor shutdown or crash. The one
+      exception is a `persist: true` task on a node stop: see "Adopted
+      trackers".
     * Drive its own idle reaper: every `:heartbeat_ms` it compares
       `:last_activity_ms` against `:idle_ttl_ms`, and stops (terminating the
       upstream resource) once the session has gone quiet.
@@ -68,6 +70,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `on_failure` budget and any landed report are carried across as well. The
   first status poll runs immediately, since nothing has watched the resource
   since the node went down.
+
+  A graceful node stop leaves such a task's resource running and its record
+  in place: its supervisor's `:shutdown` is the one reason `terminate/2` does
+  not delete for. A task whose container already reported its exit code still
+  deletes, as does one whose record is missing from the store (no boot could
+  adopt it) and `ExAtlas.Orchestrator.stop_tracked/1`, whose reason is
+  `{:shutdown, :stopped}`.
 
   ## Why a task needs both a self-terminating container and a deadline
 
@@ -315,6 +324,20 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @doc "Return the current tracked state."
   def info(pid), do: GenServer.call(pid, :info)
 
+  @doc """
+  Stop the tracker and delete its resource, persisted or not.
+
+  The reason is `{:shutdown, :stopped}`, never the supervisor's `:shutdown`,
+  so `terminate/2` can tell an explicit stop from a node stop. Returns `:ok`
+  when the tracker has already exited, and after 30 s while it is still
+  deleting.
+  """
+  def stop(pid) do
+    GenServer.stop(pid, {:shutdown, :stopped}, @shutdown_timeout_ms)
+  catch
+    :exit, _ -> :ok
+  end
+
   # --- callbacks ---
 
   @impl true
@@ -542,18 +565,40 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # DELETE a perfectly healthy resource.
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # OTP prints the whole state in a crash report. Print it without the provider
+  # credential in `opts` or the resource's bearer token, which `compute.auth`
+  # holds and `compute.raw` can echo back in the container's env.
+  @impl true
+  def format_status(%{state: %{opts: opts, compute: compute} = state} = status) do
+    compute = %{compute | auth: compute.auth && :redacted, raw: :redacted}
+    %{status | state: %{state | opts: TrackingStore.scrub_opts(opts), compute: compute}}
+  end
+
+  def format_status(status), do: status
+
   @impl true
   def terminate(reason, state) do
     cancel_poll(state)
     Events.broadcast(state.compute.id, {:terminating, reason})
 
-    if state.upstream_deletable? do
-      terminate_upstream(state)
-    else
-      # Nothing left to delete — a DELETE would only earn us an error and a
-      # misleading `{:terminate_failed, _}`.
-      Events.broadcast(state.compute.id, {:status, :terminated})
-      forget(state, state.compute.id)
+    cond do
+      # A node stop (SIGTERM, `System.stop/0`, `Application.stop(:ex_atlas)`)
+      # reaches every tracker as its supervisor's `:shutdown`. A persisted task
+      # with no report yet keeps its pod and its record, so the next boot
+      # adopts it. The node cannot tell a deploy from a machine removed for
+      # good; both keep the pod. Without a record no boot can adopt it, so it
+      # is deleted.
+      reason == :shutdown and is_nil(state.report) and recorded?(state) ->
+        :ok
+
+      state.upstream_deletable? ->
+        terminate_upstream(state)
+
+      true ->
+        # Nothing left to delete — a DELETE would only earn us an error and a
+        # misleading `{:terminate_failed, _}`.
+        Events.broadcast(state.compute.id, {:status, :terminated})
+        forget(state, state.compute.id)
     end
 
     :ok
@@ -702,6 +747,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         :ok
     end
   end
+
+  defp recorded?(%{store: nil}), do: false
+  defp recorded?(%{store: store, compute: compute}), do: match?({:ok, _}, store.get(compute.id))
 
   defp forget(%{store: nil}, _id), do: :ok
   defp forget(%{store: store}, id), do: store.delete(id)

@@ -11,7 +11,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
   use ExUnit.Case, async: false
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Events, TrackingStore}
+  alias ExAtlas.Orchestrator.{ComputeSupervisor, Events, TrackingStore}
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.TrackingStore.Memory
 
@@ -68,13 +68,23 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert is_binary(task_id)
     end
 
-    test "teardown removes the record — an adopted pod must still exist" do
+    test "stop_tracked/1 deletes the pod and removes the record" do
       {:ok, pid, compute} = Orchestrator.spawn(task_opts())
       ref = Process.monitor(pid)
 
       :ok = Orchestrator.stop_tracked(compute.id)
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
 
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert :error = Memory.get(compute.id)
+    end
+
+    test "reaching :max_runtime_ms deletes the pod and removes the record" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts(max_runtime_ms: 50))
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
       assert :error = Memory.get(compute.id)
     end
 
@@ -122,6 +132,86 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
 
       # ...and the pod that is gone must not be adopted at all.
       assert :error = Memory.get(old_id)
+    end
+  end
+
+  # `DynamicSupervisor.terminate_child/2` delivers `:shutdown`, the reason a
+  # graceful node stop delivers. Keeping the pod needs all three: that reason,
+  # a tracking store, and no exit code reported yet. Each refusal below fails
+  # exactly one of them against the keep case.
+  describe "a supervisor stop" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
+    end
+
+    test "keeps a persisted task's pod and its record" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+    end
+
+    test "deletes a persisted task's pod when its tracking record is missing" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      # No boot could adopt this pod, so keeping it would only bill.
+      :ok = Memory.delete(compute.id)
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "deletes an unpersisted task's pod" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts(persist: false))
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "deletes a persisted task's pod once its container reported an exit code" do
+      {:ok, pid, compute} =
+        Orchestrator.spawn(
+          task_opts(callback: "https://app.example.com/atlas/cb", finish_grace_ms: 60_000)
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {:ok, %{callback_task_id: task_id}} = Memory.get(compute.id)
+      :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert :error = Memory.get(compute.id)
+    end
+
+    @tag :capture_log
+    test "an abnormal exit deletes a persisted task's pod and its record" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+
+      :ok = GenServer.stop(pid, :boom)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert :error = Memory.get(compute.id)
+    end
+  end
+
+  describe "a supervisor stop with no tracking store configured" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!()
+    end
+
+    test "deletes a persist: true task's pod, since no boot could adopt it" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
   end
 

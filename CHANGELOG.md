@@ -7,6 +7,32 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Fixed: a graceful shutdown deletes persisted tasks (#45)
+
+A SIGTERM deploy ran every tracker's `terminate/2`, which deleted each pod and
+its tracking record, `persist: true` included. The next boot had nothing to
+adopt.
+
+- A graceful node stop (SIGTERM, `System.stop/0`, `Application.stop(:ex_atlas)`)
+  keeps a `persist: true` task's pod and record, so the next boot adopts it.
+  A task whose container already reported its exit code still deletes, and
+  so does one whose record is missing from the store.
+- Unpersisted tasks, interactive sessions, crashes, idle TTL,
+  `:max_runtime_ms` and finished tasks delete as before.
+- `ExAtlas.Orchestrator.stop_tracked/1` still deletes the pod and the record.
+  Its tracker now ends with `{:shutdown, :stopped}`, so subscribers see
+  `{:terminating, {:shutdown, :stopped}}` where they saw
+  `{:terminating, :shutdown}`. A persisted task on a node stop sends
+  `{:terminating, :shutdown}` and no `{:status, :terminated}`.
+- `DynamicSupervisor.terminate_child/2` on
+  `ExAtlas.Orchestrator.ComputeSupervisor` now counts as a node stop and
+  keeps a persisted pod. Use `stop_tracked/1` to end one.
+- A machine removed for good (`fly scale count` down, `fly machine destroy`)
+  gets the same SIGTERM, so its persisted pods keep running untracked, with no
+  `:max_runtime_ms` cap, until their containers exit or you delete them.
+- On Fly, set `kill_signal = "SIGTERM"` and a `kill_timeout` of at least 30 s.
+  Fly's default SIGINT halts the VM without `terminate/2`.
+
 ### Fixed: the Reaper deletes other nodes' live compute (breaking, #38)
 
 Every node's Reaper listed the whole provider account and deleted each
