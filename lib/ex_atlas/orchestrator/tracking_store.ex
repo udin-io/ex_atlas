@@ -106,15 +106,15 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   — and accept that respawn-after-adoption loses them, or supply a store that
   encrypts at rest.
 
-  ## Single node, by design
+  ## Adoption is per node
 
   A node adopts only ids it wrote itself, which a per-node DETS file makes
   automatic. "Node A died, node B takes over its pods" is explicitly **not**
   solved here: it needs a shared store plus leases with an owner column and
-  expiry, which is a different ticket. Note also that the Reaper is already
-  unsafe on 2+ nodes sharing one provider account and `:reap_name_prefix`
-  (issue #38) — this feature does not change that either way. Run one
-  orchestrating node, or give each node its own `:reap_name_prefix`.
+  expiry, which is a different ticket. A host store shared by several nodes
+  makes every node adopt every node's tasks at boot (issue #46). Several nodes
+  on one provider account each need their own `:reap_owner`; see
+  `ExAtlas.Orchestrator.Reaper`.
 
   ## Fly and other ephemeral filesystems
 

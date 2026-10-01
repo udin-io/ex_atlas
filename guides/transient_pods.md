@@ -448,9 +448,12 @@ Three constraints worth knowing before you design around it:
   `config :ex_atlas, :orchestrator, storage_path: "/data/ex_atlas"` at a mount,
   or implement `ExAtlas.Orchestrator.TrackingStore` against your database — it
   is five callbacks, and `test/support`'s conformance suite tests it for you.
-- One orchestrating node. A node adopts only what it recorded itself; taking
-  over another node's pods needs leases and is out of scope (and see issue #38
-  for the Reaper's existing multi-node hazard, which is unchanged).
+- More than one machine on one provider account needs
+  `config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")`
+  (or another id unique per machine and stable across its restarts) on every
+  machine. Without it, one machine's Reaper deletes another's live pods. See
+  the README's "More than one node". A node adopts only what it recorded
+  itself; taking over another node's pods needs leases and is out of scope.
 
 ## Pitfalls
 

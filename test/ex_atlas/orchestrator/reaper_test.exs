@@ -1,6 +1,10 @@
 defmodule ExAtlas.Orchestrator.ReaperTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
+  @moduletag :capture_log
+
   alias ExAtlas.Orchestrator.Reaper
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.FaultyProvider
@@ -121,6 +125,93 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     assert {:ok, _pid, compute} = Task.await(spawning)
 
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+  end
+
+  describe "with a :reap_owner" do
+    # Each refusal below fails one clause of the rule only: the pod is
+    # untracked, unrecorded, running, prefixed, past grace and on a single
+    # node, so the control's pod differs from it by name alone.
+    setup do
+      TestOrchestrator.put_env(reap_owner: "b", reap_grace_ms: 0)
+    end
+
+    test "this node's own untracked pod is reclaimed" do
+      {:ok, compute} = spawn_untracked(name: "atlas-b-train-1")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "another owner's untracked pod is left alone" do
+      {:ok, compute} = spawn_untracked(name: "atlas-a-train-1")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "a pod named before owners existed is left alone" do
+      # v0.7.0 named it; its first segment reads as owner "train".
+      {:ok, compute} = spawn_untracked(name: "atlas-train-42")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "an owner that starts with this owner's name is another owner" do
+      {:ok, compute} = spawn_untracked(name: "atlas-bb-x")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "a name with no dash after the owner carries no owner and is left alone" do
+      {:ok, compute} = spawn_untracked(name: "atlas-b")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "a periodic Reaper logs a pod it leaves alone once, with its id and owner" do
+      TestOrchestrator.put_env(
+        tracking_store: false,
+        reap_interval_ms: 60_000,
+        reap_providers: [:mock],
+        reap_name_prefix: "atlas-"
+      )
+
+      reaper = start_supervised!(Reaper)
+      {:ok, compute} = spawn_untracked(name: "atlas-a-train-1")
+
+      log =
+        capture_log(fn ->
+          :ok = tick(reaper)
+          :ok = tick(reaper)
+        end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert [_once] = Regex.scan(~r/leaving #{compute.id} \(atlas-a-train-1\) alone/, log)
+      assert log =~ ~s|carries owner "a"|
+      assert log =~ "or a name from before owners existed"
+    end
+  end
+
+  test "an invalid :reap_owner reaps nothing and logs an error" do
+    # Control: "an untracked resource past the grace window is reclaimed",
+    # the same pod with no owner set.
+    TestOrchestrator.put_env(reap_owner: "Not Valid", reap_grace_ms: 0)
+    {:ok, compute} = spawn_untracked()
+
+    log = capture_log(fn -> :ok = Reaper.reap_now("atlas-", [:mock]) end)
+
+    assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    assert log =~ "[error]"
+    assert log =~ ":reap_owner"
+    refute log =~ "Not Valid"
   end
 
   describe "resources the tracking store knows about" do

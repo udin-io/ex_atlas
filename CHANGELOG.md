@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased (v0.8.0)
+
+### Fixed: the Reaper deletes other nodes' live compute (breaking, #38)
+
+Every node's Reaper listed the whole provider account and deleted each
+prefixed pod its own node did not track. With two or more nodes on one
+account, node B deleted node A's live pods, hours-long tasks included.
+
+- New `config :ex_atlas, :orchestrator, reap_owner: "m1"`: `a-z` and `0-9`,
+  1 to 32 characters, no default. Every deployment with more than one machine
+  on one account must set it on every machine, unique per machine and stable
+  across its restarts. On Fly: `System.get_env("FLY_MACHINE_ID")`.
+- With an owner, `ExAtlas.Orchestrator.spawn/1` writes it into the pod name
+  (`atlas-train-42` becomes `atlas-m1-train-42`). The returned compute, every
+  respawn and the tracking record carry that name. An invalid owner returns
+  `{:error, %ExAtlas.Error{kind: :validation}}` before the provider is called.
+- With an owner, the Reaper deletes only untracked pods named with its own
+  owner. It leaves every other prefixed pod alone and logs each once per boot.
+- The Reaper reaps nothing and logs an error when the owner is invalid, when
+  a node with no owner is connected to other nodes (`Node.list/0`), or when a
+  connected node reports the same owner.
+- A connected node that cannot report its owner (an ex_atlas older than
+  v0.8.0, or no answer within 5 s) gets one warning per boot, naming it.
+- New `ExAtlas.Orchestrator.Ownership`: `owner/0`, `prefix/0`, `stamp/1`,
+  `classify/3`.
+
+What the checks do not cover:
+
+- They see connected nodes only. A node with no owner that sees no peers
+  reaps as v0.7.0 did, so machines that share an account without clustering
+  still delete each other's pods. An owner set on only some machines protects
+  nothing.
+- An owner can claim older names: a v0.7.0 pod `atlas-train-42` carries owner
+  `train` to the Reaper. Pick an owner no pre-v0.8 pod name starts with.
+
+Upgrade:
+
+| Deployment | After upgrading |
+|---|---|
+| One machine on the account, no `:reap_owner` | No change. Several unclustered machines on one account also see no change, and still delete each other's pods: set an owner on each. |
+| Cluster, no `:reap_owner` | The Reaper stops reaping and logs an error. Nothing is deleted; crash leftovers bill until you set an owner. |
+| Cluster, `:reap_owner` set | New pods get stamped names. Pods named by v0.7.0 are left alone, with one warning each; their trackers still end them. |
+
+A v0.7.0 node running beside a v0.8.0 node deletes the new node's pods, so a
+cluster upgrades in two deploys:
+
+1. Deploy v0.7.0 with `reap_providers: []`.
+2. Deploy v0.8.0 with `:reap_owner` set and `reap_providers` restored.
+
 ## v0.7.0 — 2026-10-01
 
 ### Changed: `list_gpu_types` reads the Runpod v2 catalog (breaking, v0.7.0)
