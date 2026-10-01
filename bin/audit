@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# The weekly advisory check. .github/workflows/audit.yml calls this script; it
+# is not part of bin/ci, so a new advisory never blocks a push or a PR.
+#
+# mix_audit 2.1.5 ignores the exit code of its own `git clone` and `git pull`
+# (mirego/mix_audit issue 61): with the fetch blocked, `mix deps.audit` prints
+# "No vulnerabilities found." and exits 0. We fetch the database first, so a
+# failed fetch fails the run.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export MIX_ENV=test
+
+db="$HOME/.local/share/elixir-security-advisories-mirego"
+
+printf '==> sync advisory database\n'
+if [ -d "$db/.git" ]; then
+  # `pull --ff-only` passes over an edit to a file the pull does not touch, and
+  # mix_audit's own pull then fails silently on the dirty tree.
+  if [ -n "$(git -C "$db" status --porcelain)" ]; then
+    printf 'uncommitted changes in %s\n' "$db" >&2
+    exit 1
+  fi
+  git -C "$db" pull --ff-only
+else
+  git clone --depth 1 https://github.com/mirego/elixir-security-advisories.git "$db"
+fi
+
+printf '\n==> mix deps.audit\n'
+mix deps.audit "$@"

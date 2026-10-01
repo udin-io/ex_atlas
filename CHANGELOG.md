@@ -14,6 +14,13 @@ suite, and `.github/workflows/ci.yml` calls it. Sobelow fails on any Medium or
 High finding, and on any finding in the callback code. Dev tooling only: no
 library behaviour changes.
 
+### Added: weekly dependency audit (#52)
+
+`.github/workflows/audit.yml` runs `bin/audit` every Monday at 06:00 UTC. It
+fetches the advisory database, then runs `mix deps.audit` (mix_audit, dev and
+test only). A fetch failure or any advisory fails the run. It never runs on a
+push or a pull request. Dev tooling only: no library behaviour changes.
+
 ### Fixed: a shared tracking store adopts other nodes' tasks (breaking, #46)
 
 A `TrackingStore` backed by one shared database made every node adopt every

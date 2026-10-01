@@ -32,6 +32,7 @@ defmodule ExAtlas.MixProject do
 
   defp deps do
     [
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.16", only: [:dev, :test], runtime: false},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
