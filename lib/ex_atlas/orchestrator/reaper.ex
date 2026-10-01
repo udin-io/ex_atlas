@@ -139,12 +139,17 @@ defmodule ExAtlas.Orchestrator.Reaper do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # Adoption has not run yet, or could not: every adoptable resource looks
-  # like an orphan. Then the owner: an invalid one reaps nothing.
+  # like an orphan. Then the owner: a node that cannot tell its own pods from
+  # another node's must not delete any.
   defp gate(%{adoption: :pending}), do: {:closed, :adoption_pending}
   defp gate(%{adoption: :failed}), do: {:closed, :adoption_failed}
   defp gate(_state), do: ownership_gate(Ownership.owner())
 
   defp ownership_gate({:error, error}), do: {:closed, {:invalid_owner, error}}
+
+  defp ownership_gate({:ok, nil}) do
+    if Node.list() == [], do: {:ok, nil}, else: {:closed, :clustered_without_owner}
+  end
 
   defp ownership_gate({:ok, owner}), do: {:ok, owner}
 
@@ -175,6 +180,16 @@ defmodule ExAtlas.Orchestrator.Reaper do
     Logger.error(
       "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED: #{Exception.message(error)}. " <>
         "Untracked compute will keep billing until you fix :reap_owner."
+    )
+  end
+
+  defp log_closed(:clustered_without_owner) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED: this node is connected to " <>
+        "#{length(Node.list())} other node(s) and has no :reap_owner, so it cannot tell its " <>
+        "own untracked compute from another node's. Set a name that stays the same across " <>
+        "restarts, for example in config/runtime.exs: " <>
+        ~s|config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")|
     )
   end
 
