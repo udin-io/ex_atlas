@@ -376,4 +376,107 @@ defmodule AtlasTest do
       refute :manage_network_volumes in ExAtlas.capabilities(:mock)
     end
   end
+
+  describe "templates" do
+    setup do
+      bypass = Bypass.open()
+
+      {:ok,
+       bypass: bypass,
+       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+    end
+
+    @template %{
+      "id" => "tpl_7",
+      "name" => "trainer-v7",
+      "image" => "ghcr.io/acme/trainer:7",
+      "ports" => ["8000/http"],
+      "env" => %{"A" => "1"},
+      "disk" => 80
+    }
+
+    defp template_respond(conn, status, body) do
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(status, Jason.encode!(body))
+    end
+
+    test "create_template/1 takes plain options, and provider config keys reach the ctx", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+        assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+
+        assert %{
+                 "name" => "trainer-v7",
+                 "image" => "ghcr.io/acme/trainer:7",
+                 "ports" => ["8000/http"],
+                 "startSsh" => false,
+                 "extra" => 1
+               } = Jason.decode!(raw)
+
+        template_respond(conn, 201, @template)
+      end)
+
+      assert {:ok, %Spec.Template{id: "tpl_7", provider: :runpod, ports: [{8000, :http}]}} =
+               ExAtlas.create_template(
+                 [
+                   name: "trainer-v7",
+                   image: "ghcr.io/acme/trainer:7",
+                   ports: [{8000, :http}],
+                   ssh: false,
+                   provider_opts: %{extra: 1}
+                 ] ++ opts
+               )
+    end
+
+    test "create_template/1 raises on a missing image like spawn_compute/1 does", %{opts: opts} do
+      assert_raise NimbleOptions.ValidationError, fn ->
+        ExAtlas.create_template([name: "t"] ++ opts)
+      end
+    end
+
+    test "list, get and delete go to the provider", %{bypass: bypass, opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/templates", fn conn ->
+        template_respond(conn, 200, %{
+          "templates" => [@template],
+          "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
+        })
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/templates/tpl_7", fn conn ->
+        template_respond(conn, 200, @template)
+      end)
+
+      Bypass.expect_once(bypass, "DELETE", "/templates/tpl_7", fn conn ->
+        Plug.Conn.resp(conn, 204, "")
+      end)
+
+      assert {:ok, [%Spec.Template{id: "tpl_7"}]} = ExAtlas.list_templates(opts)
+      assert {:ok, %Spec.Template{id: "tpl_7"}} = ExAtlas.get_template("tpl_7", opts)
+      assert :ok = ExAtlas.delete_template("tpl_7", opts)
+    end
+
+    test "a provider without the callbacks returns :unsupported for all four calls" do
+      for provider <- [:mock, :lambda_labs, :fly, BareProvider] do
+        opts = [provider: provider, api_key: "k"]
+
+        for result <- [
+              ExAtlas.list_templates(opts),
+              ExAtlas.get_template("t", opts),
+              ExAtlas.create_template([name: "t", image: "i"] ++ opts),
+              ExAtlas.delete_template("t", opts)
+            ] do
+          assert {:error, %ExAtlas.Error{kind: :unsupported}} = result
+        end
+      end
+    end
+
+    test "capabilities: runpod manages templates, mock does not" do
+      assert :manage_templates in ExAtlas.capabilities(:runpod)
+      refute :manage_templates in ExAtlas.capabilities(:mock)
+    end
+  end
 end

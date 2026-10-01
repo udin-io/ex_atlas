@@ -320,6 +320,66 @@ defmodule ExAtlas do
   def delete_network_volume(id, opts \\ []),
     do: dispatch_optional(:delete_network_volume, [id], opts)
 
+  @template_request_keys [
+    :name,
+    :image,
+    :ports,
+    :env,
+    :container_disk_gb,
+    :volume_gb,
+    :command,
+    :serverless,
+    :ssh,
+    :jupyter,
+    :provider_opts
+  ]
+
+  @doc """
+  List the account's templates, every page.
+
+  Returns `{:error, %ExAtlas.Error{kind: :unsupported}}` for a provider that
+  cannot manage templates; `:manage_templates` in `capabilities/1` says which
+  can.
+  """
+  @spec list_templates(opts()) :: {:ok, [Spec.Template.t()]} | {:error, term()}
+  def list_templates(opts \\ []), do: dispatch_optional(:list_templates, [], opts)
+
+  @doc "Fetch a template by id."
+  @spec get_template(String.t(), opts()) :: {:ok, Spec.Template.t()} | {:error, term()}
+  def get_template(id, opts \\ []), do: dispatch_optional(:get_template, [id], opts)
+
+  @doc """
+  Create a template: a saved image, ports, env and disk to spawn pods from.
+
+  Takes `:name` and `:image` (required), plus `:ports`, `:env`,
+  `:container_disk_gb`, `:volume_gb`, `:command`, `:serverless`, `:ssh` and
+  `:jupyter`; see `ExAtlas.Spec.TemplateRequest`. RunPod turns SSH and Jupyter
+  on unless `ssh: false` or `jupyter: false` says otherwise. Other options are
+  provider config, as in `spawn_compute/1`.
+
+      {:ok, template} =
+        ExAtlas.create_template(
+          provider: :runpod,
+          name: "trainer-v7",
+          image: "ghcr.io/acme/trainer:7",
+          ports: [{8000, :http}],
+          container_disk_gb: 80
+        )
+
+  Spawn from it with `spawn_compute(template_id: template.id)`. A spawn that
+  sets no `:ports` or `:container_disk_gb` keeps the template's.
+  """
+  @spec create_template(opts()) :: {:ok, Spec.Template.t()} | {:error, term()}
+  def create_template(opts) when is_list(opts) do
+    {request_opts, config_opts} = Keyword.split(opts, @template_request_keys)
+    req = Spec.TemplateRequest.new!(request_opts)
+    dispatch_optional(:create_template, [req], config_opts)
+  end
+
+  @doc "Delete a template. RunPod refuses while a pod or endpoint uses it."
+  @spec delete_template(String.t(), opts()) :: :ok | {:error, term()}
+  def delete_template(id, opts \\ []), do: dispatch_optional(:delete_template, [id], opts)
+
   @doc "Return the capability atoms honored by a provider."
   @spec capabilities(atom() | module()) :: [atom()]
   def capabilities(provider), do: provider |> Config.provider_module() |> apply(:capabilities, [])
