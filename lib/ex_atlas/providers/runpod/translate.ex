@@ -271,20 +271,22 @@ defmodule ExAtlas.Providers.RunPod.Translate do
     live = pod |> runtime_ports() |> Map.new(&{&1["private"], &1})
 
     Enum.flat_map(specs, fn spec ->
-      with {:ok, port, protocol} <- parse_port(spec) do
-        mapping = Map.get(live, port, %{})
-        external = mapping["public"]
+      case parse_port(spec) do
+        {:ok, port, protocol} ->
+          mapping = Map.get(live, port, %{})
+          external = mapping["public"]
 
-        [
-          %{
-            internal: port,
-            external: external,
-            protocol: protocol,
-            url: port_url(pod_id, protocol, port, mapping["ip"], external)
-          }
-        ]
-      else
-        _ -> []
+          [
+            %{
+              internal: port,
+              external: external,
+              protocol: protocol,
+              url: port_url(pod_id, protocol, port, mapping["ip"], external)
+            }
+          ]
+
+        :error ->
+          []
       end
     end)
   end
