@@ -585,8 +585,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       # reaches every tracker as its supervisor's `:shutdown`. A persisted task
       # with no report yet keeps its pod and its record, so the next boot
       # adopts it. The node cannot tell a deploy from a machine removed for
-      # good; both keep the pod.
-      reason == :shutdown and state.store != nil and is_nil(state.report) ->
+      # good; both keep the pod. Without a record no boot can adopt it, so it
+      # is deleted.
+      reason == :shutdown and is_nil(state.report) and recorded?(state) ->
         :ok
 
       state.upstream_deletable? ->
@@ -745,6 +746,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         :ok
     end
   end
+
+  defp recorded?(%{store: nil}), do: false
+  defp recorded?(%{store: store, compute: compute}), do: match?({:ok, _}, store.get(compute.id))
 
   defp forget(%{store: nil}, _id), do: :ok
   defp forget(%{store: store}, id), do: store.delete(id)

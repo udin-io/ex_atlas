@@ -154,6 +154,16 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert id == compute.id
     end
 
+    test "deletes a persisted task's pod when its tracking record is missing" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      # No boot could adopt this pod, so keeping it would only bill.
+      :ok = Memory.delete(compute.id)
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
     test "deletes an unpersisted task's pod" do
       {:ok, pid, compute} = Orchestrator.spawn(task_opts(persist: false))
 
