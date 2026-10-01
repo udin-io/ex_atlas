@@ -266,7 +266,10 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0}, reconcile_spend_ms: 20)
       # $0.50 stored plus an hour of downtime at $1: $1.50 by the estimate.
       cap_record!(compute.id, 10, 0.5, 1.0, @hour)
-      {:ok, %{spawned_at_ms: spawned_at_ms}} = Memory.get(compute.id)
+      # Spawned 30 minutes earlier by the record than by the Mock's timestamp,
+      # and inside the task's 90-minute deadline.
+      %{spawned_at_ms: spawned_at_ms} = backdate!(compute.id, div(@hour, 2))
+      spawned_at_ms = spawned_at_ms - div(@hour, 2)
       :ok = Mock.set_spend(compute.id, 4.0)
 
       id = compute.id
