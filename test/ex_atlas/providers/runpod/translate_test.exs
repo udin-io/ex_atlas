@@ -947,7 +947,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     end
 
     test "a missing or unparsable window reads as nil and keeps the totals" do
-      for query <- [nil, %{}, %{"startTime" => "yesterday", "endTime" => 5}] do
+      for query <- [nil, "junk", [], %{}, %{"startTime" => "yesterday", "endTime" => 5}] do
         body = put_in(billing_body(), ["metadata", "query"], query)
 
         assert {:ok, %Spec.Spend{from: nil, to: nil, total_usd: 12.34}} =
