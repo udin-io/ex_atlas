@@ -482,7 +482,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       store: store_for(tracking[:persist]),
       cost_meter: cost_meter(tracking[:max_cost], compute),
       cost_timer: nil,
-      reconcile_spend_ms: reconcile_interval(tracking[:max_cost], tracking[:reconcile_spend_ms]),
+      reconcile_spend_ms: poll_interval(tracking[:reconcile_spend_ms]),
       reconcile_task: nil,
       reconcile_timeout: nil,
       spend_from: spend_from(compute)
@@ -1120,6 +1120,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp arm_finish_grace(state), do: state
 
+  # The bill raises the meter's spend, so there is nothing to reconcile without
+  # a meter. An adopted record decides that, not its opts: a store without the
+  # cost columns adopts a capped task uncapped.
+  defp schedule_reconcile(%{cost_meter: nil}), do: :ok
   defp schedule_reconcile(%{reconcile_spend_ms: nil}), do: :ok
 
   defp schedule_reconcile(%{reconcile_spend_ms: ms}),
@@ -1158,12 +1162,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, nil)
     :ok
   end
-
-  # Reconciliation reads the bill to raise the spend toward `max_cost`, so it
-  # runs only with a cap.
-  defp reconcile_interval(false, _ms), do: nil
-  defp reconcile_interval(_max_cost, false), do: nil
-  defp reconcile_interval(_max_cost, ms), do: ms
 
   # The bill is asked for from the pod's spawn. The provider's own timestamp
   # when it has one, else now: the tracker starts seconds after the spawn, and
