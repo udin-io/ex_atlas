@@ -31,6 +31,8 @@ which pod spent it. `ExAtlas.Providers.Mock` gains `compute_spend/3`, the
   and `:finish_grace_ms` above 4,294,967,295 ms are refused before renting.
   Before, a value past the OTP release's timer limit crashed the tracker after
   the pod was rented. The status poll's backoff stays under the same limit.
+  A tracking record written before this bound, with a longer value, adopts
+  at the bound rather than failing to start a tracker.
 
 ### Added: a persisted task keeps its cost cap across a restart (#65, slice 2 of #28)
 
