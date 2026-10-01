@@ -7,6 +7,20 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: a persisted task keeps its cost cap across a restart (#65, slice 2 of #28)
+
+`max_cost` with `persist: true` is accepted. Tracking records are version 3
+and carry `:max_cost`, `:spent_usd`, `:cost_rate` and `:cost_since_ms`. An
+adopted task resumes its stored spend, and the time the node was down counts
+at the last known price: a budget spent by then fails the task with
+`{:task, {:failed, :cost_cap}}` at once. The tracker rewrites the record at
+every new price, including the replacement's price on a respawn, before it
+broadcasts `{:respawned, id}`. Version 1 and 2 records adopt uncapped, as
+before, and stay on disk as they are; a node that claims one writes it back as
+version 3. A host store that maps fields to columns needs the four new
+columns. `ExAtlas.Orchestrator.CostMeter.resume/4` seeds a meter with spend
+already made.
+
 ### Added: a cost cap on tracked sessions, `max_cost` (#64, slice 1 of #28)
 
 `ExAtlas.Orchestrator.spawn/1` and `run_task/1` take `max_cost: dollars`. The
@@ -16,7 +30,8 @@ deletes the pod when that reaches the cap: an interactive session broadcasts
 status poll with a new price re-prices the rest of the run; a respawn carries
 the spend. `info/1` gains `:max_cost` and `:spent_usd`. A provider that
 reports no price gets its pod deleted and `{:error, %ExAtlas.Error{kind:
-:unsupported}}`. `persist: true` with `max_cost` is refused until slice 2.
+:unsupported}}`. `persist: true` with `max_cost` was refused until slice 2
+(above).
 `ExAtlas.Providers.Mock` spawns at `provider_opts: %{cost_per_hour: rate}` and
 gains `set_cost_per_hour/2`.
 

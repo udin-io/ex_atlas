@@ -842,8 +842,9 @@ It works in both modes and calls no billing API.
 * A timer fires at the moment the cap is reached, not on the next heartbeat.
 * A provider that reports no price (`cost_per_hour: nil`) gets its pod deleted
   and `{:error, %ExAtlas.Error{kind: :unsupported}}` back.
-* `persist: true` with `max_cost` is refused until the tracking record carries
-  the spend.
+* With `persist: true` the tracking record carries the spend. An adopted task
+  resumes its budget, and the time the node was down counts at the last known
+  price, since the pod billed through it.
 
 | Option      | Default | Meaning                                              |
 | ----------- | ------- | ---------------------------------------------------- |
@@ -1100,6 +1101,7 @@ What an adopted task keeps:
 | `on_failure: {:respawn, n}` budget | A restart must not refill it. |
 | A landed `finish` report | So work that already reported is never re-run. |
 | The callback `task_id` | In-flight pod callbacks stop answering `410 Gone`. |
+| `max_cost` and the spend so far | The downtime counts at the last known price, so a task that spent $2 of $2.50 resumes with $0.50, and one whose budget ran out while the node was down fails with `:cost_cap` at once. |
 
 Seven things to know before you rely on it:
 
@@ -1124,7 +1126,9 @@ Seven things to know before you rely on it:
   adopt an unowned record (one written before v0.8.0) claims it. A dead
   owner's pods and records stay until you delete them: "node A died, node B
   takes over" needs leases and is out of scope. A store that maps fields to
-  columns needs a nullable `owner` column. See "More than one node".
+  columns needs a nullable `owner` column, and from v0.8.0 the four cost
+  columns `max_cost`, `spent_usd`, `cost_rate` and `cost_since_ms` (the last
+  two nullable). See "More than one node".
 - **A graceful deploy keeps the pod; your kill signal decides the rest.** On
   SIGTERM the BEAM stops the app and every tracker runs `terminate/2`. A
   `persist: true` task whose container has not reported an exit code keeps its

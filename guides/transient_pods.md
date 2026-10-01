@@ -389,8 +389,8 @@ ExAtlas.Orchestrator.run_task(
 ```
 
 There is no default, because no dollar figure fits both an RTX 4090 and eight
-H100s. The cap carries across a respawn, like the deadline, and is refused
-with `persist: true` for now. `ExAtlas.Orchestrator.info/1` reports
+H100s. The cap carries across a respawn, like the deadline, and across a
+restart with `persist: true`. `ExAtlas.Orchestrator.info/1` reports
 `:spent_usd` as the run goes.
 
 ### `:completed` does not mean "succeeded"
@@ -457,7 +457,8 @@ and means nothing in a new VM, so an adopted task recomputes what is *left* of
 `:max_runtime_ms` from when it was actually rented. A six-hour task that was
 down for seven hours ends the moment it is adopted; it does not quietly start a
 second six hours. `:respawns` and any landed `finish` report carry across for
-the same reason.
+the same reason, and so does a `max_cost` budget: the record keeps the spend,
+and the time the node was down counts at the last known price.
 
 Five constraints worth knowing before you design around it:
 
