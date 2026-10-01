@@ -7,6 +7,28 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Fixed: a shared tracking store adopts other nodes' tasks (breaking, #46)
+
+A `TrackingStore` backed by one shared database made every node adopt every
+node's persisted tasks at boot. Two trackers then watched one pod, and a crash
+or `stop_tracked/1` on node B deleted node A's pod and record.
+
+- Records are schema version 2 and carry `:owner`, the spawning node's
+  `:reap_owner` (`nil` when unset).
+- A node adopts only records with its own owner. It leaves another owner's
+  record in the store, never asks the provider about it, and logs one info line
+  per other owner with its ids.
+- The first node to adopt an unowned record (version 1, or owner `nil`) claims
+  it by writing its own owner. Two nodes that boot in the same second can both
+  adopt it once.
+- An invalid `:reap_owner` adopts nothing and keeps every record.
+- A dead owner's pods and records stay until you delete them. No lease or
+  expiry.
+- **Upgrade:** a host store that maps record fields to columns needs a nullable
+  `owner` column. Without it every record reads back unowned and every node
+  adopts it, as before. Set `:reap_owner` on every node that shares a store.
+- A v0.7.0 node beside a v0.8.0 node skips version 2 records and keeps them.
+
 ### Fixed: a graceful shutdown deletes persisted tasks (#45)
 
 A SIGTERM deploy ran every tracker's `terminate/2`, which deleted each pod and
