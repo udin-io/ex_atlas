@@ -251,6 +251,103 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a store shared by several nodes" do
+    test "a node leaves another owner's live task alone and logs its id" do
+      compute = orphaned_task_of("a")
+      {:ok, before} = Memory.get(compute.id)
+
+      log = boot_as("b")
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, ^before} = Memory.get(compute.id)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+      assert [[line]] = Regex.scan(~r/\[info\][^\n]*owner "a"[^\n]*/, log)
+      assert line =~ compute.id
+    end
+
+    test "control: the owner of that record adopts it" do
+      compute = orphaned_task_of("a")
+
+      boot_as("a")
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+    end
+
+    test "logs one line per other owner, listing every id of that owner" do
+      a1 = orphaned_task_of("a", name: "atlas-one")
+      a2 = orphaned_task_of("a", name: "atlas-two")
+      c1 = orphaned_task_of("c", name: "atlas-three")
+
+      log = boot_as("b")
+
+      assert [[a_line]] = Regex.scan(~r/\[info\][^\n]*owner "a"[^\n]*/, log)
+      assert a_line =~ a1.id and a_line =~ a2.id
+      assert [[c_line]] = Regex.scan(~r/\[info\][^\n]*owner "c"[^\n]*/, log)
+      assert c_line =~ c1.id
+    end
+
+    test "a node with no owner leaves an owned record alone" do
+      compute = orphaned_task_of("a")
+
+      boot_as(nil)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{owner: "a"}} = Memory.get(compute.id)
+    end
+
+    test "the first node to adopt an unowned v1 record claims it" do
+      compute = orphaned_task_of("a")
+      downgrade_to_v1!(compute.id)
+
+      boot_as("b")
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+      assert {:ok, %{v: 2, owner: "b"}} = Memory.get(compute.id)
+    end
+
+    test "a claimed record is left alone by the next owner to boot" do
+      compute = orphaned_task_of("a")
+      downgrade_to_v1!(compute.id)
+      boot_as("b")
+      {:ok, pid} = Orchestrator.lookup(compute.id)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      _ = :sys.get_state(ExAtlas.Orchestrator.ComputeRegistry)
+
+      boot_as("c")
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{owner: "b"}} = Memory.get(compute.id)
+    end
+
+    test "an invalid :reap_owner adopts nothing, keeps every record and logs one error" do
+      owned = orphaned_task_of("a", name: "atlas-owned")
+      unowned = orphaned_task_of("a", name: "atlas-unowned")
+      v1 = downgrade_to_v1!(unowned.id)
+      {:ok, owned_record} = Memory.get(owned.id)
+
+      log = boot_as("Not Valid")
+
+      assert {:error, :not_tracked} = Orchestrator.info(owned.id)
+      assert {:error, :not_tracked} = Orchestrator.info(unowned.id)
+      assert {:ok, ^owned_record} = Memory.get(owned.id)
+      assert {:ok, ^v1} = Memory.get(unowned.id)
+      assert [_once] = Regex.scan(~r/\[error\][^\n]*:reap_owner/, log)
+    end
+
+    test "another owner's record of a pod the provider forgot is kept" do
+      compute = orphaned_task_of("a")
+      :ok = Mock.forget(compute.id)
+
+      boot_as("b")
+
+      assert {:ok, %{owner: "a"}} = Memory.get(compute.id)
+      assert Orchestrator.list_ids() == []
+    end
+  end
+
   describe "an empty store" do
     test "settles immediately so the Reaper is not blocked" do
       assert :ok = Adopter.run(notify: self())

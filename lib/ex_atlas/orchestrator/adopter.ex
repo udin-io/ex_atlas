@@ -48,9 +48,26 @@ defmodule ExAtlas.Orchestrator.Adopter do
       for the rest of this boot**. A node that cannot tell which running pods
       are its own must never issue a DELETE.
 
+  ## Records of other owners
+
+  A tracking store shared by several nodes holds every node's tasks. A node
+  adopts only the records whose `:owner` is its own `:reap_owner`:
+
+    * **Another owner's record** is left in the store, untracked, and never
+      sent to the provider: a node with a wrong key sees 404 for every pod, and
+      deleting the record of a live pod would let its owner's Reaper delete the
+      pod after that owner's next restart. One info line per other owner lists
+      its ids. A dead owner's pods and records stay until an operator deletes
+      them.
+    * **An unowned record** (version 1, or a node that had no `:reap_owner`) is
+      claimed by the first node to adopt it, which writes its own owner into the
+      record.
+    * **An invalid `:reap_owner`** adopts nothing and keeps every record, as the
+      Reaper reaps nothing while the owner is invalid.
+
   ## Records this build does not understand
 
-  A record with an unknown `:v`, or a `:mode` other than `:task`, is skipped
+  A record with a `:v` other than 1 or 2, or a `:mode` other than `:task`, is skipped
   with a warning and **left in the store**. Deleting it would be worse than
   useless: the store entry is the only thing telling the Reaper that a live,
   prefix-matching pod belongs to this app.
@@ -60,7 +77,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   require Logger
 
-  alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Reaper, TrackingStore}
+  alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Ownership, Reaper, TrackingStore}
   alias ExAtlas.Orchestrator.UpstreamStatus
   alias ExAtlas.Spec
 
@@ -90,7 +107,11 @@ defmodule ExAtlas.Orchestrator.Adopter do
   defp adopt_all(store, notify) do
     case read_all(store) do
       {:ok, records} ->
-        Enum.each(records, &adopt_one(&1, store))
+        case Ownership.owner() do
+          {:ok, owner} -> adopt_owned(records, owner, store)
+          {:error, error} -> log_invalid_owner(error)
+        end
+
         signal(notify, :adoption_complete)
 
       {:error, reason} ->
@@ -103,6 +124,32 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
         signal(notify, :adoption_failed)
     end
+  end
+
+  defp adopt_owned(records, owner, store) do
+    records
+    |> Enum.map(&adopt_one(&1, owner, store))
+    |> Enum.flat_map(fn
+      {:other_owner, other, id} -> [{other, id}]
+      _adopted_or_skipped -> []
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.each(fn {other, ids} -> log_other_owner(other, ids) end)
+  end
+
+  defp log_other_owner(owner, ids) do
+    Logger.info(
+      "[ExAtlas.Orchestrator.Adopter] leaving #{length(ids)} record(s) of owner #{inspect(owner)} " <>
+        "in the store, untracked on this node: #{Enum.join(ids, ", ")}. Their owner adopts them. " <>
+        "If that node is gone, delete the pods and records by hand."
+    )
+  end
+
+  defp log_invalid_owner(error) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Adopter] #{error.message}; adopting nothing and keeping " <>
+        "every record. The Reaper reaps nothing while the owner is invalid."
+    )
   end
 
   # This runs inside the host's supervision tree during *their* boot, against a
@@ -120,8 +167,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   # One unreadable record must not cost the others their trackers.
-  defp adopt_one(record, store) do
-    adopt(record, store)
+  defp adopt_one(record, owner, store) do
+    adopt(record, owner, store)
   rescue
     error -> log_skipped(record, error)
   catch
@@ -136,13 +183,30 @@ defmodule ExAtlas.Orchestrator.Adopter do
     )
   end
 
-  defp adopt(record, store) do
+  defp adopt(record, owner, store) do
     cond do
       not readable?(record.v) -> skip(record, "unknown schema version #{record.v}")
       record.mode != :task -> skip(record, "mode #{inspect(record.mode)} is not adoptable")
-      true -> reconcile(record, store)
+      true -> adopt_by_owner(record, Map.get(record, :owner), owner, store)
     end
   end
+
+  defp readable?(version), do: version in [1, TrackingStore.version()]
+
+  # Same owner, or no owner on either side: ours, as before.
+  defp adopt_by_owner(record, owner, owner, store), do: reconcile(record, store)
+
+  # An unowned record: the first node to adopt it claims it, so later boots on
+  # other nodes skip it. The claim lands before the tracker starts, so the
+  # tracker's own record updates keep it.
+  defp adopt_by_owner(record, nil, owner, store) do
+    claimed = record |> Map.put(:v, TrackingStore.version()) |> Map.put(:owner, owner)
+    store.put(claimed)
+    reconcile(claimed, store)
+  end
+
+  # Another node's task: no provider call, no delete, no tracker.
+  defp adopt_by_owner(record, other, _owner, _store), do: {:other_owner, other, record.id}
 
   # Skipped, but never deleted: the store entry is the only thing telling the
   # Reaper that a live, prefix-matching pod belongs to this app, and a record
@@ -155,8 +219,6 @@ defmodule ExAtlas.Orchestrator.Adopter do
         "so the Reaper still treats the resource as ours."
     )
   end
-
-  defp readable?(version), do: version in [1, TrackingStore.version()]
 
   defp reconcile(record, store) do
     case observe(record) do
