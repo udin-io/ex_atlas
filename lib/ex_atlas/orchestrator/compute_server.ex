@@ -720,7 +720,18 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       Events.broadcast(state.compute.id, {:status, upstream.status})
     end
 
-    %{state | compute: upstream}
+    reprice(%{state | compute: upstream})
+  end
+
+  # A new price closes the meter's segment and re-arms the cap timer. A price
+  # the meter cannot read, or the same price, changes nothing.
+  defp reprice(%{cost_meter: nil} = state), do: state
+
+  defp reprice(%{cost_meter: meter} = state) do
+    case CostMeter.rate_changed(meter, state.compute.cost_per_hour, now_ms()) do
+      ^meter -> state
+      repriced -> arm_cost_cap(%{state | cost_meter: repriced})
+    end
   end
 
   # --- respawn ---

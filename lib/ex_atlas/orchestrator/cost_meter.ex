@@ -55,12 +55,16 @@ defmodule ExAtlas.Orchestrator.CostMeter do
   @doc """
   Close the current segment at `now_ms` and open one at `rate`.
 
-  Returns the meter unchanged when `rate` cannot be read.
+  Returns the meter unchanged when `rate` cannot be read or equals the current
+  rate, so a caller can compare the two to learn whether the rate moved.
   """
   @spec rate_changed(t(), term(), integer()) :: t()
-  def rate_changed(%__MODULE__{} = meter, rate, now_ms) do
+  def rate_changed(%__MODULE__{rate: current} = meter, rate, now_ms) do
     case known_rate(rate) do
       nil ->
+        meter
+
+      ^current ->
         meter
 
       rate ->

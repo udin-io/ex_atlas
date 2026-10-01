@@ -1171,6 +1171,21 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       {pid, compute.id}
     end
 
+    # Until a status poll has carried `rate` into the tracker's compute.
+    defp await_tracked_rate(id, rate, tries \\ 400) do
+      case ExAtlas.Orchestrator.info(id) do
+        {:ok, %{compute: %{cost_per_hour: ^rate}}} ->
+          :ok
+
+        _ when tries > 0 ->
+          Process.sleep(5)
+          await_tracked_rate(id, rate, tries - 1)
+
+        other ->
+          flunk("no poll carried cost_per_hour #{inspect(rate)}: #{inspect(other)}")
+      end
+    end
+
     defp next_events(id, count) do
       for _ <- 1..count do
         assert_receive {:atlas_compute, ^id, event}, 2_000
@@ -1219,6 +1234,50 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       assert is_float(first)
       assert second > first
+    end
+
+    test "a price that rises after spawn is charged from the next poll", %{base: base} do
+      {pid, id} =
+        spawn_capped(base,
+          max_cost: 0.05,
+          status_poll_ms: 10,
+          provider_opts: %{cost_per_hour: 0.0}
+        )
+
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 100
+
+      :ok = Mock.set_cost_per_hour(id, @per_second)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a price that drops to zero before the cap cancels the armed timer", %{base: base} do
+      # Armed at $1/s for 500 ms; the poll lands within a few tens of ms.
+      started = System.monotonic_time(:millisecond)
+      {pid, id} = spawn_capped(base, max_cost: 0.5, status_poll_ms: 10)
+
+      :ok = Mock.set_cost_per_hour(id, 0.0)
+      await_tracked_rate(id, 0.0)
+
+      wait_past_original_cap = max(started + 700 - System.monotonic_time(:millisecond), 0)
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, wait_past_original_cap
+      assert Process.alive?(pid)
+      assert {:ok, %{spent_usd: spent}} = ExAtlas.Orchestrator.info(id)
+      assert spent < 0.5
+    end
+
+    test "a poll that reports no price keeps the last one", %{base: base} do
+      {pid, id} = spawn_capped(base, max_cost: 0.2, status_poll_ms: 10)
+      ref = Process.monitor(pid)
+
+      :ok = Mock.set_cost_per_hour(id, nil)
+      await_tracked_rate(id, nil)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
 
     test "without a cap the same price ends nothing", %{base: base} do
