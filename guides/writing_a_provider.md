@@ -112,6 +112,10 @@ alias it in your own wrapper module or add it to your host app's
   caller of `ExAtlas.list_network_volumes/1` then gets
   `{:error, %ExAtlas.Error{kind: :unsupported}}` from the facade; no stub is
   needed.
+- `list_templates/1`, `get_template/2`, `create_template/2`,
+  `delete_template/2` — skip if your cloud has no saved pod templates, and
+  declare `:manage_templates` only when you implement all four. Same
+  `:unsupported` answer from the facade.
 
 ## Register GPU mappings
 
