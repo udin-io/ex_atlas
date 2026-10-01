@@ -232,7 +232,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       default: @default_finish_grace_ms
     ],
     user_id: [type: :any, default: nil],
-    persist: [type: :boolean, default: false]
+    persist: [type: :boolean, default: false],
+    max_cost: [
+      type: {:or, [{:custom, __MODULE__, :validate_max_cost, []}, {:in, [false]}]},
+      default: false
+    ]
   ]
 
   @option_keys Keyword.keys(@schema)
@@ -290,8 +294,33 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
-      validate_persist_mode(tracking)
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema),
+         {:ok, tracking} <- validate_persist_mode(tracking) do
+      validate_persisted_cap(tracking)
+    end
+  end
+
+  @doc false
+  def validate_max_cost(dollars) when is_number(dollars) and dollars > 0, do: {:ok, dollars}
+
+  def validate_max_cost(other),
+    do: {:error, "expected a positive number of US dollars, got: #{inspect(other)}"}
+
+  # An adopted task rebuilds its tracker from the record, which does not carry
+  # the spend yet, so its budget would refill on every restart. Slice 2 of the
+  # cost-cap feature stores the spend and lifts this.
+  defp validate_persisted_cap(tracking) do
+    if tracking[:persist] and tracking[:max_cost] do
+      {:error,
+       %NimbleOptions.ValidationError{
+         key: :max_cost,
+         value: tracking[:max_cost],
+         message:
+           "invalid value for :max_cost option: a persisted task cannot carry a cost cap yet. " <>
+             "Its spend is not recorded, so an adopted task would start a fresh budget."
+       }}
+    else
+      {:ok, tracking}
     end
   end
 
