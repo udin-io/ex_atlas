@@ -2,18 +2,15 @@ defmodule ExAtlas.Providers.RunPod do
   @moduledoc """
   `ExAtlas.Provider` implementation for [RunPod](https://runpod.io).
 
-  Wraps three RunPod APIs through the single ExAtlas contract:
+  Wraps two RunPod APIs through the single ExAtlas contract:
 
     * **REST management** — pod/endpoint/template/network-volume CRUD and pod
-      lifecycle operations. Base URL `https://api.runpod.io/v2`.
+      lifecycle operations, and the GPU catalog. Base URL `https://api.runpod.io/v2`.
     * **Serverless runtime** — job submission, status, streaming against a
       specific endpoint. Base URL `https://api.runpod.ai/v2/<endpoint_id>`.
-    * **Legacy GraphQL** — the only surface that exposes GPU catalog pricing.
-      Base URL `https://api.runpod.io/graphql`.
 
   All calls go through `Req` (see `ExAtlas.Providers.RunPod.Client`). Authentication
-  uses `Authorization: Bearer <api_key>` for REST/runtime and `?api_key=` for
-  GraphQL. Every request emits a `[:ex_atlas, :runpod, :request]` telemetry event.
+  uses `Authorization: Bearer <api_key>`. Every request emits a `[:ex_atlas, :runpod, :request]` telemetry event.
 
   ## Capabilities
 

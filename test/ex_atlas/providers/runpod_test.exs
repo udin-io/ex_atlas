@@ -490,8 +490,8 @@ defmodule ExAtlas.Providers.RunPodTest do
 
   describe "serverless jobs through the top-level API" do
     setup %{bypass: bypass, ctx_opts: opts} do
-      # `Client.runtime/2` always targets api.runpod.ai; route it at Bypass the
-      # same way the GraphQL test does.
+      # `Client.runtime/2` always targets api.runpod.ai; route it at Bypass with
+      # `req_options`.
       job_opts =
         Keyword.merge(opts,
           endpoint: "abc123",
