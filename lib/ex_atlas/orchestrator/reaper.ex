@@ -84,7 +84,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   require Logger
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, TrackingStore}
+  alias ExAtlas.Orchestrator.{ComputeRegistry, Ownership, TrackingStore}
 
   @default_interval_ms 60 * 1_000
 
@@ -100,7 +100,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   def init(_opts) do
     config = config()
     schedule(config.interval)
-    {:ok, Map.merge(config, %{adoption: initial_adoption(), announced?: false})}
+
+    {:ok,
+     Map.merge(config, %{adoption: initial_adoption(), announced: nil, left_alone: MapSet.new()})}
   end
 
   # With no tracking store there is nothing to adopt and nothing to wait for,
@@ -110,54 +112,89 @@ defmodule ExAtlas.Orchestrator.Reaper do
   end
 
   @impl true
-  def handle_info(:reap, %{adoption: :settled} = state) do
-    Enum.each(state.providers, &reap_provider(&1, state.prefix, state.grace_ms))
-    schedule(state.interval)
-    {:noreply, state}
-  end
-
-  # Adoption has not run yet, or could not. Either way every adoptable resource
-  # currently looks exactly like an orphan, so this tick does nothing at all.
   def handle_info(:reap, state) do
     schedule(state.interval)
-    {:noreply, announce(state)}
+
+    case gate(state) do
+      {:ok, owner} ->
+        left_alone =
+          Enum.reduce(state.providers, state.left_alone, fn provider, seen ->
+            reap_provider(provider, state.prefix, state.grace_ms, owner, seen)
+          end)
+
+        {:noreply, %{state | left_alone: left_alone, announced: nil}}
+
+      {:closed, reason} ->
+        {:noreply, announce(state, reason)}
+    end
   end
 
   def handle_info(:adoption_complete, state),
-    do: {:noreply, %{state | adoption: :settled, announced?: false}}
+    do: {:noreply, %{state | adoption: :settled, announced: nil}}
 
   def handle_info(:adoption_failed, state),
-    do: {:noreply, %{state | adoption: :failed, announced?: false}}
+    do: {:noreply, %{state | adoption: :failed, announced: nil}}
 
   @impl true
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # Adoption has not run yet, or could not: every adoptable resource looks
+  # like an orphan. Then the owner: an invalid one reaps nothing.
+  defp gate(%{adoption: :pending}), do: {:closed, :adoption_pending}
+  defp gate(%{adoption: :failed}), do: {:closed, :adoption_failed}
+  defp gate(_state), do: ownership_gate(Ownership.owner())
+
+  defp ownership_gate({:error, error}), do: {:closed, {:invalid_owner, error}}
+
+  defp ownership_gate({:ok, owner}), do: {:ok, owner}
+
   # Once per state change, not once per tick: an operator needs to know the
   # Reaper is off, and needs it to still be readable an hour later.
-  defp announce(%{announced?: true} = state), do: state
+  defp announce(%{announced: reason} = state, reason), do: state
 
-  defp announce(%{adoption: :failed} = state) do
+  defp announce(state, reason) do
+    log_closed(reason)
+    %{state | announced: reason}
+  end
+
+  defp log_closed(:adoption_failed) do
     Logger.error(
       "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED for this boot: the tracking store " <>
         "could not be read, so this node cannot tell which running compute is its own. " <>
         "Untracked compute will keep billing until you reclaim it by hand."
     )
-
-    %{state | announced?: true}
   end
 
-  defp announce(state) do
+  defp log_closed(:adoption_pending) do
     Logger.info(
       "[ExAtlas.Orchestrator.Reaper] skipping this cycle until boot-time adoption settles"
     )
-
-    %{state | announced?: true}
   end
 
-  @doc "Run a single reap cycle. Useful in tests."
+  defp log_closed({:invalid_owner, error}) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED: #{Exception.message(error)}. " <>
+        "Untracked compute will keep billing until you fix :reap_owner."
+    )
+  end
+
+  @doc """
+  Run a single reap cycle. Useful in tests.
+
+  It applies the owner rules of a periodic tick, but not the adoption gate, and
+  it logs every pod it leaves alone.
+  """
   def reap_now(prefix \\ "atlas-", providers \\ [:runpod]) do
     grace_ms = config().grace_ms
-    Enum.each(providers, &reap_provider(&1, prefix, grace_ms))
+
+    case ownership_gate(Ownership.owner()) do
+      {:ok, owner} ->
+        Enum.each(providers, &reap_provider(&1, prefix, grace_ms, owner, MapSet.new()))
+
+      {:closed, reason} ->
+        log_closed(reason)
+    end
+
     :ok
   end
 
@@ -173,23 +210,55 @@ defmodule ExAtlas.Orchestrator.Reaper do
     }
   end
 
-  defp reap_provider(provider, prefix, grace_ms) do
+  # Returns the ids left alone so far, so a periodic Reaper logs each one once
+  # per boot rather than once per tick.
+  defp reap_provider(provider, prefix, grace_ms, owner, left_alone) do
     case ExAtlas.list_compute(provider: provider) do
       {:ok, computes} ->
         tracked = registered_ids()
         store = TrackingStore.impl()
         now = DateTime.utc_now()
 
-        computes
-        |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
-        |> Enum.each(fn compute ->
+        {ours, others} =
+          computes
+          |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
+          |> Enum.split_with(&owned?(&1, prefix, owner))
+
+        Enum.each(ours, fn compute ->
           _ = ExAtlas.terminate(compute.id, provider: provider)
         end)
 
+        Enum.reduce(others, left_alone, &leave_alone(&1, prefix, owner, &2))
+
       _ ->
-        :ok
+        left_alone
     end
   end
+
+  # With no owner the gate has already checked this node is alone, and every
+  # untracked prefixed pod is its own, as before owners existed.
+  defp owned?(_compute, _prefix, nil), do: true
+
+  defp owned?(compute, prefix, owner),
+    do: Ownership.classify(compute.name, prefix, owner) == :ours
+
+  defp leave_alone(compute, prefix, owner, seen) do
+    if MapSet.member?(seen, compute.id) do
+      seen
+    else
+      Logger.warning(
+        "[ExAtlas.Orchestrator.Reaper] leaving #{compute.id} (#{compute.name}) alone: " <>
+          "#{describe_owner(Ownership.classify(compute.name, prefix, owner))}, " <>
+          "and this node's :reap_owner is #{inspect(owner)}. If no node owns it any more, " <>
+          "delete it by hand."
+      )
+
+      MapSet.put(seen, compute.id)
+    end
+  end
+
+  defp describe_owner({:other, other}), do: "its name carries owner #{inspect(other)}"
+  defp describe_owner(:unowned), do: "its name carries no owner"
 
   defp orphan?(compute, tracked, store, prefix, now, grace_ms) do
     compute.status in @billing_statuses and

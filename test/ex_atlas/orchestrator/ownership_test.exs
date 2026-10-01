@@ -5,6 +5,8 @@ defmodule ExAtlas.Orchestrator.OwnershipTest do
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
+  doctest ExAtlas.Orchestrator.Ownership
+
   setup do
     TestOrchestrator.start!()
     :ok

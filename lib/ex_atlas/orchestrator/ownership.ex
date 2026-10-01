@@ -9,8 +9,19 @@ defmodule ExAtlas.Orchestrator.Ownership do
 
       config :ex_atlas, :orchestrator, reap_owner: "m1"
 
-  `ExAtlas.Orchestrator.spawn/1` writes it into the pod name, so
-  `atlas-train-42` becomes `atlas-m1-train-42`.
+  `ExAtlas.Orchestrator.spawn/1` writes it into the pod name, and the Reaper
+  deletes only untracked pods that carry it:
+
+      iex> ExAtlas.Orchestrator.Ownership.classify("atlas-m1-train-42", "atlas-", "m1")
+      :ours
+      iex> ExAtlas.Orchestrator.Ownership.classify("atlas-m2-train-42", "atlas-", "m1")
+      {:other, "m2"}
+      iex> ExAtlas.Orchestrator.Ownership.classify("atlas-m1", "atlas-", "m1")
+      :unowned
+      iex> ExAtlas.Orchestrator.Ownership.classify("atlas-", "atlas-", "m1")
+      :unowned
+      iex> ExAtlas.Orchestrator.Ownership.classify("atlas-M1-train-42", "atlas-", "m1")
+      {:other, "M1"}
 
   The owner must stay the same across restarts of one node, or the restarted
   node leaves its own crash leftovers to the operator. On Fly that is
@@ -102,4 +113,22 @@ defmodule ExAtlas.Orchestrator.Ownership do
   end
 
   defp stamp_name(name, _prefix, _owner), do: name
+
+  @doc """
+  Whose pod `name` is, for a node whose owner is `owner`.
+
+  `:unowned` means the name has no owner segment: no dash after the prefix,
+  or nothing before that dash.
+  """
+  @spec classify(String.t(), String.t(), String.t()) ::
+          :ours | {:other, String.t()} | :unowned
+  def classify(name, prefix, owner) do
+    with true <- String.starts_with?(name, prefix),
+         [segment, _rest] <- String.split(String.replace_prefix(name, prefix, ""), "-", parts: 2),
+         true <- segment != "" do
+      if segment == owner, do: :ours, else: {:other, segment}
+    else
+      _ -> :unowned
+    end
+  end
 end
