@@ -57,6 +57,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `ExAtlas.Orchestrator.TaskOutcome`, so this server keeps two extra timers and
   one extra branch rather than a second personality.
 
+  ## The cost cap
+
+  With `max_cost: dollars` the server keeps an `ExAtlas.Orchestrator.CostMeter`
+  from `init/1`: the resource's `cost_per_hour` times the time it has run,
+  summed over segments. A status poll that reports a new price, and a respawn,
+  each start a segment. The server arms one timer for the moment spend reaches
+  the cap at the current rate, rather than checking on the heartbeat, which
+  never runs in task mode. When it fires, an interactive session broadcasts
+  `{:terminating, :cost_cap}` and a task broadcasts `{:task, {:failed,
+  :cost_cap}}` first; both stop, and `terminate/2` deletes the resource. A cost
+  cap is never respawned, and a respawn carries the spend, as it carries the
+  `:max_runtime_ms` deadline.
+
   ## Adopted trackers
 
   With `persist: true` a task is recorded in an
