@@ -55,6 +55,7 @@ defmodule ExAtlas.Orchestrator do
     ComputeRegistry,
     ComputeServer,
     ComputeSupervisor,
+    CostMeter,
     Events,
     Ownership,
     TrackingStore
@@ -118,9 +119,29 @@ defmodule ExAtlas.Orchestrator do
     with {:ok, opts} <- Callback.prepare(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),
-         {:ok, compute} <- ExAtlas.spawn_compute(opts) do
+         {:ok, compute} <- ExAtlas.spawn_compute(opts),
+         :ok <- require_price(compute, opts, tracking) do
       persist(compute, opts, tracking)
       track(compute, opts, tracking)
+    end
+  end
+
+  # A cap needs a price to multiply. Without one the tracker would hold a cap
+  # the caller believes in and nothing enforces, so the pod goes now, before a
+  # tracker or a record exists.
+  defp require_price(compute, opts, tracking) do
+    if tracking[:max_cost] && not CostMeter.priced?(compute.cost_per_hour) do
+      _ = ExAtlas.terminate(compute.id, opts)
+
+      {:error,
+       ExAtlas.Error.new(:unsupported,
+         provider: compute.provider,
+         message:
+           "max_cost needs the pod's hourly price, and the provider reported none " <>
+             "(cost_per_hour: #{inspect(compute.cost_per_hour)}). The pod was deleted."
+       )}
+    else
+      :ok
     end
   end
 

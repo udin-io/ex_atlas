@@ -1350,6 +1350,30 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:atlas_compute, ^new_id, {:terminating, :cost_cap}}, 2_000
     end
 
+    test "a cap on a provider that reports no price deletes the pod and says so",
+         %{base: base} do
+      assert {:error, %ExAtlas.Error{kind: :unsupported, message: message}} =
+               ExAtlas.Orchestrator.spawn(
+                 Keyword.merge(base, max_cost: 1, provider_opts: %{cost_per_hour: nil})
+               )
+
+      assert message =~ "price"
+      assert {:ok, [%{status: :terminated}]} = ExAtlas.list_compute(provider: :mock)
+      assert ExAtlas.Orchestrator.list_ids() == []
+    end
+
+    test "a provider that reports no price still spawns and tracks without a cap",
+         %{base: base} do
+      assert {:ok, pid, compute} =
+               ExAtlas.Orchestrator.spawn(
+                 Keyword.merge(base, provider_opts: %{cost_per_hour: nil})
+               )
+
+      assert Process.alive?(pid)
+      assert compute.cost_per_hour == nil
+      assert ExAtlas.Orchestrator.list_ids() == [compute.id]
+    end
+
     test "without a cap the same price ends nothing", %{base: base} do
       {pid, id} = spawn_capped(base, [])
       ref = Process.monitor(pid)

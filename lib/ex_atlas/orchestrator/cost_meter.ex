@@ -93,6 +93,18 @@ defmodule ExAtlas.Orchestrator.CostMeter do
     max(ceil(left * @ms_per_hour / meter.rate), 0)
   end
 
+  @doc """
+  Whether `rate` is a price the meter can read: a non-negative number or a
+  `Decimal`.
+
+      iex> ExAtlas.Orchestrator.CostMeter.priced?(2.99)
+      true
+      iex> ExAtlas.Orchestrator.CostMeter.priced?(nil)
+      false
+  """
+  @spec priced?(term()) :: boolean()
+  def priced?(rate), do: not is_nil(known_rate(rate))
+
   defp known_rate(rate) when is_number(rate) and rate >= 0, do: rate / 1
 
   # Decimal is not a dependency of ExAtlas, so its struct is read through its
