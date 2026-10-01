@@ -55,6 +55,7 @@ defmodule ExAtlas.Orchestrator do
     ComputeRegistry,
     ComputeServer,
     ComputeSupervisor,
+    CostMeter,
     Events,
     Ownership,
     TrackingStore
@@ -86,7 +87,7 @@ defmodule ExAtlas.Orchestrator do
 
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
   `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`,
-  `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`)
+  `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`, `:max_cost`)
   are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
@@ -100,6 +101,22 @@ defmodule ExAtlas.Orchestrator do
   every respawn and the tracking record carry that name. See
   `ExAtlas.Orchestrator.Ownership`. An invalid `:reap_owner` returns
   `{:error, %ExAtlas.Error{kind: :validation}}` before the provider is called.
+
+  ## `max_cost` — a cost cap in US dollars
+
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.spawn(provider: :runpod, gpu: :h100, image: "...", max_cost: 2.50)
+
+  The tracker multiplies the pod's `cost_per_hour` by the time it has run. When
+  that reaches `max_cost` it broadcasts `{:terminating, :cost_cap}` and deletes
+  the pod. It is an estimate from the price the provider reports, not a bill:
+  a status poll with a new price re-prices the rest of the run, and a poll
+  with no price keeps the last one. `info/1` reports `:spent_usd`.
+
+  A positive number, or `false` (the default). A provider that reports no
+  price gets its pod deleted and `{:error, %ExAtlas.Error{kind: :unsupported}}`
+  back, since a cap nothing can enforce is worse than none. `persist: true`
+  with a cap is refused for now: the record does not carry the spend yet.
 
   ## `persist: true` — surviving a deploy
 
@@ -118,9 +135,39 @@ defmodule ExAtlas.Orchestrator do
     with {:ok, opts} <- Callback.prepare(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),
-         {:ok, compute} <- ExAtlas.spawn_compute(opts) do
+         {:ok, compute} <- ExAtlas.spawn_compute(opts),
+         :ok <- require_price(compute, opts, tracking) do
       persist(compute, opts, tracking)
       track(compute, opts, tracking)
+    end
+  end
+
+  # A cap needs a price to multiply. Without one the tracker would hold a cap
+  # the caller believes in and nothing enforces, so the pod goes now, before a
+  # tracker or a record exists.
+  defp require_price(compute, opts, tracking) do
+    if tracking[:max_cost] && not CostMeter.priced?(compute.cost_per_hour) do
+      {:error,
+       ExAtlas.Error.new(:unsupported,
+         provider: compute.provider,
+         message:
+           "max_cost needs the pod's hourly price, and the provider reported none " <>
+             "(cost_per_hour: #{inspect(compute.cost_per_hour)}). " <>
+             delete_unpriced(compute, opts)
+       )}
+    else
+      :ok
+    end
+  end
+
+  defp delete_unpriced(compute, opts) do
+    case ExAtlas.terminate(compute.id, opts) do
+      :ok ->
+        "The pod was deleted."
+
+      {:error, error} ->
+        "The pod #{compute.id} could not be deleted and may still bill: " <>
+          Exception.message(error)
     end
   end
 
@@ -187,7 +234,10 @@ defmodule ExAtlas.Orchestrator do
     * `{:task, :completed}`
     * `{:task, :timed_out}`
     * `{:task, {:failed, reason}}` — `:never_ready`, `:preempted`,
-      `:terminated`, `:failed`, or `{:exit_code, n}`
+      `:terminated`, `:failed`, `:cost_cap`, or `{:exit_code, n}`
+
+  `max_cost` works here as in `spawn/1`. There is no default: `:max_runtime_ms`
+  stays the backstop, because no dollar figure fits every GPU.
 
   ## Reporting back: the `:callback` option
 
@@ -458,8 +508,10 @@ defmodule ExAtlas.Orchestrator do
   Fetch the latest tracked state for a resource.
 
   The map holds `:compute`, `:user_id`, `:idle_ttl_ms`, `:last_activity_ms`,
-  `:mode`, and `:max_runtime_remaining_ms` — milliseconds left on a task's
-  `:max_runtime_ms` deadline, or `nil` when there is no deadline.
+  `:mode`, `:max_runtime_remaining_ms` — milliseconds left on a task's
+  `:max_runtime_ms` deadline, or `nil` when there is no deadline — `:max_cost`
+  (dollars, or `false`), and `:spent_usd`, the estimated spend so far (`0.0`
+  without a cap).
   """
   @spec info(String.t()) :: {:ok, map()} | {:error, :not_tracked}
   def info(id) do

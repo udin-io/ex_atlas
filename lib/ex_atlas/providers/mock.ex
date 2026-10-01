@@ -68,7 +68,17 @@ defmodule ExAtlas.Providers.Mock do
   code that reacts to upstream status can be exercised without the network.
   """
   @spec set_status(String.t(), Spec.Compute.status()) :: :ok | {:error, ExAtlas.Error.t()}
-  def set_status(id, status), do: update_status(id, status)
+  def set_status(id, status), do: update_compute(id, &%{&1 | status: status})
+
+  @doc """
+  Change a stored resource's hourly price, the way a spot price moves.
+
+  The next `get_compute/2` reports it, so a status poll sees the change. A
+  spawn takes its starting price from `provider_opts: %{cost_per_hour: rate}`
+  (default `0.0`; `nil` spawns a resource that reports no price).
+  """
+  @spec set_cost_per_hour(String.t(), float() | nil) :: :ok | {:error, ExAtlas.Error.t()}
+  def set_cost_per_hour(id, rate), do: update_compute(id, &%{&1 | cost_per_hour: rate})
 
   @doc """
   Drop a resource from the store entirely, so it 404s like a pod that was
@@ -102,7 +112,7 @@ defmodule ExAtlas.Providers.Mock do
       ports: ports,
       gpu_type: Atom.to_string(req.gpu),
       gpu_count: req.gpu_count,
-      cost_per_hour: 0.0,
+      cost_per_hour: Map.get(req.provider_opts, :cost_per_hour, 0.0),
       region: List.first(req.region_hints),
       image: req.image,
       name: req.name,
@@ -138,10 +148,10 @@ defmodule ExAtlas.Providers.Mock do
   end
 
   @impl true
-  def stop(id, _ctx), do: update_status(id, :stopped)
+  def stop(id, _ctx), do: set_status(id, :stopped)
 
   @impl true
-  def start(id, _ctx), do: update_status(id, :running)
+  def start(id, _ctx), do: set_status(id, :running)
 
   @impl true
   def terminate(id, _ctx) do
@@ -236,12 +246,12 @@ defmodule ExAtlas.Providers.Mock do
 
   # --- helpers ---
 
-  defp update_status(id, status) do
+  defp update_compute(id, fun) do
     ensure_started()
 
     case :ets.lookup(@table, {:compute, id}) do
       [{key, compute}] ->
-        :ets.insert(@table, {key, %{compute | status: status}})
+        :ets.insert(@table, {key, fun.(compute)})
         :ok
 
       [] ->

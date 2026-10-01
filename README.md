@@ -821,6 +821,34 @@ ExAtlas.Orchestrator.UpstreamStatus.observe(pod_id, provider: :runpod, spot: tru
 # {:poll_failed, %ExAtlas.Error{}}
 ```
 
+### A cost cap: `max_cost`
+
+```elixir
+{:ok, _pid, compute} =
+  ExAtlas.Orchestrator.spawn(gpu: :h100, image: "ghcr.io/me/app:latest", max_cost: 2.50)
+
+ExAtlas.Orchestrator.info(compute.id)
+# {:ok, %{..., max_cost: 2.5, spent_usd: 0.41}}
+```
+
+The tracker multiplies the pod's `cost_per_hour` by the time it has run, and
+deletes the pod when that reaches `max_cost` US dollars. Subscribers get
+`{:terminating, :cost_cap}`; a task gets `{:task, {:failed, :cost_cap}}` first.
+It works in both modes and calls no billing API.
+
+* The spend is an estimate from the price the provider reports. A status poll
+  with a new price re-prices the rest of the run; a poll with no price keeps
+  the last one. A respawn carries the spend and is never triggered by the cap.
+* A timer fires at the moment the cap is reached, not on the next heartbeat.
+* A provider that reports no price (`cost_per_hour: nil`) gets its pod deleted
+  and `{:error, %ExAtlas.Error{kind: :unsupported}}` back.
+* `persist: true` with `max_cost` is refused until the tracking record carries
+  the spend.
+
+| Option      | Default | Meaning                                              |
+| ----------- | ------- | ---------------------------------------------------- |
+| `:max_cost` | `false` | US dollars; a positive number. Delete the pod at it  |
+
 ### PubSub events
 
 Every state change is broadcast over `ExAtlas.PubSub` on the topic
@@ -836,6 +864,7 @@ Every state change is broadcast over `ExAtlas.PubSub` on the topic
 | `{:respawned, new_id}`               | Preempted resource replaced (sent on the old id)                               |
 | `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned                                                |
 | `{:task, outcome}`                   | A `mode: :task` session ended: `:completed`, `:timed_out`, `{:failed, reason}`  |
+| `{:terminating, :cost_cap}`          | The estimated spend reached `max_cost`; teardown follows                        |
 | `{:terminating, reason}`             | Server is about to shut down                                                   |
 | `{:status, :terminated}`             | Upstream provider confirmed termination, or had nothing left to terminate       |
 | `{:terminate_failed, error}`         | Upstream `terminate` call returned an error                                    |
@@ -879,6 +908,7 @@ Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:" <> compute.id)
 | `:self_terminate`   | `true`     | Wrap `:command` so the resource destroys itself on exit     |
 | `:max_runtime_ms`   | 60 min     | Wall-clock deadline **from spawn**; then `DELETE`           |
 | `:ready_timeout_ms` | 15 min     | Fail as `:never_ready` if still provisioning when it fires  |
+| `:max_cost`         | `false`    | US dollars; fail as `:cost_cap` when the spend reaches it   |
 
 Task mode is the same `ComputeServer`, so everything above still applies —
 the status poll, the backoff, the guaranteed `DELETE` on teardown, the respawn

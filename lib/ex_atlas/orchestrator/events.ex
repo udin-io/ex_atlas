@@ -40,7 +40,8 @@ defmodule ExAtlas.Orchestrator.Events do
       `mode: :task` it also ends the task: either the usual disappearance
       confirms it, or a `:finish_grace_ms` timer does.
     * `{:task, outcome}` — a `mode: :task` session ended, and this is what
-      happened: `:completed`, `:timed_out`, or `{:failed, reason}`. Sent
+      happened: `:completed`, `:timed_out`, or `{:failed, reason}`, where
+      `reason` is `:cost_cap` when the spend reached `:max_cost`. Sent
       *before* the `{:terminating, _}` / `{:status, :terminated}` pair, so a
       subscriber that ignores task events still sees a correct lifecycle.
       Without a `{:task_report, _}` first, `:completed` means the container
@@ -51,7 +52,10 @@ defmodule ExAtlas.Orchestrator.Events do
     * `{:terminating, reason}` — server is shutting down. `reason` is
       `{:shutdown, :stopped}` after `ExAtlas.Orchestrator.stop_tracked/1`,
       `:shutdown` when its supervisor stops it (a node stop), `:normal` when
-      the session ended itself, and anything else on a crash.
+      the session ended itself, and anything else on a crash. A session that
+      ends itself for a reason of its own announces that reason first:
+      `{:terminating, :idle_timeout}` or `{:terminating, :cost_cap}`, then
+      `{:terminating, :normal}`.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 
   Statuses are ordinary state changes, not necessarily endings: a session that

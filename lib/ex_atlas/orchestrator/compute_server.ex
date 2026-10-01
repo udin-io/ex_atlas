@@ -57,6 +57,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `ExAtlas.Orchestrator.TaskOutcome`, so this server keeps two extra timers and
   one extra branch rather than a second personality.
 
+  ## The cost cap
+
+  With `max_cost: dollars` the server keeps an `ExAtlas.Orchestrator.CostMeter`
+  from `init/1`: the resource's `cost_per_hour` times the time it has run,
+  summed over segments. A status poll that reports a new price, and a respawn,
+  each start a segment. The server arms one timer for the moment spend reaches
+  the cap at the current rate, rather than checking on the heartbeat, which
+  never runs in task mode. When it fires, an interactive session broadcasts
+  `{:terminating, :cost_cap}` and a task broadcasts `{:task, {:failed,
+  :cost_cap}}` first; both stop, and `terminate/2` deletes the resource. A cost
+  cap is never respawned, and a respawn carries the spend, as it carries the
+  `:max_runtime_ms` deadline.
+
   ## Adopted trackers
 
   With `persist: true` a task is recorded in an
@@ -158,7 +171,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   use GenServer
 
-  alias ExAtlas.Orchestrator.{ComputeRegistry, Events, TaskOutcome, TrackingStore, UpstreamStatus}
+  alias ExAtlas.Orchestrator.{
+    ComputeRegistry,
+    CostMeter,
+    Events,
+    TaskOutcome,
+    TrackingStore,
+    UpstreamStatus
+  }
+
   alias ExAtlas.Spec
 
   @task_supervisor ExAtlas.Orchestrator.TaskSupervisor
@@ -232,7 +253,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       default: @default_finish_grace_ms
     ],
     user_id: [type: :any, default: nil],
-    persist: [type: :boolean, default: false]
+    persist: [type: :boolean, default: false],
+    max_cost: [
+      type: {:or, [{:custom, __MODULE__, :validate_max_cost, []}, {:in, [false]}]},
+      default: false
+    ]
   ]
 
   @option_keys Keyword.keys(@schema)
@@ -256,7 +281,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           finish_grace_ms: pos_integer() | nil,
           report: TaskOutcome.report(),
           user_id: term() | nil,
-          store: module() | nil
+          store: module() | nil,
+          cost_meter: CostMeter.t() | nil,
+          cost_timer: {reference(), reference()} | nil
         }
 
   @doc false
@@ -290,8 +317,33 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
-      validate_persist_mode(tracking)
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema),
+         {:ok, tracking} <- validate_persist_mode(tracking) do
+      validate_persisted_cap(tracking)
+    end
+  end
+
+  @doc false
+  def validate_max_cost(dollars) when is_number(dollars) and dollars > 0, do: {:ok, dollars}
+
+  def validate_max_cost(other),
+    do: {:error, "expected a positive number of US dollars, got: #{inspect(other)}"}
+
+  # An adopted task rebuilds its tracker from the record, which does not carry
+  # the spend yet, so its budget would refill on every restart. Slice 2 of the
+  # cost-cap feature stores the spend and lifts this.
+  defp validate_persisted_cap(tracking) do
+    if tracking[:persist] and tracking[:max_cost] do
+      {:error,
+       %NimbleOptions.ValidationError{
+         key: :max_cost,
+         value: tracking[:max_cost],
+         message:
+           "invalid value for :max_cost option: a persisted task cannot carry a cost cap yet. " <>
+             "Its spend is not recorded, so an adopted task would start a fresh budget."
+       }}
+    else
+      {:ok, tracking}
     end
   end
 
@@ -363,13 +415,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
     remaining_ms = remaining_runtime_ms(record)
 
-    state = %{
-      new_state(compute, opts, tracking)
-      | respawns: record.respawns,
-        report: record.report,
-        deadline_at_ms: deadline_at(remaining_ms),
-        store: TrackingStore.impl()
-    }
+    state =
+      arm_cost_cap(%{
+        new_state(compute, opts, tracking)
+        | respawns: record.respawns,
+          report: record.report,
+          deadline_at_ms: deadline_at(remaining_ms),
+          store: TrackingStore.impl()
+      })
 
     register_callback(state.callback_task_id)
     Events.broadcast(compute.id, {:status, compute.status})
@@ -387,7 +440,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     # Already validated by `ExAtlas.Orchestrator.spawn/1`; re-run so a directly
     # started tracker gets the same defaults and the same clear failure.
     tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
-    state = new_state(compute, opts, tracking)
+    state = compute |> new_state(opts, tracking) |> arm_cost_cap()
 
     register_callback(state.callback_task_id)
     Events.broadcast(compute.id, {:status, compute.status})
@@ -418,7 +471,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       finish_grace_ms: finish_grace(tracking[:finish_grace_ms]),
       report: nil,
       user_id: tracking[:user_id],
-      store: store_for(tracking[:persist])
+      store: store_for(tracking[:persist]),
+      cost_meter: cost_meter(tracking[:max_cost], compute),
+      cost_timer: nil
     }
   end
 
@@ -444,6 +499,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       state
       |> Map.take([:compute, :last_activity_ms, :user_id, :idle_ttl_ms, :mode])
       |> Map.put(:max_runtime_remaining_ms, remaining_ms(state.deadline_at_ms))
+      |> Map.merge(cost_info(state.cost_meter))
 
     {:reply, info, state}
   end
@@ -476,6 +532,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     do: finish({:failed, :never_ready}, state)
 
   def handle_info(:ready_timeout, state), do: {:noreply, state}
+
+  # Only the timer armed last carries the ref in state. One cancelled after it
+  # fired arrives with an older ref and falls to the catch-all.
+  def handle_info({:cost_cap, ref}, %{cost_timer: {_timer, ref}} = state) do
+    state = %{state | cost_timer: nil}
+
+    if CostMeter.capped?(state.cost_meter, now_ms()) do
+      stop_on_cost_cap(state)
+    else
+      # Float rounding left the spend a hair under the cap.
+      {:noreply, arm_cost_cap(state)}
+    end
+  end
 
   def handle_info(:status_poll, %{poll_task: nil} = state) do
     case start_poll(state) do
@@ -645,6 +714,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     {:stop, :normal, state}
   end
 
+  # The task outcome first, like `finish/2`, then the cause on `:terminating`
+  # the way `:idle_timeout` announces itself.
+  defp stop_on_cost_cap(state) do
+    if state.mode == :task,
+      do: Events.broadcast(state.compute.id, {:task, {:failed, :cost_cap}})
+
+    Events.broadcast(state.compute.id, {:terminating, :cost_cap})
+    {:stop, :normal, state}
+  end
+
   # `get_compute/2` can't return the auth handle — it was minted locally at
   # spawn and never left this node — so carry it across every refresh.
   defp refresh_compute(state, upstream) do
@@ -654,7 +733,18 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       Events.broadcast(state.compute.id, {:status, upstream.status})
     end
 
-    %{state | compute: upstream}
+    reprice(%{state | compute: upstream})
+  end
+
+  # A new price closes the meter's segment and re-arms the cap timer. A price
+  # the meter cannot read, or the same price, changes nothing.
+  defp reprice(%{cost_meter: nil} = state), do: state
+
+  defp reprice(%{cost_meter: meter} = state) do
+    case CostMeter.rate_changed(meter, state.compute.cost_per_hour, now_ms()) do
+      ^meter -> state
+      repriced -> arm_cost_cap(%{state | cost_meter: repriced})
+    end
   end
 
   # --- respawn ---
@@ -688,14 +778,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         Events.broadcast(old_id, {:respawned, replacement.id})
         Events.broadcast(replacement.id, {:status, replacement.status})
 
-        state = %{
-          state
-          | compute: replacement,
-            respawns: state.respawns + 1,
-            poll_failures: 0,
-            upstream_deletable?: true,
-            last_activity_ms: now_ms()
-        }
+        # The meter carries over, like the deadline: a replacement continues
+        # the old budget at its own price.
+        state =
+          reprice(%{
+            state
+            | compute: replacement,
+              respawns: state.respawns + 1,
+              poll_failures: 0,
+              upstream_deletable?: true,
+              last_activity_ms: now_ms()
+          })
 
         schedule_status_poll(state)
         {:noreply, state}
@@ -890,6 +983,34 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, nil)
     :ok
   end
+
+  defp cost_meter(false, _compute), do: nil
+  defp cost_meter(max_cost, compute), do: CostMeter.new(max_cost, compute.cost_per_hour, now_ms())
+
+  defp cost_info(nil), do: %{max_cost: false, spent_usd: 0.0}
+
+  defp cost_info(meter),
+    do: %{max_cost: meter.max_cost, spent_usd: CostMeter.spent_usd(meter, now_ms())}
+
+  # One timer, for the moment spend reaches the cap at the current rate. A
+  # rate change re-arms it; at rate 0.0 there is nothing to wait for.
+  defp arm_cost_cap(%{cost_meter: nil} = state), do: state
+
+  defp arm_cost_cap(state) do
+    cancel_cost_timer(state.cost_timer)
+
+    case CostMeter.ms_to_cap(state.cost_meter, now_ms()) do
+      :infinity ->
+        %{state | cost_timer: nil}
+
+      ms ->
+        ref = make_ref()
+        %{state | cost_timer: {Process.send_after(self(), {:cost_cap, ref}, ms), ref}}
+    end
+  end
+
+  defp cancel_cost_timer(nil), do: :ok
+  defp cancel_cost_timer({timer, _ref}), do: Process.cancel_timer(timer)
 
   defp remaining_ms(nil), do: nil
   defp remaining_ms(at), do: max(at - now_ms(), 0)

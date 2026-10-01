@@ -317,7 +317,7 @@ def handle_info({:atlas_compute, _id, {:task, :timed_out}}, socket) do
 end
 
 def handle_info({:atlas_compute, _id, {:task, {:failed, reason}}}, socket) do
-  # :never_ready | :preempted | :terminated | :failed
+  # :never_ready | :preempted | :terminated | :failed | :cost_cap
   {:noreply, assign(socket, state: {:failed, reason})}
 end
 ```
@@ -371,6 +371,27 @@ The deadline also **carries across a respawn**. If a spot task is preempted at
 minute 80 of a 90-minute budget, the replacement gets the remaining 10, not a
 fresh 90 — otherwise `on_failure: {:respawn, 3}` would let "90 minutes" spend
 six hours.
+
+### A dollar cap on top: `:max_cost`
+
+`:max_runtime_ms` caps time. `max_cost: 5.00` caps money: the tracker
+multiplies the pod's hourly price by the time it has run, and when that
+reaches $5.00 it deletes the pod and reports `{:task, {:failed, :cost_cap}}`.
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  gpu: :h100,
+  image: "ghcr.io/me/trainer:latest",
+  command: ["/app/train.sh"],
+  max_runtime_ms: :timer.hours(6),
+  max_cost: 5.00
+)
+```
+
+There is no default, because no dollar figure fits both an RTX 4090 and eight
+H100s. The cap carries across a respawn, like the deadline, and is refused
+with `persist: true` for now. `ExAtlas.Orchestrator.info/1` reports
+`:spent_usd` as the run goes.
 
 ### `:completed` does not mean "succeeded"
 

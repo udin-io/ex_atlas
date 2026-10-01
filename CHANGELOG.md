@@ -7,6 +7,19 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: a cost cap on tracked sessions, `max_cost` (#64, slice 1 of #28)
+
+`ExAtlas.Orchestrator.spawn/1` and `run_task/1` take `max_cost: dollars`. The
+tracker multiplies the pod's `cost_per_hour` by the time it has run and
+deletes the pod when that reaches the cap: an interactive session broadcasts
+`{:terminating, :cost_cap}`, a task `{:task, {:failed, :cost_cap}}` first. A
+status poll with a new price re-prices the rest of the run; a respawn carries
+the spend. `info/1` gains `:max_cost` and `:spent_usd`. A provider that
+reports no price gets its pod deleted and `{:error, %ExAtlas.Error{kind:
+:unsupported}}`. `persist: true` with `max_cost` is refused until slice 2.
+`ExAtlas.Providers.Mock` spawns at `provider_opts: %{cost_per_hour: rate}` and
+gains `set_cost_per_hour/2`.
+
 ### Added: serverless endpoints through the public API (#59, slice 4 of #27)
 
 `ExAtlas.list_endpoints/1`, `get_endpoint/2` and `delete_endpoint/2` list,

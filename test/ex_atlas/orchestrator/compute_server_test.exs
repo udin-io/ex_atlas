@@ -2,7 +2,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
   use ExUnit.Case, async: false
 
   alias ExAtlas.Callback
-  alias ExAtlas.Orchestrator.{ComputeSupervisor, Events}
+  alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Events}
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.FaultyProvider
 
@@ -1107,6 +1107,321 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert :ok = Callback.ingest(task_id, :progress, %{"pct" => 50})
 
       assert_receive {:atlas_compute, ^new_id, {:progress, %{"pct" => 50}}}, 2_000
+    end
+  end
+
+  describe "max_cost option validation" do
+    test "a cap that is not a positive number is refused before anything is rented" do
+      for bad <- [0, -1, "2.5"] do
+        assert {:error, %NimbleOptions.ValidationError{key: :max_cost}} =
+                 ExAtlas.Orchestrator.spawn(
+                   provider: :mock,
+                   gpu: :h100,
+                   image: "x",
+                   max_cost: bad
+                 )
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a cap on a persisted task is refused before anything is rented" do
+      # An adopted task would start a fresh budget, so slice 2 of issue 28 must
+      # carry the spend in the record before the two can be combined.
+      assert {:error, %NimbleOptions.ValidationError{key: :max_cost}} =
+               ExAtlas.Orchestrator.run_task(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 command: ["/app/train.sh"],
+                 persist: true,
+                 max_cost: 2.5
+               )
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a persisted task without a cap is still accepted" do
+      assert {:ok, _tracking} =
+               ComputeServer.validate_opts(mode: :task, persist: true, max_cost: false)
+    end
+  end
+
+  describe "max_cost" do
+    # $1 per second, so a cap of a few cents fires in tens of milliseconds.
+    @per_second 3600.0
+
+    setup do
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: false,
+        provider_opts: %{cost_per_hour: @per_second}
+      ]
+
+      {:ok, base: base}
+    end
+
+    defp spawn_capped(base, overrides) do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(Keyword.merge(base, overrides))
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {pid, compute.id}
+    end
+
+    # Until a status poll has carried `rate` into the tracker's compute.
+    defp await_tracked_rate(id, rate, tries \\ 400) do
+      case ExAtlas.Orchestrator.info(id) do
+        {:ok, %{compute: %{cost_per_hour: ^rate}}} ->
+          :ok
+
+        _ when tries > 0 ->
+          Process.sleep(5)
+          await_tracked_rate(id, rate, tries - 1)
+
+        other ->
+          flunk("no poll carried cost_per_hour #{inspect(rate)}: #{inspect(other)}")
+      end
+    end
+
+    defp next_events(id, count) do
+      for _ <- 1..count do
+        assert_receive {:atlas_compute, ^id, event}, 2_000
+        event
+      end
+    end
+
+    test "an interactive session is deleted when its spend reaches the cap", %{base: base} do
+      {pid, id} = spawn_capped(base, max_cost: 0.05)
+      ref = Process.monitor(pid)
+
+      assert [{:terminating, :cost_cap}, {:terminating, :normal}, {:status, :terminated}] =
+               next_events(id, 3)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a task fails as :cost_cap before the end-of-session pair", %{base: base} do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          Keyword.merge(base, command: ["/app/train.sh"], max_cost: 0.05)
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      ref = Process.monitor(pid)
+
+      assert [
+               {:task, {:failed, :cost_cap}},
+               {:terminating, :cost_cap},
+               {:terminating, _},
+               {:status, :terminated}
+             ] = next_events(id, 4)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "info/1 reports the cap and a spend that grows", %{base: base} do
+      {_pid, id} = spawn_capped(base, max_cost: 100)
+
+      assert {:ok, %{max_cost: 100, spent_usd: first}} = ExAtlas.Orchestrator.info(id)
+      Process.sleep(20)
+      assert {:ok, %{spent_usd: second}} = ExAtlas.Orchestrator.info(id)
+
+      assert is_float(first)
+      assert second > first
+    end
+
+    test "a price that rises after spawn is charged from the next poll", %{base: base} do
+      {pid, id} =
+        spawn_capped(base,
+          max_cost: 0.05,
+          status_poll_ms: 10,
+          provider_opts: %{cost_per_hour: 0.0}
+        )
+
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 100
+
+      :ok = Mock.set_cost_per_hour(id, @per_second)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a price that drops to zero before the cap cancels the armed timer", %{base: base} do
+      # Armed at $1/s for 500 ms; the poll lands within a few tens of ms.
+      started = System.monotonic_time(:millisecond)
+      {pid, id} = spawn_capped(base, max_cost: 0.5, status_poll_ms: 10)
+
+      :ok = Mock.set_cost_per_hour(id, 0.0)
+      await_tracked_rate(id, 0.0)
+
+      wait_past_original_cap = max(started + 700 - System.monotonic_time(:millisecond), 0)
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, wait_past_original_cap
+      assert Process.alive?(pid)
+      assert {:ok, %{spent_usd: spent}} = ExAtlas.Orchestrator.info(id)
+      assert spent < 0.5
+    end
+
+    test "a poll that reports no price keeps the last one", %{base: base} do
+      {pid, id} = spawn_capped(base, max_cost: 0.5, status_poll_ms: 10)
+      ref = Process.monitor(pid)
+
+      :ok = Mock.set_cost_per_hour(id, nil)
+      await_tracked_rate(id, nil)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "spend carries across a respawn", %{base: base} do
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          Keyword.merge(base,
+            command: ["/app/train.sh"],
+            spot: true,
+            on_failure: {:respawn, 1},
+            status_poll_ms: 10,
+            max_cost: 100
+          )
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      # Let $0.10 accrue, so a budget that restarted at zero reads lower.
+      Process.sleep(100)
+      assert {:ok, %{spent_usd: before}} = ExAtlas.Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{spent_usd: after_respawn}} = ExAtlas.Orchestrator.info(new_id)
+      assert after_respawn >= before
+    end
+
+    test "a capped spot session with respawn budget left is not respawned", %{base: base} do
+      {pid, id} =
+        spawn_capped(base,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 0.05
+        )
+
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+    end
+
+    test "a respawn charges the replacement's price before the next poll", %{base: base} do
+      # The pod drops to $0 and is preempted; its replacement rents at $1/s.
+      # Every poll after the respawn is held open, so only the respawn itself
+      # can tell the meter about the new price.
+      {_pid, id} =
+        spawn_capped(base,
+          provider: FaultyProvider,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 0.3
+        )
+
+      :ok = Mock.set_cost_per_hour(id, 0.0)
+      await_tracked_rate(id, 0.0)
+
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      assert_receive {:blocked, :get_compute, poll}, 2_000
+      :ok = Mock.forget(id)
+      send(poll, :release)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      assert_receive {:blocked, :get_compute, _held}, 2_000
+
+      assert_receive {:atlas_compute, ^new_id, {:terminating, :cost_cap}}, 2_000
+    end
+
+    test "a cap on a provider that reports no price deletes the pod and says so",
+         %{base: base} do
+      assert {:error, %ExAtlas.Error{kind: :unsupported, message: message}} =
+               ExAtlas.Orchestrator.spawn(
+                 Keyword.merge(base, max_cost: 1, provider_opts: %{cost_per_hour: nil})
+               )
+
+      assert message =~ "price"
+      assert {:ok, [%{status: :terminated}]} = ExAtlas.list_compute(provider: :mock)
+      assert ExAtlas.Orchestrator.list_ids() == []
+    end
+
+    test "a provider that reports no price still spawns and tracks without a cap",
+         %{base: base} do
+      assert {:ok, pid, compute} =
+               ExAtlas.Orchestrator.spawn(
+                 Keyword.merge(base, provider_opts: %{cost_per_hour: nil})
+               )
+
+      assert Process.alive?(pid)
+      assert compute.cost_per_hour == nil
+      assert ExAtlas.Orchestrator.list_ids() == [compute.id]
+    end
+
+    test "a cap months away at a tiny price starts and keeps tracking", %{base: base} do
+      {pid, id} =
+        spawn_capped(base,
+          max_cost: 1000,
+          status_poll_ms: 10,
+          provider_opts: %{cost_per_hour: 0.0001}
+        )
+
+      assert Process.alive?(pid)
+      ref = Process.monitor(pid)
+
+      # A poll that re-prices to a still tinier rate re-arms the timer too.
+      :ok = Mock.set_cost_per_hour(id, 0.00001)
+      await_tracked_rate(id, 0.00001)
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a refused priceless pod that the provider fails to delete is reported as such",
+         %{base: base} do
+      FaultyProvider.arm(
+        :terminate,
+        {:error, ExAtlas.Error.new(:provider, provider: :mock, status: 500)}
+      )
+
+      assert {:error, %ExAtlas.Error{kind: :unsupported, message: message}} =
+               ExAtlas.Orchestrator.spawn(
+                 Keyword.merge(base,
+                   provider: FaultyProvider,
+                   max_cost: 1,
+                   provider_opts: %{cost_per_hour: nil}
+                 )
+               )
+
+      assert {:ok, [%{id: id, status: :running}]} = ExAtlas.list_compute(provider: :mock)
+      assert message =~ "could not be deleted"
+      assert message =~ id
+      refute message =~ "was deleted"
+    end
+
+    test "without a cap the same price ends nothing", %{base: base} do
+      {pid, id} = spawn_capped(base, [])
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{max_cost: false, spent_usd: +0.0}} = ExAtlas.Orchestrator.info(id)
     end
   end
 end
