@@ -181,7 +181,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
 
     @tag :capture_log
-    test "a crash deletes a persisted task's pod and its record" do
+    test "an abnormal exit deletes a persisted task's pod and its record" do
       {:ok, pid, compute} = Orchestrator.spawn(task_opts())
 
       :ok = GenServer.stop(pid, :boom)
