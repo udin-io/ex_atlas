@@ -8,7 +8,7 @@ provider-specific code.
 
 ### `[:ex_atlas, <provider>, :request]`
 
-Emitted after every REST, runtime, or GraphQL call.
+Emitted after every REST or runtime call.
 
 **Measurements:**
 
@@ -20,7 +20,7 @@ Emitted after every REST, runtime, or GraphQL call.
 
 | Key      | Type   | Value                                       |
 | -------- | ------ | ------------------------------------------- |
-| `api`    | atom   | `:management` / `:runtime` / `:graphql`     |
+| `api`    | atom   | `:management` / `:runtime`                  |
 | `method` | atom   | `:get` / `:post` / `:delete` / ...          |
 | `url`    | string | Full request URL                            |
 

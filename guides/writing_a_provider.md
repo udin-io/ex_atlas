@@ -151,7 +151,7 @@ normalized yet — this is the forward-compatibility lever.
 ## Reference implementations
 
 - `ExAtlas.Providers.RunPod` (+ `ExAtlas.Providers.RunPod.Translate`) — full
-  production provider against REST + GraphQL.
+  production provider against REST.
 - `ExAtlas.Providers.Mock` — minimal in-memory implementation, good for
   understanding the callback shapes.
 - `ExAtlas.Providers.Stub` — the macro used by Fly/Lambda/Vast placeholders

@@ -7,6 +7,25 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Changed: `list_gpu_types` reads the Runpod v2 catalog (breaking, v0.7.0)
+
+Runpod retires its GraphQL API in early 2027. `list_gpu_types(provider: :runpod)`
+now reads `GET /v2/catalog/gpus` (#40). Runpod's GraphQL also rejected the old
+query (`Cannot query field "stockStatus" on type "GpuType"`), so the old call
+returned an error on a live key.
+
+- One call makes two requests, `cloud=SECURE` and `cloud=COMMUNITY`, because v2
+  reports stock for one cloud per request.
+- `lowest_price_per_hour` is the lower list price of the clouds the GPU is on,
+  even when it is out of stock. `spot_price_per_hour` is always `nil`.
+- `stock` is the best level of the clouds the GPU is on.
+- A GPU on neither cloud, such as Runpod's placeholder `unknown`, reads
+  `lowest_price_per_hour: nil`, `stock: :unavailable`, `cloud_type: :any`.
+- `GpuType.raw` is `%{"SECURE" => entry, "COMMUNITY" => entry}`, the v2 entries,
+  not the GraphQL map.
+- Removed: `ExAtlas.Providers.RunPod.GraphQL`, `Client.graphql/1`,
+  `Client.graphql_url/0`, and telemetry `api: :graphql`.
+
 ### Changed: Runpod REST v2 (breaking, v0.6.0)
 
 Runpod retires REST v1 on 2026-11-15. Every Runpod management call now goes to
