@@ -278,6 +278,48 @@ defmodule ExAtlas do
     provider |> Config.provider_module() |> apply(:list_gpu_types, [ctx])
   end
 
+  @network_volume_request_keys [:name, :size_gb, :region, :tier, :provider_opts]
+
+  @doc """
+  List the account's network volumes.
+
+  Returns `{:error, %ExAtlas.Error{kind: :unsupported}}` for a provider that
+  cannot manage volumes; `:manage_network_volumes` in `capabilities/1` says
+  which can.
+  """
+  @spec list_network_volumes(opts()) :: {:ok, [Spec.NetworkVolume.t()]} | {:error, term()}
+  def list_network_volumes(opts \\ []), do: dispatch_optional(:list_network_volumes, [], opts)
+
+  @doc "Fetch a network volume by id."
+  @spec get_network_volume(String.t(), opts()) :: {:ok, Spec.NetworkVolume.t()} | {:error, term()}
+  def get_network_volume(id, opts \\ []), do: dispatch_optional(:get_network_volume, [id], opts)
+
+  @doc """
+  Create a network volume.
+
+  Takes `:name` and `:size_gb` (required), `:region` and `:tier`; see
+  `ExAtlas.Spec.NetworkVolumeRequest`. RunPod also needs `:region`. Other
+  options are provider config, as in `spawn_compute/1`.
+
+      {:ok, volume} =
+        ExAtlas.create_network_volume(
+          provider: :runpod, name: "datasets", size_gb: 200, region: "EU-RO-1"
+        )
+
+  Mount it with `spawn_compute(network_volume_id: volume.id)`.
+  """
+  @spec create_network_volume(opts()) :: {:ok, Spec.NetworkVolume.t()} | {:error, term()}
+  def create_network_volume(opts) when is_list(opts) do
+    {request_opts, config_opts} = Keyword.split(opts, @network_volume_request_keys)
+    req = Spec.NetworkVolumeRequest.new!(request_opts)
+    dispatch_optional(:create_network_volume, [req], config_opts)
+  end
+
+  @doc "Delete a network volume. The provider destroys the data on it."
+  @spec delete_network_volume(String.t(), opts()) :: :ok | {:error, term()}
+  def delete_network_volume(id, opts \\ []),
+    do: dispatch_optional(:delete_network_volume, [id], opts)
+
   @doc "Return the capability atoms honored by a provider."
   @spec capabilities(atom() | module()) :: [atom()]
   def capabilities(provider), do: provider |> Config.provider_module() |> apply(:capabilities, [])
@@ -329,5 +371,25 @@ defmodule ExAtlas do
     {provider, opts} = Config.pop_provider!(opts)
     ctx = Config.build_ctx(provider, opts)
     provider |> Config.provider_module() |> apply(fun, args ++ [ctx])
+  end
+
+  # For callbacks a provider may leave out (`@optional_callbacks`): a provider
+  # without one gets a normalized `:unsupported` error, not an
+  # `UndefinedFunctionError`, so Mock, Stub and user modules need no change.
+  defp dispatch_optional(fun, args, opts) do
+    {provider, opts} = Config.pop_provider!(opts)
+    ctx = Config.build_ctx(provider, opts)
+    module = Config.provider_module(provider)
+    arity = length(args) + 1
+
+    if Code.ensure_loaded?(module) and function_exported?(module, fun, arity) do
+      apply(module, fun, args ++ [ctx])
+    else
+      {:error,
+       ExAtlas.Error.new(:unsupported,
+         provider: provider,
+         message: "#{inspect(module)} does not implement #{fun}/#{arity}"
+       )}
+    end
   end
 end
