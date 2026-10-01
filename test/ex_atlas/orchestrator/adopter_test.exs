@@ -50,7 +50,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     # The Registry unregisters on its own DOWN, which it processes in its own
     # mailbox. Synchronize with it so "not tracked" is settled before the test
     # asserts anything about it.
-    _ = :sys.get_state(ExAtlas.Orchestrator.ComputeRegistry)
+    TestOrchestrator.sync_registry()
 
     compute
   end
@@ -314,7 +314,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       ref = Process.monitor(pid)
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
-      _ = :sys.get_state(ExAtlas.Orchestrator.ComputeRegistry)
+      TestOrchestrator.sync_registry()
 
       boot_as("c")
 

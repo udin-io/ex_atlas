@@ -74,6 +74,23 @@ defmodule ExAtlas.Test.Orchestrator do
     Application.put_env(:ex_atlas, :orchestrator, Keyword.merge(current, values))
   end
 
+  @doc """
+  Wait until the compute Registry has processed every exit signal it holds.
+
+  A Registry drops a dead process's entry in its partition processes, not in
+  the supervisor that carries the Registry's name. A test that kills a tracker
+  and then reads the Registry calls this first, after it has seen the `:DOWN`.
+  """
+  @spec sync_registry() :: :ok
+  def sync_registry do
+    for {_id, pid, _type, _modules} <-
+          Supervisor.which_children(ExAtlas.Orchestrator.ComputeRegistry),
+        is_pid(pid),
+        do: :sys.get_state(pid)
+
+    :ok
+  end
+
   defp configure_store(false), do: put_env(tracking_store: false)
 
   defp configure_store({module, start_opts}) do
