@@ -8,6 +8,39 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
   setup do: ExAtlas.Test.Orchestrator.start!()
 
+  # The Mock without `compute_spend/3`, so `ExAtlas.compute_spend/2` answers
+  # `:unsupported` the way it does for a provider with no billing API.
+  defmodule NoBillingProvider do
+    @behaviour ExAtlas.Provider
+
+    alias ExAtlas.Providers.Mock
+
+    @impl true
+    defdelegate spawn_compute(req, ctx), to: Mock
+    @impl true
+    defdelegate get_compute(id, ctx), to: Mock
+    @impl true
+    defdelegate list_compute(filters, ctx), to: Mock
+    @impl true
+    defdelegate stop(id, ctx), to: Mock
+    @impl true
+    defdelegate start(id, ctx), to: Mock
+    @impl true
+    defdelegate terminate(id, ctx), to: Mock
+    @impl true
+    defdelegate run_job(req, ctx), to: Mock
+    @impl true
+    defdelegate get_job(id, ctx), to: Mock
+    @impl true
+    defdelegate cancel_job(id, ctx), to: Mock
+    @impl true
+    defdelegate stream_job(id, ctx), to: Mock
+    @impl true
+    defdelegate list_gpu_types(ctx), to: Mock
+    @impl true
+    def capabilities, do: Mock.capabilities() -- [:billing]
+  end
+
   test "spawn → touch → terminate teardown calls provider terminate" do
     {:ok, pid, compute} =
       ExAtlas.Orchestrator.spawn(
@@ -1574,6 +1607,28 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _reason}}, 2_000
       refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a provider with no billing API runs the session on the estimate, silently",
+         %{base: base} do
+      {pid, id} = spawn_reconciled(base, provider: NoBillingProvider, max_cost: 1)
+      ref = Process.monitor(pid)
+
+      # Ten intervals: no failure event each 20 ms, and no stop.
+      refute_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _}}, 200
+      refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{max_cost: 1}} = ExAtlas.Orchestrator.info(id)
+    end
+
+    test "an :unsupported answer is asked for once", %{base: base} do
+      unsupported = ExAtlas.Error.new(:unsupported, provider: :mock, message: "no billing")
+      FaultyProvider.arm(:compute_spend, {:notify, self(), {:error, unsupported}})
+      {_pid, id} = spawn_reconciled(base, provider: FaultyProvider, max_cost: 1)
+
+      assert_receive {:called, :compute_spend, _task}, 2_000
+      refute_receive {:called, :compute_spend, _task}, 200
+      refute_received {:atlas_compute, ^id, {:spend_reconcile_failed, _}}
     end
 
     test "a session without max_cost never asks for its bill", %{base: base} do

@@ -837,6 +837,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     {:noreply, state}
   end
 
+  # A provider with no billing API answers the same way every time. Stop asking,
+  # and say nothing: a failure event every interval, forever, is noise.
+  defp apply_bill({:error, %ExAtlas.Error{kind: :unsupported}}, _pod_id, state),
+    do: {:noreply, %{state | reconcile_spend_ms: nil}}
+
   defp apply_bill({:error, error}, _pod_id, state), do: reconcile_failed(error, state)
 
   defp apply_bill(other, _pod_id, state), do: reconcile_failed({:unexpected, other}, state)
