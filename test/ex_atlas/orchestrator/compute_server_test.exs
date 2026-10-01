@@ -1685,6 +1685,29 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert spent < 1
     end
 
+    test "a bill with no total is reported and changes nothing", %{base: base} do
+      {pid, id} = spawn_reconciled(base, max_cost: 1)
+      :ok = Mock.set_spend(id, nil)
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _}}, 2_000
+      refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
+      assert Process.alive?(pid)
+    end
+
+    test "teardown kills a billing call still in flight", %{base: base} do
+      {pid, id} = spawn_reconciled(base, provider: FaultyProvider, max_cost: 1)
+      FaultyProvider.arm(:compute_spend, {:block, self()})
+      assert_receive {:blocked, :compute_spend, held}, 2_000
+      held_ref = Process.monitor(held)
+      ref = Process.monitor(pid)
+
+      :ok = ExAtlas.Orchestrator.stop_tracked(id)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      assert_receive {:DOWN, ^held_ref, :process, ^held, :killed}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
     test "a session without max_cost never asks for its bill", %{base: base} do
       {_pid, uncapped} = spawn_reconciled(base, [])
       {_pid, switched_off} = spawn_reconciled(base, max_cost: 1, reconcile_spend_ms: false)
