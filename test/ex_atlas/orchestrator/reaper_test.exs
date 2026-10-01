@@ -196,6 +196,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
       assert [_once] = Regex.scan(~r/leaving #{compute.id} \(atlas-a-train-1\) alone/, log)
       assert log =~ ~s|carries owner "a"|
+      assert log =~ "or a name from before owners existed"
     end
   end
 
