@@ -129,6 +129,28 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert remaining > 55 * 60 * 1_000
       assert remaining < 65 * 60 * 1_000
     end
+
+    test "a record from before the timer bound still adopts, at the bound" do
+      # The previous release accepted any positive integer: 60 days here.
+      sixty_days = 60 * 24 * 60 * 60 * 1_000
+      compute = orphaned_task()
+      {:ok, record} = Memory.get(compute.id)
+
+      opts =
+        record.opts
+        |> Keyword.put(:max_runtime_ms, sixty_days)
+        |> Keyword.put(:heartbeat_ms, sixty_days)
+        |> Keyword.put(:status_poll_ms, sixty_days)
+
+      :ok = Memory.put(%{record | opts: opts, max_runtime_ms: sixty_days})
+
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+      refute log =~ "could not start a tracker"
+
+      assert {:ok, %{max_runtime_remaining_ms: remaining}} = Orchestrator.info(compute.id)
+      assert remaining <= 4_294_967_295
+      assert remaining > 4_294_967_295 - 60_000
+    end
   end
 
   @hour 60 * 60 * 1_000

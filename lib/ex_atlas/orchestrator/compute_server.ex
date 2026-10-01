@@ -283,6 +283,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   @option_keys Keyword.keys(@schema)
 
+  @timer_option_keys [
+    :heartbeat_ms,
+    :status_poll_ms,
+    :max_runtime_ms,
+    :ready_timeout_ms,
+    :finish_grace_ms,
+    :reconcile_spend_ms
+  ]
+
   @type state :: %{
           compute: ExAtlas.Spec.Compute.t(),
           opts: keyword(),
@@ -421,8 +430,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Process.flag(:trap_exit, true)
 
     %{compute: compute, opts: opts} = record
-    tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
-    remaining_ms = remaining_runtime_ms(record)
+
+    tracking =
+      opts |> Keyword.take(@option_keys) |> bound_timers() |> NimbleOptions.validate!(@schema)
+
+    remaining_ms = record |> remaining_runtime_ms() |> bound_timer()
 
     state =
       %{
@@ -526,6 +538,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   defp resumed_cost_meter(_uncapped), do: nil
+
+  # A record written before timer options were bounded can hold a longer
+  # delay. Refusing it would leave the pod running with no tracker, so it is
+  # adopted at the bound: a 60-day deadline fires after about 49.7 days.
+  defp bound_timers(tracking) do
+    Enum.map(tracking, fn
+      {key, ms} when key in @timer_option_keys -> {key, bound_timer(ms)}
+      other -> other
+    end)
+  end
+
+  defp bound_timer(ms) when is_integer(ms), do: min(ms, Timer.max_ms())
+  defp bound_timer(other), do: other
 
   defp number_or(value, _default) when is_number(value), do: value
   defp number_or(_missing, default), do: default
