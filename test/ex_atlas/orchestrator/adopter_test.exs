@@ -10,9 +10,12 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias ExAtlas.Orchestrator
   alias ExAtlas.Orchestrator.{Adopter, Events, TrackingStore}
   alias ExAtlas.Providers.Mock
+  alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
   alias ExAtlas.Test.TrackingStore.Memory
 
   setup do
@@ -211,6 +214,40 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       # newer build of this same app rented.
       assert {:error, :not_tracked} = Orchestrator.info(compute.id)
       assert {:ok, _record} = Memory.get(compute.id)
+    end
+  end
+
+  # A task spawned by the node whose `:reap_owner` is `owner`, orphaned as a
+  # deploy would. The test then sets the owner of the node that boots.
+  defp orphaned_task_of(owner, overrides \\ []) do
+    TestOrchestrator.put_env(reap_owner: owner)
+    orphaned_task(overrides)
+  end
+
+  # What a v0.7.0 node wrote: a spawned record with no owner and `v: 1`.
+  defp downgrade_to_v1!(id) do
+    {:ok, record} = Memory.get(id)
+    :ok = Memory.put(record |> Map.delete(:owner) |> Map.put(:v, 1))
+    {:ok, v1} = Memory.get(id)
+    v1
+  end
+
+  defp boot_as(owner) do
+    TestOrchestrator.put_env(reap_owner: owner)
+    log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+    assert_receive :adoption_complete, 2_000
+    log
+  end
+
+  describe "records written by a v0.7.0 node" do
+    test "a node with no owner adopts an unowned v1 record and leaves it v1" do
+      compute = orphaned_task_of(nil)
+      v1 = downgrade_to_v1!(compute.id)
+
+      boot_as(nil)
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+      assert {:ok, ^v1} = Memory.get(compute.id)
     end
   end
 

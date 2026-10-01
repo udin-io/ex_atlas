@@ -58,8 +58,9 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
 
       defp conformance_record(id, overrides \\ %{}) do
         %{
-          v: 1,
+          v: 2,
           id: id,
+          owner: "a",
           provider: :mock,
           opts: [gpu: :h100, image: "trainer:latest", mode: :task],
           spawned_at_ms: 1_700_000_000_000,
@@ -83,6 +84,14 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
           assert :ok = @store.put(record)
 
           assert {:ok, ^record} = @store.get("compute-a")
+        end
+
+        test "put/1 round-trips the owner, including none" do
+          :ok = @store.put(conformance_record("compute-o1", %{owner: "b"}))
+          :ok = @store.put(conformance_record("compute-o2", %{owner: nil}))
+
+          assert {:ok, %{owner: "b"}} = @store.get("compute-o1")
+          assert {:ok, %{owner: nil}} = @store.get("compute-o2")
         end
 
         test "put/1 overwrites the record for an id" do

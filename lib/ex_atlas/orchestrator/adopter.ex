@@ -138,7 +138,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   defp adopt(record, store) do
     cond do
-      record.v != TrackingStore.version() -> skip(record, "unknown schema version #{record.v}")
+      not readable?(record.v) -> skip(record, "unknown schema version #{record.v}")
       record.mode != :task -> skip(record, "mode #{inspect(record.mode)} is not adoptable")
       true -> reconcile(record, store)
     end
@@ -151,10 +151,12 @@ defmodule ExAtlas.Orchestrator.Adopter do
   defp skip(record, why) do
     Logger.warning(
       "[ExAtlas.Orchestrator.Adopter] not adopting #{Map.get(record, :id, "?")}: #{why} " <>
-        "(this build understands version #{TrackingStore.version()}). The record is kept " <>
+        "(this build understands versions 1 and #{TrackingStore.version()}). The record is kept " <>
         "so the Reaper still treats the resource as ours."
     )
   end
+
+  defp readable?(version), do: version in [1, TrackingStore.version()]
 
   defp reconcile(record, store) do
     case observe(record) do

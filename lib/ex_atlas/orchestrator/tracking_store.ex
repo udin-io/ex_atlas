@@ -70,6 +70,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
     * `:v` — record schema version. An unknown version is dropped with a
       warning rather than guessed at.
+    * `:owner` — the spawning node's `:reap_owner`, or `nil` when it had none.
+      Version 1 records carry no owner.
     * `:id`, `:provider` — what to re-observe, and where.
     * `:opts` — **scrubbed** spawn opts. `ComputeServer` re-validates them and
       `ExAtlas.terminate/2` needs them.
@@ -135,6 +137,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   an operator reading the warning; the alternative is destroying live work.
   """
 
+  alias ExAtlas.Orchestrator.Ownership
   alias ExAtlas.Spec
 
   @typedoc "Schema version of a persisted record."
@@ -145,6 +148,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   """
   @type record :: %{
           required(:v) => version(),
+          required(:owner) => String.t() | nil,
           required(:id) => String.t(),
           required(:provider) => atom() | module(),
           required(:opts) => keyword(),
@@ -179,7 +183,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a
   # half-understood record could arm the wrong deadline on a live GPU.
-  @version 1
+  @version 2
 
   # Opts that are credentials, or that could carry one. `:req_options` gets its
   # own treatment below because the secret is nested inside it.
@@ -214,6 +218,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   def new(%Spec.Compute{} = compute, opts, tracking) do
     %{
       v: @version,
+      owner: owner(),
       id: compute.id,
       provider: Keyword.get(opts, :provider, compute.provider),
       opts: scrub_opts(opts),
@@ -263,6 +268,14 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   defp configured_scrub_keys do
     orchestrator_config() |> Keyword.get(:scrub_keys, []) |> List.wrap()
+  end
+
+  # `ExAtlas.Orchestrator.spawn/1` has already validated `:reap_owner`.
+  defp owner do
+    case Ownership.owner() do
+      {:ok, owner} -> owner
+      {:error, _invalid} -> nil
+    end
   end
 
   defp callback_task_id(%{task_id: task_id}), do: task_id
