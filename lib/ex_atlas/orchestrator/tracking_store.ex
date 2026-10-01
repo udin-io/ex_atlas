@@ -70,6 +70,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
     * `:v` — record schema version. An unknown version is dropped with a
       warning rather than guessed at.
+    * `:owner` — the spawning node's `:reap_owner`, or `nil` when it had none.
+      Version 1 records carry no owner.
     * `:id`, `:provider` — what to re-observe, and where.
     * `:opts` — **scrubbed** spawn opts. `ComputeServer` re-validates them and
       `ExAtlas.terminate/2` needs them.
@@ -106,15 +108,26 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   — and accept that respawn-after-adoption loses them, or supply a store that
   encrypts at rest.
 
-  ## Adoption is per node
+  ## A store shared by several nodes
 
-  A node adopts only ids it wrote itself, which a per-node DETS file makes
-  automatic. "Node A died, node B takes over its pods" is explicitly **not**
-  solved here: it needs a shared store plus leases with an owner column and
-  expiry, which is a different ticket. A host store shared by several nodes
-  makes every node adopt every node's tasks at boot (issue #46). Several nodes
-  on one provider account each need their own `:reap_owner`; see
-  `ExAtlas.Orchestrator.Reaper`.
+  A node adopts only the records whose `:owner` is its own `:reap_owner`. Set
+  `:reap_owner` on every node that shares a store (see
+  `ExAtlas.Orchestrator.Reaper`), and keep it stable across restarts.
+
+    * A record of another owner stays in the store, untracked on this node, and
+      the boot logs its id under that owner. No node deletes it.
+    * A record with no owner (version 1, or written by a node with no
+      `:reap_owner`) is claimed by the first node that adopts it, which writes
+      its own owner into it.
+    * A dead owner's pods and records stay until an operator deletes them. "Node
+      A died, node B takes over" needs leases with expiry and is not solved
+      here.
+
+  A store that maps record fields to columns needs a nullable `owner` column.
+  Without it every record comes back unowned, and every node adopts it.
+
+  A per-node DETS file (the default) holds only that node's records, so it
+  needs none of this.
 
   ## Fly and other ephemeral filesystems
 
@@ -135,6 +148,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   an operator reading the warning; the alternative is destroying live work.
   """
 
+  alias ExAtlas.Orchestrator.Ownership
   alias ExAtlas.Spec
 
   @typedoc "Schema version of a persisted record."
@@ -145,6 +159,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   """
   @type record :: %{
           required(:v) => version(),
+          required(:owner) => String.t() | nil,
           required(:id) => String.t(),
           required(:provider) => atom() | module(),
           required(:opts) => keyword(),
@@ -179,7 +194,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a
   # half-understood record could arm the wrong deadline on a live GPU.
-  @version 1
+  @version 2
 
   # Opts that are credentials, or that could carry one. `:req_options` gets its
   # own treatment below because the secret is nested inside it.
@@ -214,6 +229,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   def new(%Spec.Compute{} = compute, opts, tracking) do
     %{
       v: @version,
+      owner: owner(),
       id: compute.id,
       provider: Keyword.get(opts, :provider, compute.provider),
       opts: scrub_opts(opts),
@@ -263,6 +279,14 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   defp configured_scrub_keys do
     orchestrator_config() |> Keyword.get(:scrub_keys, []) |> List.wrap()
+  end
+
+  # `ExAtlas.Orchestrator.spawn/1` has already validated `:reap_owner`.
+  defp owner do
+    case Ownership.owner() do
+      {:ok, owner} -> owner
+      {:error, _invalid} -> nil
+    end
   end
 
   defp callback_task_id(%{task_id: task_id}), do: task_id

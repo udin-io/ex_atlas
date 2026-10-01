@@ -890,6 +890,8 @@ With an owner set:
 - The Reaper deletes only untracked pods named with its own owner. It leaves
   every other prefixed pod alone and logs each once per boot, with its id and
   the owner it carries. Pods of a machine that is gone are yours to delete.
+- The Adopter adopts only the tracking records that carry its own owner, so
+  machines can share one database-backed store (see "Surviving a deploy").
 
 The Reaper reaps nothing and logs an error when the owner is invalid, when a
 machine with no owner is connected to other nodes, or when a connected node
@@ -990,11 +992,13 @@ Seven things to know before you rely on it:
   `config :ex_atlas, :orchestrator, tracking_store: MyApp.AtlasStore`. The
   shared conformance suite in `test/support` gives your implementation the
   contract tests for free.
-- **Adoption is per node.** A node adopts only ids it recorded itself. "Node
-  A died, node B takes over" is deliberately out of scope — it needs a shared
-  store plus leases. A store shared by several nodes makes every node adopt
-  every node's tasks (issue #46). Several machines on one account each need
-  their own `:reap_owner` (see "More than one node").
+- **A shared store needs a `:reap_owner` on every node.** Each record carries
+  its spawning node's owner, and a node adopts only its own records. A record
+  of another owner stays untouched and the boot logs its id. The first node to
+  adopt an unowned record (one written before v0.8.0) claims it. A dead
+  owner's pods and records stay until you delete them: "node A died, node B
+  takes over" needs leases and is out of scope. A store that maps fields to
+  columns needs a nullable `owner` column. See "More than one node".
 - **A graceful deploy keeps the pod; your kill signal decides the rest.** On
   SIGTERM the BEAM stops the app and every tracker runs `terminate/2`. A
   `persist: true` task whose container has not reported an exit code keeps its

@@ -452,8 +452,11 @@ Five constraints worth knowing before you design around it:
   `config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")`
   (or another id unique per machine and stable across its restarts) on every
   machine. Without it, one machine's Reaper deletes another's live pods. See
-  the README's "More than one node". A node adopts only what it recorded
-  itself; taking over another node's pods needs leases and is out of scope.
+  the README's "More than one node". A node adopts only the records that carry
+  its own owner, so machines can share one database-backed store. Each boot
+  logs the ids of the other owners' records it leaves alone. A record from a
+  machine that never comes back stays, with its pod, until you delete both;
+  taking over another node's pods needs leases and is out of scope.
 - A graceful stop (SIGTERM) keeps a persisted task's pod and record, unless
   its container already reported an exit code or its record is missing from
   the store; every other tracker deletes its pod. On Fly set `kill_signal = "SIGTERM"` (`fly launch` does for Phoenix)

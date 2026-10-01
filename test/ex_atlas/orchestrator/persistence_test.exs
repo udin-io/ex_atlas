@@ -44,7 +44,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, record} = Memory.get(compute.id)
 
       assert %{
-               v: 1,
+               v: 2,
                id: id,
                provider: :mock,
                mode: :task,
@@ -58,6 +58,20 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       # Wall clock, not monotonic: the deadline has to be reconstructible in a
       # VM that has not started yet.
       assert_in_delta record.spawned_at_ms, System.system_time(:millisecond), 5_000
+    end
+
+    test "stamps the spawning node's owner into the record" do
+      ExAtlas.Test.Orchestrator.put_env(reap_owner: "a")
+
+      {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
+
+      assert {:ok, %{v: 2, owner: "a"}} = Memory.get(compute.id)
+    end
+
+    test "records no owner when the node has none" do
+      {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
+
+      assert {:ok, %{v: 2, owner: nil}} = Memory.get(compute.id)
     end
 
     test "records the callback task id so in-flight pod callbacks survive" do
@@ -105,6 +119,8 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
 
     test "a respawn rewrites the record without refilling the budget" do
+      ExAtlas.Test.Orchestrator.put_env(reap_owner: "a")
+
       {:ok, _pid, compute} =
         Orchestrator.spawn(
           task_opts(
@@ -125,6 +141,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, replacement} = Memory.get(new_id)
       assert replacement.id == new_id
       assert replacement.respawns == 1
+      assert replacement.owner == "a"
 
       # ...on the original deadline. A record that re-anchored here would hand
       # a preempted 90-minute task another 90 minutes on every replacement.

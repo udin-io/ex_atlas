@@ -84,6 +84,42 @@ defmodule ExAtlas.Test.Cluster do
       ])
   end
 
+  @doc """
+  Start `ExAtlas.Application`'s orchestrator tree on the peer, with
+  `config :ex_atlas, :orchestrator` set to `orchestrator_env`, and wait until
+  the peer's Reaper reports that boot-time adoption has settled.
+
+  Returns `:settled` or `:failed`.
+  """
+  @spec boot_orchestrator!(node(), keyword()) :: :settled | :failed
+  def boot_orchestrator!(node, orchestrator_env) do
+    for {key, value} <- [
+          start_orchestrator: true,
+          default_provider: :mock,
+          callback: [secret: ExAtlas.Test.Orchestrator.callback_secret()],
+          fly: [enabled: false],
+          orchestrator: Keyword.put_new(orchestrator_env, :reap_providers, [])
+        ] do
+      :ok = :erpc.call(node, Application, :put_env, [:ex_atlas, key, value])
+    end
+
+    {:ok, _apps} = :erpc.call(node, Application, :ensure_all_started, [:ex_atlas])
+    await_adoption!(node, 50)
+  end
+
+  defp await_adoption!(node, 0), do: raise("#{node} never settled adoption")
+
+  defp await_adoption!(node, tries) do
+    case :erpc.call(node, :sys, :get_state, [ExAtlas.Orchestrator.Reaper]).adoption do
+      :pending ->
+        Process.sleep(100)
+        await_adoption!(node, tries - 1)
+
+      settled_or_failed ->
+        settled_or_failed
+    end
+  end
+
   defp stop_peer(peer) do
     if Process.alive?(peer), do: :peer.stop(peer)
     :ok

@@ -7,9 +7,11 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
 
   @moduletag :capture_log
 
-  alias ExAtlas.Orchestrator.Reaper
+  alias ExAtlas.Orchestrator
+  alias ExAtlas.Orchestrator.{Adopter, Reaper}
   alias ExAtlas.Test.{Cluster, RemoteProvider}
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
+  alias ExAtlas.Test.TrackingStore.{Memory, Remote}
 
   setup do
     TestOrchestrator.start!()
@@ -187,6 +189,122 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       :ok = tick(reaper)
 
       assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
+  describe "two nodes, one shared tracking store, one account" do
+    # Node A is this node, with `Memory` as its store. The peer's store is
+    # `Remote`, which reads and writes that same `Memory`: one database.
+    setup do
+      TestOrchestrator.put_env(
+        tracking_store: Memory,
+        reap_owner: "a",
+        reap_providers: [],
+        reap_name_prefix: "atlas-"
+      )
+
+      start_supervised!(Memory)
+      Application.put_env(:ex_atlas, :remote_provider_node, node())
+      on_exit(fn -> Application.delete_env(:ex_atlas, :remote_provider_node) end)
+      :ok
+    end
+
+    defp boot_b(node_b, owner) do
+      Cluster.boot_orchestrator!(node_b, tracking_store: Remote, reap_owner: owner)
+    end
+
+    defp spawn_persisted(name \\ "atlas-train-42") do
+      Orchestrator.run_task(
+        provider: RemoteProvider,
+        gpu: :h100,
+        image: "trainer",
+        name: name,
+        persist: true,
+        max_runtime_ms: 3_600_000,
+        status_poll_ms: false
+      )
+    end
+
+    defp kill_tracker(pid) do
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      _ = :sys.get_state(ExAtlas.Orchestrator.ComputeRegistry)
+      :ok
+    end
+
+    test "node B's boot starts no tracker for node A's live task", %{node_b: node_b} do
+      {:ok, pid_a, compute} = spawn_persisted()
+
+      boot_b(node_b, "b")
+
+      assert {:error, :not_tracked} = :erpc.call(node_b, Orchestrator, :info, [compute.id])
+
+      assert {:error, :not_tracked} =
+               :erpc.call(node_b, Orchestrator, :stop_tracked, [compute.id])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert {:ok, %{owner: "a"}} = Memory.get(compute.id)
+      assert Process.alive?(pid_a)
+    end
+
+    test "control: node B adopts a record spawned as owner b", %{node_b: node_b} do
+      TestOrchestrator.put_env(reap_owner: "b")
+      {:ok, pid, compute} = spawn_persisted()
+      kill_tracker(pid)
+      TestOrchestrator.put_env(reap_owner: "a")
+
+      boot_b(node_b, "b")
+
+      assert {:ok, %{mode: :task}} = :erpc.call(node_b, Orchestrator, :info, [compute.id])
+    end
+
+    test "a late node A finds the task of A's own record while B tracks nothing",
+         %{node_b: node_b} do
+      {:ok, pid, compute} = spawn_persisted()
+      kill_tracker(pid)
+
+      boot_b(node_b, "b")
+      assert {:error, :not_tracked} = :erpc.call(node_b, Orchestrator, :info, [compute.id])
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+      assert {:error, :not_tracked} = :erpc.call(node_b, Orchestrator, :info, [compute.id])
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "a node whose owner is gone for good leaves its task to the operator",
+         %{peer: peer, node_b: node_b} do
+      boot_b(node_b, "b")
+
+      {:ok, _pid, compute} =
+        :erpc.call(node_b, Orchestrator, :run_task, [
+          [
+            provider: RemoteProvider,
+            gpu: :h100,
+            image: "trainer",
+            name: "atlas-train-7",
+            persist: true,
+            max_runtime_ms: 3_600_000,
+            status_poll_ms: false
+          ]
+        ])
+
+      :ok = Cluster.stop_peer!(peer, node_b)
+
+      log =
+        capture_log(fn ->
+          :ok = Adopter.run(notify: self())
+          :ok = Reaper.reap_now("atlas-", [RemoteProvider])
+        end)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{owner: "b"}} = Memory.get(compute.id)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert [[line]] = Regex.scan(~r/\[info\][^\n]*owner "b"[^\n]*/, log)
+      assert line =~ compute.id
     end
   end
 
