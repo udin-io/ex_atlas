@@ -81,6 +81,14 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       assert [_once] = Regex.scan(~r/\[error\].*has no :reap_owner/, log)
     end
 
+    test "reap_now/2 reaps nothing either", %{reaper: _reaper} do
+      {:ok, compute} = spawn_untracked()
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
     test "reclaims that pod once the peer has stopped",
          %{reaper: reaper, peer: peer, node_b: node_b} do
       {:ok, compute} = spawn_untracked()
@@ -122,6 +130,30 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
       assert [_once] = Regex.scan(~r/\[error\].*:reap_owner "a" is also set on/, log)
       assert log =~ Atom.to_string(node_b)
+    end
+
+    # A peer that reports no owner, or cannot report one, is not a duplicate.
+    for {label, peer_env} <- [
+          {"no owner", [reap_owner: nil]},
+          {"an invalid owner", [reap_owner: "Not Valid"]}
+        ] do
+      test "a peer with #{label} leaves reaping on", %{reaper: reaper, node_b: node_b} do
+        Cluster.put_orchestrator_env(node_b, unquote(peer_env))
+        {:ok, compute} = spawn_untracked("atlas-a-orphan")
+
+        :ok = tick(reaper)
+
+        assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      end
+    end
+
+    test "reap_now/2 refuses a same-owner peer too", %{node_b: node_b} do
+      Cluster.put_orchestrator_env(node_b, reap_owner: "a")
+      {:ok, compute} = spawn_untracked("atlas-a-orphan")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
 
     test "a peer with a different owner leaves reaping on", %{reaper: reaper, node_b: node_b} do

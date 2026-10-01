@@ -210,6 +210,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     assert log =~ "[error]"
     assert log =~ ":reap_owner"
+    refute log =~ "Not Valid"
   end
 
   describe "resources the tracking store knows about" do
