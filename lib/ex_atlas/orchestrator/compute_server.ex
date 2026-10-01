@@ -654,7 +654,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # Run like the status poll: in a task, so a slow billing API never parks
   # this mailbox. The task remembers the pod it asked about.
 
-  def handle_info(:reconcile_spend, %{reconcile_task: nil, reconcile_spend_ms: ms} = state)
+  def handle_info(
+        :reconcile_spend,
+        %{reconcile_task: nil, reconcile_spend_ms: ms, cost_meter: %CostMeter{}} = state
+      )
       when is_integer(ms) do
     case start_reconcile(state) do
       {:ok, task} ->

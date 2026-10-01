@@ -1690,6 +1690,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       :ok = Mock.set_spend(id, nil)
 
       assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _}}, 2_000
+
       refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
       assert Process.alive?(pid)
     end
@@ -1706,6 +1707,17 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
       assert_receive {:DOWN, ^held_ref, :process, ^held, :killed}, 2_000
       assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a stray reconcile message cannot end an uncapped session", %{base: base} do
+      {pid, id} = spawn_reconciled(base, [])
+      ref = Process.monitor(pid)
+
+      send(pid, :reconcile_spend)
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
+      assert Mock.spend_requests(id) == []
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
     end
 
     test "a session without max_cost never asks for its bill", %{base: base} do
