@@ -116,6 +116,10 @@ alias it in your own wrapper module or add it to your host app's
   `delete_template/2` — skip if your cloud has no saved pod templates, and
   declare `:manage_templates` only when you implement all four. Same
   `:unsupported` answer from the facade.
+- `list_endpoints/1`, `get_endpoint/2`, `delete_endpoint/2` — skip if your
+  cloud has no serverless endpoints to manage, and declare
+  `:manage_endpoints` only when you implement all three. Return
+  `%ExAtlas.Spec.Endpoint{}`. Same `:unsupported` answer from the facade.
 - `compute_spend/3` — skip if your cloud reports no per-resource spend, and
   declare `:billing` when you implement it. `opts` carries `:from` and `:to`
   (`DateTime`) when the caller set them; return a `%ExAtlas.Spec.Spend{}`
