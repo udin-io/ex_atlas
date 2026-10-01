@@ -147,17 +147,27 @@ defmodule ExAtlas.Orchestrator do
   # tracker or a record exists.
   defp require_price(compute, opts, tracking) do
     if tracking[:max_cost] && not CostMeter.priced?(compute.cost_per_hour) do
-      _ = ExAtlas.terminate(compute.id, opts)
-
       {:error,
        ExAtlas.Error.new(:unsupported,
          provider: compute.provider,
          message:
            "max_cost needs the pod's hourly price, and the provider reported none " <>
-             "(cost_per_hour: #{inspect(compute.cost_per_hour)}). The pod was deleted."
+             "(cost_per_hour: #{inspect(compute.cost_per_hour)}). " <>
+             delete_unpriced(compute, opts)
        )}
     else
       :ok
+    end
+  end
+
+  defp delete_unpriced(compute, opts) do
+    case ExAtlas.terminate(compute.id, opts) do
+      :ok ->
+        "The pod was deleted."
+
+      {:error, error} ->
+        "The pod #{compute.id} could not be deleted and may still bill: " <>
+          Exception.message(error)
     end
   end
 

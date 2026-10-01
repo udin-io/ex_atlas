@@ -1393,6 +1393,28 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
     end
 
+    test "a refused priceless pod that the provider fails to delete is reported as such",
+         %{base: base} do
+      FaultyProvider.arm(
+        :terminate,
+        {:error, ExAtlas.Error.new(:provider, provider: :mock, status: 500)}
+      )
+
+      assert {:error, %ExAtlas.Error{kind: :unsupported, message: message}} =
+               ExAtlas.Orchestrator.spawn(
+                 Keyword.merge(base,
+                   provider: FaultyProvider,
+                   max_cost: 1,
+                   provider_opts: %{cost_per_hour: nil}
+                 )
+               )
+
+      assert {:ok, [%{id: id, status: :running}]} = ExAtlas.list_compute(provider: :mock)
+      assert message =~ "could not be deleted"
+      assert message =~ id
+      refute message =~ "was deleted"
+    end
+
     test "without a cap the same price ends nothing", %{base: base} do
       {pid, id} = spawn_capped(base, [])
       ref = Process.monitor(pid)
