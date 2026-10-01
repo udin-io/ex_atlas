@@ -189,6 +189,33 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert_in_delta spent, 1.0, 0.01
     end
 
+    test "an adopted pod at a new price records the spend so far and its price" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 2.0})
+      cap_record!(compute.id, 10, 0.0, 1.0, @hour)
+
+      :ok = Adopter.run(notify: self())
+      {:ok, _info} = Orchestrator.info(compute.id)
+
+      # A second restart now must count the hour at $1 once, then $2 an hour.
+      assert {:ok, %{spent_usd: spent, cost_rate: 2.0, cost_since_ms: since}} =
+               Memory.get(compute.id)
+
+      assert_in_delta spent, 1.0, 0.01
+      assert_in_delta since, System.system_time(:millisecond), 5_000
+    end
+
+    test "a price change after adoption rewrites the record's spend and price" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0}, status_poll_ms: 10)
+      cap_record!(compute.id, 10, 0.0, 1.0, @hour)
+      :ok = Adopter.run(notify: self())
+      {:ok, _info} = Orchestrator.info(compute.id)
+
+      :ok = Mock.set_cost_per_hour(compute.id, 3.0)
+
+      assert %{spent_usd: spent} = await_record(compute.id, &(&1.cost_rate == 3.0))
+      assert_in_delta spent, 1.0, 0.01
+    end
+
     test "a wall clock that moved backwards refunds nothing" do
       compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0})
       cap_record!(compute.id, 10, 0.5, 1.0, -@hour)
@@ -489,6 +516,24 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     test "settles immediately so the Reaper is not blocked" do
       assert :ok = Adopter.run(notify: self())
       assert_receive :adoption_complete, 2_000
+    end
+  end
+
+  # Until the stored record matches `fun`. The tracker writes it from its own
+  # mailbox, after a status poll it starts on a timer.
+  defp await_record(id, fun, tries \\ 400) do
+    {:ok, record} = Memory.get(id)
+
+    cond do
+      fun.(record) ->
+        record
+
+      tries > 0 ->
+        Process.sleep(5)
+        await_record(id, fun, tries - 1)
+
+      true ->
+        flunk("the record never matched: #{inspect(record)}")
     end
   end
 

@@ -154,7 +154,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   an operator reading the warning; the alternative is destroying live work.
   """
 
-  alias ExAtlas.Orchestrator.Ownership
+  alias ExAtlas.Orchestrator.{CostMeter, Ownership}
   alias ExAtlas.Spec
 
   @typedoc "Schema version of a persisted record."
@@ -279,6 +279,15 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       cost_rate: nil,
       cost_since_ms: nil
     }
+  end
+
+  @doc """
+  The record fields for `meter`, whose open segment began at wall-clock
+  `since_ms`.
+  """
+  @spec cost_fields(CostMeter.t(), integer()) :: map()
+  def cost_fields(%CostMeter{} = meter, since_ms) do
+    %{spent_usd: meter.spent_before, cost_rate: meter.rate, cost_since_ms: since_ms}
   end
 
   @doc """

@@ -419,14 +419,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     remaining_ms = remaining_runtime_ms(record)
 
     state =
-      arm_cost_cap(%{
+      %{
         new_state(compute, opts, tracking)
         | respawns: record.respawns,
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
-          cost_meter: resumed_cost_meter(record, compute)
-      })
+          cost_meter: resumed_cost_meter(record)
+      }
+      |> reprice()
+      |> arm_cost_cap()
 
     register_callback(state.callback_task_id)
     Events.broadcast(compute.id, {:status, compute.status})
@@ -492,16 +494,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # The record's open segment began at wall-clock `cost_since_ms`; the meter
   # runs on monotonic time, so the segment start moves back by the downtime.
   # A wall clock that went backwards counts no downtime rather than a refund.
-  # The adopted compute's rate then opens a new segment from now.
-  defp resumed_cost_meter(%{max_cost: false}, _compute), do: nil
+  # `reprice/1` then opens a segment at the adopted compute's rate.
+  defp resumed_cost_meter(%{max_cost: false}), do: nil
 
-  defp resumed_cost_meter(record, compute) do
-    now = now_ms()
+  defp resumed_cost_meter(record) do
     downtime_ms = max(System.system_time(:millisecond) - record.cost_since_ms, 0)
-
-    record.max_cost
-    |> CostMeter.resume(record.spent_usd, record.cost_rate, now - downtime_ms)
-    |> CostMeter.rate_changed(compute.cost_per_hour, now)
+    CostMeter.resume(record.max_cost, record.spent_usd, record.cost_rate, now_ms() - downtime_ms)
   end
 
   defp poll_now(%{status_poll_ms: nil}), do: :ok
@@ -755,14 +753,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     reprice(%{state | compute: upstream})
   end
 
-  # A new price closes the meter's segment and re-arms the cap timer. A price
-  # the meter cannot read, or the same price, changes nothing.
+  # A new price closes the meter's segment, records it, and re-arms the cap
+  # timer. A price the meter cannot read, or the same price, changes nothing.
   defp reprice(%{cost_meter: nil} = state), do: state
 
   defp reprice(%{cost_meter: meter} = state) do
     case CostMeter.rate_changed(meter, state.compute.cost_per_hour, now_ms()) do
-      ^meter -> state
-      repriced -> arm_cost_cap(%{state | cost_meter: repriced})
+      ^meter ->
+        state
+
+      repriced ->
+        state = %{state | cost_meter: repriced}
+        record_cost(state)
+        arm_cost_cap(state)
     end
   end
 
@@ -845,6 +848,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:ok, record} -> store.put(fun.(record))
       :error -> :ok
     end
+  end
+
+  # The meter's open segment began at monotonic `since_ms`; the record keeps
+  # it as wall clock, which a new VM can still read.
+  defp record_cost(%{cost_meter: meter} = state) do
+    since_ms = System.system_time(:millisecond) - (now_ms() - meter.since_ms)
+    update_record(state, &Map.merge(&1, TrackingStore.cost_fields(meter, since_ms)))
   end
 
   defp carry_record(%{store: nil}, _old_id, _new_id), do: :ok
