@@ -1,18 +1,23 @@
 defmodule ExAtlas.Fly.TokenStorage.DetsTest do
   use ExUnit.Case, async: false
 
-  @moduletag :tmp_dir
-
   alias ExAtlas.Fly.TokenStorage.Dets
 
-  setup %{tmp_dir: storage_dir} do
+  @tmp_root "tmp/ex_atlas_fly_dets_test"
+
+  setup do
     unique = System.unique_integer([:positive])
+    storage_dir = Path.expand(Path.join(@tmp_root, "#{unique}"))
+    File.rm_rf!(storage_dir)
+    File.mkdir_p!(storage_dir)
 
     # Per-test GenServer name + table names so we don't collide with the
     # application's default Dets instance already running.
     process_name = :"dets_test_#{unique}"
     cached_table = :"dets_test_cached_#{unique}"
     manual_table = :"dets_test_manual_#{unique}"
+
+    on_exit(fn -> File.rm_rf!(storage_dir) end)
 
     %{
       dir: storage_dir,
@@ -58,13 +63,13 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
 
       # Cached path SHOULD recover — losing the cache is a perf regression
       # only, and we want the server to come up so manual tokens stay reachable.
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
     end
   end
 
   describe "clean start" do
     test "opens both tables with empty storage dir", context do
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
 
       assert File.exists?(Path.join(context.dir, "cached.dets"))
       assert File.exists?(Path.join(context.dir, "manual.dets"))
@@ -78,7 +83,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
       # Create a read-only parent so the configured subdirectory cannot
       # be created. Post-M6 this falls back to a tmp_dir path; pre-M6
       # init/1 raised on File.mkdir_p! and took down the Fly tree.
-      readonly_parent = Path.join(context.dir, "ro")
+      readonly_parent = Path.join(Path.expand(@tmp_root), "ro_#{context.unique}")
       File.mkdir_p!(readonly_parent)
       File.chmod!(readonly_parent, 0o500)
 
@@ -105,7 +110,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
     @describetag :unix
 
     test "storage dir is 0700 after init", context do
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
 
       %File.Stat{mode: mode} = File.stat!(context.dir)
       # Low 9 bits are the rwx permission triad.
@@ -114,7 +119,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
     end
 
     test "DETS files are 0600 after init", context do
-      start_supervised!({Dets, start_opts(context)})
+      pid = start_supervised!({Dets, start_opts(context)})
 
       for file <- ["cached.dets", "manual.dets"] do
         path = Path.join(context.dir, file)

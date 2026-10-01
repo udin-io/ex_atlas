@@ -38,10 +38,22 @@ defmodule ExAtlas.Callback.TokenTest do
                Token.verify(token, secret: String.duplicate("a-different-secret", 4))
     end
 
-    test "a tampered token does not verify" do
+    # The token is `header.payload.signature`. The last character of the
+    # signature carries 4 data bits, so changing it can leave the decoded bytes
+    # equal and the token valid. The first character of a segment carries all 6.
+    test "a token with a changed signature does not verify" do
       token = Token.mint("task-1", [:progress], secret: @secret)
-      forged = String.replace(token, ~r/.\z/, "X")
+      forged = change_first_char(token, 2)
 
+      assert forged != token
+      assert {:error, :invalid} = Token.verify(forged, secret: @secret)
+    end
+
+    test "a token with a changed payload does not verify" do
+      token = Token.mint("task-1", [:progress], secret: @secret)
+      forged = change_first_char(token, 1)
+
+      assert forged != token
       assert {:error, :invalid} = Token.verify(forged, secret: @secret)
     end
 
@@ -92,5 +104,14 @@ defmodule ExAtlas.Callback.TokenTest do
         Token.mint("t", [:progress], secret: "short")
       end
     end
+  end
+
+  defp change_first_char(token, segment_index) do
+    token
+    |> String.split(".")
+    |> List.update_at(segment_index, fn <<first, rest::binary>> ->
+      <<if(first == ?A, do: ?B, else: ?A), rest::binary>>
+    end)
+    |> Enum.join(".")
   end
 end

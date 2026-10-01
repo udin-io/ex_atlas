@@ -229,7 +229,7 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       ref = Process.monitor(pid)
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
-      _ = :sys.get_state(ExAtlas.Orchestrator.ComputeRegistry)
+      TestOrchestrator.sync_registry()
       :ok
     end
 

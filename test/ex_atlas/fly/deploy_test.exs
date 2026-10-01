@@ -1,18 +1,13 @@
 defmodule ExAtlas.Fly.DeployTest do
-  use ExUnit.Case, async: true
+  # async: false because six tests prepend a stub `fly` to the process-wide PATH.
+  use ExUnit.Case, async: false
+
+  @moduletag :tmp_dir
 
   alias ExAtlas.Fly.Deploy
 
-  @tmp_dir "tmp/ex_atlas_fly_deploy_test"
-
-  setup do
-    test_dir = Path.join(@tmp_dir, "#{System.unique_integer([:positive])}")
-    File.rm_rf!(test_dir)
-    File.mkdir_p!(test_dir)
-
-    on_exit(fn -> File.rm_rf!(test_dir) end)
-
-    {:ok, test_dir: test_dir}
+  setup %{tmp_dir: tmp_dir} do
+    {:ok, test_dir: tmp_dir}
   end
 
   describe "discover_apps/1" do

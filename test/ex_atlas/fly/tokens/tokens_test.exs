@@ -124,6 +124,7 @@ defmodule ExAtlas.Fly.TokensTest do
       start_tokens_trio(context, cmd_fn: cmd_fn)
 
       assert {:ok, @token} = Tokens.get(@app_name)
+      await_task_sup_drain(context)
       assert {:ok, %{token: @token, expires_at: expires_at}} = Memory.get(@app_name, :cached)
       assert is_integer(expires_at)
     end
@@ -606,10 +607,17 @@ defmodule ExAtlas.Fly.TokensTest do
   # Wait for the per-test Task.Supervisor to have zero children — used by
   # persist-failure tests to ensure the async persist task has completed
   # (and emitted its :error log) before capture_log/1 returns.
+  # `AppServer.persist_async` writes in a `Task.Supervisor` child. Monitor each
+  # running child and wait for its DOWN: a finished child is already gone and
+  # its write is done. A child that exits before the monitor attaches sends
+  # DOWN with reason :noproc, which counts the same.
   defp await_task_sup_drain(context) do
-    wait_until(fn ->
-      Task.Supervisor.children(context.names.task_sup) == []
-    end)
+    for pid <- Task.Supervisor.children(context.names.task_sup) do
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+    end
+
+    :ok
   end
 
   # Polls `fun` every 20ms up to ~1s. Fails the test on timeout.
@@ -695,6 +703,10 @@ defmodule ExAtlas.Fly.TokensTest do
       # First acquire → CLI runs, :cached written to Memory + ETS.
       assert {:ok, _token1} = Tokens.get(app)
       assert_receive {:cli_called, 1}, 1_000
+
+      # The first acquire persists in a Task.Supervisor child. Let it finish, or
+      # it writes the token back after the delete below.
+      await_task_sup_drain(%{names: names})
 
       # Invalidate storage (but NOT ETS) so the scheduled soft-expiry will
       # fall through to CLI when it fires. The ETS entry will be deleted
