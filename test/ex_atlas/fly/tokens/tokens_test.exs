@@ -704,6 +704,10 @@ defmodule ExAtlas.Fly.TokensTest do
       assert {:ok, _token1} = Tokens.get(app)
       assert_receive {:cli_called, 1}, 1_000
 
+      # The first acquire persists in a Task.Supervisor child. Let it finish, or
+      # it writes the token back after the delete below.
+      await_task_sup_drain(%{names: names})
+
       # Invalidate storage (but NOT ETS) so the scheduled soft-expiry will
       # fall through to CLI when it fires. The ETS entry will be deleted
       # by the handle_info itself.
