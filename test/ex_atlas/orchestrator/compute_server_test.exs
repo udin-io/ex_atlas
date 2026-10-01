@@ -1145,6 +1145,34 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  describe "reconcile_spend_ms option validation" do
+    test "an interval that is not a positive integer is refused before renting" do
+      for bad <- [0, -1, "15", 1.5, 4_294_967_296] do
+        assert {:error, %NimbleOptions.ValidationError{key: :reconcile_spend_ms}} =
+                 ExAtlas.Orchestrator.spawn(
+                   provider: :mock,
+                   gpu: :h100,
+                   image: "x",
+                   max_cost: 1,
+                   reconcile_spend_ms: bad
+                 ),
+               "reconcile_spend_ms accepted #{inspect(bad)}"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "false, the longest portable timer, and the 15-minute default are accepted" do
+      for good <- [false, 1, 4_294_967_295] do
+        assert {:ok, tracking} = ComputeServer.validate_opts(max_cost: 1, reconcile_spend_ms: good)
+        assert tracking[:reconcile_spend_ms] == good
+      end
+
+      assert {:ok, tracking} = ComputeServer.validate_opts(max_cost: 1)
+      assert tracking[:reconcile_spend_ms] == :timer.minutes(15)
+    end
+  end
+
   describe "max_cost option validation" do
     test "a cap that is not a positive number is refused before anything is rented" do
       for bad <- [0, -1, "2.5"] do

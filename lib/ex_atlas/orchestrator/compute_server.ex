@@ -197,6 +197,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # the same window the Reaper already works on.
   @default_status_poll_ms 60 * 1_000
 
+  # One billing request per capped pod every 15 minutes. RunPod's billing lags
+  # by an amount its docs do not state, so checking more often buys little.
+  @default_reconcile_spend_ms 15 * 60 * 1_000
+
   # The only death we can both identify and usefully retry. See the moduledoc.
   @respawnable [:preempted]
 
@@ -263,6 +267,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     max_cost: [
       type: {:or, [{:custom, __MODULE__, :validate_max_cost, []}, {:in, [false]}]},
       default: false
+    ],
+    reconcile_spend_ms: [
+      type: {:or, [Timer.option_type(), {:in, [false]}]},
+      default: @default_reconcile_spend_ms
     ]
   ]
 
