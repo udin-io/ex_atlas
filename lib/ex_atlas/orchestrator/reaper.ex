@@ -52,14 +52,37 @@ defmodule ExAtlas.Orchestrator.Reaper do
   With no store configured (`tracking_store: false`) there is nothing to wait
   for and the Reaper behaves exactly as it did before adoption existed.
 
-  ## One orchestrating node
+  ## More than one node: `:reap_owner`
 
-  The Reaper is unsafe on two or more nodes sharing a provider account *and* a
-  `:reap_name_prefix`, and always has been: node B lists the account, sees node
-  A's pods as untracked, and terminates them once the grace window passes.
-  Per-node tracking stores do not fix that — node B's store simply has no
-  record of node A's pods either. See issue #38. Run one orchestrating node, or
-  give each node its own `:reap_name_prefix`.
+  Every node lists the whole provider account, and its Registry and store
+  know only its own pods. So without more information node B sees node A's
+  live pods as orphans. Every deployment with more than one machine on one
+  account must give each machine an owner name that stays the same across
+  its restarts:
+
+      # config/runtime.exs — on Fly, the machine id
+      config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
+
+  `ExAtlas.Orchestrator.spawn/1` then writes the owner into each pod name
+  (`atlas-train-42` becomes `atlas-m1-train-42`), and the Reaper deletes only
+  untracked pods named with its own owner. It leaves every other pod alone and
+  logs each one once per boot: another node's pods, pods named before the
+  owner was set, and pods of a node that is gone. Those last ones are the
+  operator's to delete. See `ExAtlas.Orchestrator.Ownership`.
+
+  The Reaper reaps nothing, and logs an error, when:
+
+    * `:reap_owner` is invalid;
+    * this node has no `:reap_owner` and is connected to other nodes
+      (`Node.list/0` is non-empty; hidden nodes such as a remote console do
+      not count);
+    * a connected node reports the same `:reap_owner` over `:erpc`.
+
+  These checks see connected nodes only. A node with no owner that sees no
+  peers reaps every untracked prefixed pod, as v0.7.0 did, including the
+  pods of machines that share the account without clustering. An owner set
+  on only some machines therefore protects nothing: the machines without one
+  still delete the others' pods.
 
   ## The grace window
 

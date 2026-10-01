@@ -177,6 +177,23 @@ ExAtlas cannot hard-depend on Phoenix, so logs/deploys are dispatched through
 
 Subscriber message shapes are stable across modes.
 
+## Running the orchestrator on more than one machine
+
+Every Fly machine of one app lists the same provider account. Give each
+machine its own `:reap_owner`, or one machine's Reaper deletes another's live
+pods:
+
+```elixir
+# config/runtime.exs
+config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
+```
+
+`FLY_MACHINE_ID` is unique per machine and survives restarts and deploys of
+that machine. Do not use `node()`: the Phoenix Fly template puts the image ref
+in `RELEASE_NODE`, so it changes on every deploy. Set it on every machine; an
+owner on only some of them protects nothing. See the README's "More than one
+node" for the upgrade from v0.7.0.
+
 ## Testing
 
 For unit tests, swap in the in-memory token store:

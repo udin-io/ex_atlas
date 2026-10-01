@@ -470,6 +470,9 @@ config :ex_atlas, :orchestrator,
   reap_providers: [:runpod],
   reap_name_prefix: "atlas-",    # safety switch: only reap resources ExAtlas spawned
   reap_grace_ms: 60_000,         # spare resources too young to have a tracker yet
+  # Required on every machine when more than one shares a provider account.
+  # Unique per machine and stable across its restarts — see "More than one node".
+  reap_owner: System.get_env("FLY_MACHINE_ID"),
 
   # Durable tracking, so a deploy does not orphan (and then reap) a running
   # task. Defaults to the DETS store; set `false` to disable persistence.
@@ -862,6 +865,57 @@ and:
 The prefix is a **safety switch** so ExAtlas never touches pods created by
 other tools on the same cloud account. Set it to `""` to disable.
 
+### More than one node
+
+Every machine lists the whole provider account, and knows only its own pods.
+Without an owner, machine B deletes machine A's live pods once they pass the
+grace window. **Every deployment with more than one machine on one provider
+account must set `:reap_owner` on every machine**, unique per machine and the
+same across that machine's restarts:
+
+```elixir
+# config/runtime.exs
+config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
+```
+
+Use `a-z` and `0-9`, 1 to 32 characters. On Fly, `FLY_MACHINE_ID` fits. Do
+not use `node()`: the Phoenix Fly template puts the image ref in
+`RELEASE_NODE`, so it changes on every deploy.
+
+With an owner set:
+
+- `ExAtlas.Orchestrator.spawn/1` writes it into the pod name:
+  `atlas-train-42` becomes `atlas-m1-train-42`. Respawns and tracking records
+  keep that name.
+- The Reaper deletes only untracked pods named with its own owner. It leaves
+  every other prefixed pod alone and logs each once per boot, with its id and
+  the owner it carries. Pods of a machine that is gone are yours to delete.
+
+The Reaper reaps nothing and logs an error when the owner is invalid, when a
+machine with no owner is connected to other nodes, or when a connected node
+reports the same owner. Those checks see **connected** nodes only:
+
+- A machine with no owner that sees no peers reaps as v0.7.0 did. Machines
+  that share an account without clustering, or a node before its cluster
+  connects, still delete each other's pods. An owner set on only some
+  machines protects nothing.
+- Two machines with the same owner that are not connected delete each
+  other's pods with no error.
+- An owner can claim older pod names. A pod named `atlas-train-42` before
+  owners existed carries owner `train` to the Reaper, so a machine with owner
+  `train` deletes it. Pick an owner that no pre-v0.8 pod name starts with.
+  With `reap_name_prefix: ""` the owner is the first word of any pod name.
+
+Upgrading a cluster from v0.7.0 takes two deploys, because a v0.7.0 node
+running beside a v0.8.0 node deletes the new node's pods:
+
+1. Deploy v0.7.0 with `reap_providers: []`, so no node reaps.
+2. Deploy v0.8.0 with `:reap_owner` set and `reap_providers` restored.
+
+Pods named by v0.7.0 carry no owner after the upgrade and are left alone.
+Their trackers still end them: adopted tasks by deadline, live sessions by
+idle TTL.
+
 The Reaper and the status poller look in opposite directions: the Reaper asks
 "is anything running that nothing is tracking?" (provider → local), while each
 tracker asks "is the thing I track still alive?" (local → provider). Between
@@ -934,11 +988,11 @@ Four things to know before you rely on it:
   `config :ex_atlas, :orchestrator, tracking_store: MyApp.AtlasStore`. The
   shared conformance suite in `test/support` gives your implementation the
   contract tests for free.
-- **Single node.** A node adopts only ids it recorded itself. "Node A died,
-  node B takes over" is deliberately out of scope — it needs a shared store
-  plus leases. Note the Reaper is already unsafe on 2+ nodes sharing a provider
-  account and prefix (issue #38), which this does not change: run one
-  orchestrating node, or give each its own `:reap_name_prefix`.
+- **Adoption is per node.** A node adopts only ids it recorded itself. "Node
+  A died, node B takes over" is deliberately out of scope — it needs a shared
+  store plus leases. A store shared by several nodes makes every node adopt
+  every node's tasks (issue #46). Several machines on one account each need
+  their own `:reap_owner` (see "More than one node").
 
 Nothing here is on by default. With `persist: false` — the default — the
 orchestrator behaves exactly as it did before the store existed.
@@ -1117,9 +1171,11 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
 - **`allow_destructive_actions`** on the LiveDashboard route must be gated
   by your own auth pipeline. The ExAtlas page does not authenticate
   operators — LiveDashboard doesn't either. Put it behind `:require_admin`.
-- **Reaper safety.** `:reap_name_prefix` is the only thing preventing the
-  reaper from terminating pods other tools (or other ExAtlas-using apps) own
-  on the same cloud account. Keep the prefix unique per deployment.
+- **Reaper safety.** `:reap_name_prefix` keeps the reaper away from pods other
+  tools (or other ExAtlas-using apps) own on the same cloud account. Keep the
+  prefix unique per deployment. Within one deployment, `:reap_owner` keeps
+  each machine away from the others' pods; set it on every machine (see "More
+  than one node").
 - **The tracking store is on disk.** Records are scrubbed of `:api_key` and
   friends and never hold `compute.auth.token`, but they do hold your spawn
   opts — including `:env`, which is persisted verbatim so a respawn after
