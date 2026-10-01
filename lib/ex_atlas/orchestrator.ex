@@ -55,6 +55,7 @@ defmodule ExAtlas.Orchestrator do
     ComputeServer,
     ComputeSupervisor,
     Events,
+    Ownership,
     TrackingStore
   }
 
@@ -90,6 +91,15 @@ defmodule ExAtlas.Orchestrator do
   tracker's `init/1` would leave the resource running — and billing — with
   nothing tracking it.
 
+  ## The owner in the name
+
+  With `config :ex_atlas, :orchestrator, reap_owner: "m1"`, a `:name` that
+  starts with `:reap_name_prefix` gets the owner after the prefix:
+  `"atlas-train-42"` becomes `"atlas-m1-train-42"`, and the returned compute,
+  every respawn and the tracking record carry that name. See
+  `ExAtlas.Orchestrator.Ownership`. An invalid `:reap_owner` returns
+  `{:error, %ExAtlas.Error{kind: :validation}}` before the provider is called.
+
   ## `persist: true` — surviving a deploy
 
   Off by default. When set (and only for `mode: :task`), the resource is
@@ -106,6 +116,7 @@ defmodule ExAtlas.Orchestrator do
 
     with {:ok, opts} <- Callback.prepare(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
+         {:ok, opts} <- Ownership.stamp(opts),
          {:ok, compute} <- ExAtlas.spawn_compute(opts) do
       persist(compute, opts, tracking)
       track(compute, opts, tracking)
