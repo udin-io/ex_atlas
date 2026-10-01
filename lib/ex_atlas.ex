@@ -380,6 +380,42 @@ defmodule ExAtlas do
   @spec delete_template(String.t(), opts()) :: :ok | {:error, term()}
   def delete_template(id, opts \\ []), do: dispatch_optional(:delete_template, [id], opts)
 
+  @doc """
+  One pod's spend so far, in US dollars, split into GPU, CPU and disk.
+
+  Providers that cannot report spend return
+  `{:error, %ExAtlas.Error{kind: :unsupported}}`; `:billing` in
+  `capabilities/1` says which can.
+
+  ## Options
+
+    * `:from`, `:to` - `DateTime` bounds of the window. With neither, the
+      provider covers its own default window: RunPod's last 30 days. The
+      returned `from` and `to` show the window the total covers.
+    * every other option is provider config, as in `spawn_compute/1`.
+
+  ## Example
+
+      {:ok, spend} = ExAtlas.compute_spend("pod_9", provider: :runpod)
+      spend.total_usd
+      # => 12.34
+
+  RunPod's docs do not say how soon a new hour of spend shows up here. Do not
+  read the total as a live cost.
+  """
+  @spec compute_spend(String.t(), opts()) :: {:ok, Spec.Spend.t()} | {:error, term()}
+  def compute_spend(id, opts \\ []) when is_binary(id) do
+    {window, config_opts} = Keyword.split(opts, [:from, :to])
+
+    case Enum.reject(window, fn {_key, value} -> match?(%DateTime{}, value) end) do
+      [] ->
+        dispatch_optional(:compute_spend, [id, window], config_opts)
+
+      [{key, _value} | _] ->
+        {:error, ExAtlas.Error.new(:validation, message: "#{inspect(key)} must be a DateTime")}
+    end
+  end
+
   @doc "Return the capability atoms honored by a provider."
   @spec capabilities(atom() | module()) :: [atom()]
   def capabilities(provider), do: provider |> Config.provider_module() |> apply(:capabilities, [])

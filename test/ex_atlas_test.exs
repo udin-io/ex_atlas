@@ -479,4 +479,107 @@ defmodule AtlasTest do
       refute :manage_templates in ExAtlas.capabilities(:mock)
     end
   end
+
+  describe "compute_spend/2" do
+    setup do
+      bypass = Bypass.open()
+
+      {:ok,
+       bypass: bypass,
+       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+    end
+
+    defp spend_respond(conn, status, body) do
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(status, Jason.encode!(body))
+    end
+
+    @spend_body %{
+      "records" => [],
+      "metadata" => %{
+        "query" => %{
+          "startTime" => "2026-09-01T00:00:00Z",
+          "endTime" => "2026-10-02T00:00:00Z",
+          "bucketSize" => "day",
+          "podId" => "pod_9"
+        },
+        "totals" => %{
+          "totalAmount" => 12.34,
+          "gpuAmount" => 11.1,
+          "cpuAmount" => 0,
+          "diskAmount" => 1.24
+        }
+      }
+    }
+
+    test "returns one pod's spend, and provider config keys reach the ctx", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+        assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
+        assert conn.query_string == "podId=pod_9"
+        spend_respond(conn, 200, @spend_body)
+      end)
+
+      assert {:ok,
+              %Spec.Spend{
+                compute_id: "pod_9",
+                provider: :runpod,
+                total_usd: 12.34,
+                gpu_usd: 11.1,
+                cpu_usd: +0.0,
+                disk_usd: 1.24,
+                from: ~U[2026-09-01 00:00:00Z],
+                to: ~U[2026-10-02 00:00:00Z]
+              }} = ExAtlas.compute_spend("pod_9", opts)
+    end
+
+    test "from: and to: reach RunPod as startTime and endTime, not as ctx keys", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+        assert %{"startTime" => "2026-09-30T00:00:00Z", "endTime" => "2026-10-01T00:00:00Z"} =
+                 URI.decode_query(conn.query_string)
+
+        spend_respond(conn, 200, @spend_body)
+      end)
+
+      assert {:ok, %Spec.Spend{}} =
+               ExAtlas.compute_spend(
+                 "pod_9",
+                 [from: ~U[2026-09-30 00:00:00Z], to: ~U[2026-10-01 00:00:00Z]] ++ opts
+               )
+    end
+
+    test "a from: or to: that is not a DateTime is a :validation error and sends no request", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.down(bypass)
+
+      for bad <- [[from: "2026-09-30"], [to: 1_759_000_000], [from: ~D[2026-09-30]]] do
+        assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+                 ExAtlas.compute_spend("pod_9", bad ++ opts)
+
+        assert message =~ "DateTime"
+      end
+    end
+
+    test "a provider without the callback returns :unsupported" do
+      for provider <- [:mock, :lambda_labs, :fly, BareProvider] do
+        assert {:error, %ExAtlas.Error{kind: :unsupported, message: message}} =
+                 ExAtlas.compute_spend("pod_9", provider: provider, api_key: "k")
+
+        assert message =~ "compute_spend"
+      end
+    end
+
+    test "capabilities: runpod reports billing, mock does not" do
+      assert :billing in ExAtlas.capabilities(:runpod)
+      refute :billing in ExAtlas.capabilities(:mock)
+    end
+  end
 end
