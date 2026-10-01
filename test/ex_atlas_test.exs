@@ -251,4 +251,129 @@ defmodule AtlasTest do
       ExAtlas.await_ready(id, provider: FaultyProvider, poll_interval_ms: 1, timeout_ms: 5_000)
     end
   end
+
+  defmodule BareProvider do
+    @moduledoc false
+    def capabilities, do: []
+  end
+
+  describe "network volumes" do
+    setup do
+      bypass = Bypass.open()
+
+      {:ok,
+       bypass: bypass,
+       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+    end
+
+    defp respond(conn, status, body) do
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(status, Jason.encode!(body))
+    end
+
+    @volume %{
+      "id" => "vol_1",
+      "name" => "datasets",
+      "size" => 200,
+      "dataCenter" => "EU-RO-1",
+      "type" => "HIGH_PERFORMANCE"
+    }
+
+    test "create_network_volume/1 takes plain options, and provider config keys reach the ctx", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+        assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+
+        assert %{"name" => "datasets", "size" => 200, "dataCenter" => "EU-RO-1"} =
+                 Jason.decode!(raw)
+
+        respond(conn, 201, @volume)
+      end)
+
+      assert {:ok, %Spec.NetworkVolume{id: "vol_1", provider: :runpod, size_gb: 200}} =
+               ExAtlas.create_network_volume(
+                 [name: "datasets", size_gb: 200, region: "EU-RO-1"] ++ opts
+               )
+    end
+
+    test "create_network_volume/1 passes tier and provider_opts to the request", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"type" => "STANDARD", "extra" => 1} = Jason.decode!(raw)
+        respond(conn, 201, %{@volume | "type" => "STANDARD"})
+      end)
+
+      assert {:ok, %Spec.NetworkVolume{tier: :standard}} =
+               ExAtlas.create_network_volume(
+                 [
+                   name: "d",
+                   size_gb: 10,
+                   region: "r",
+                   tier: :standard,
+                   provider_opts: %{extra: 1}
+                 ] ++
+                   opts
+               )
+    end
+
+    test "create_network_volume/1 raises on a missing name like spawn_compute/1 does", %{
+      opts: opts
+    } do
+      assert_raise NimbleOptions.ValidationError, fn ->
+        ExAtlas.create_network_volume([size_gb: 10] ++ opts)
+      end
+    end
+
+    test "list, get and delete go to the provider", %{bypass: bypass, opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/network-volumes", fn conn ->
+        respond(conn, 200, %{"networkVolumes" => [@volume]})
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/network-volumes/vol_1", fn conn ->
+        respond(conn, 200, @volume)
+      end)
+
+      Bypass.expect_once(bypass, "DELETE", "/network-volumes/vol_1", fn conn ->
+        Plug.Conn.resp(conn, 204, "")
+      end)
+
+      assert {:ok, [%Spec.NetworkVolume{id: "vol_1"}]} = ExAtlas.list_network_volumes(opts)
+      assert {:ok, %Spec.NetworkVolume{id: "vol_1"}} = ExAtlas.get_network_volume("vol_1", opts)
+      assert :ok = ExAtlas.delete_network_volume("vol_1", opts)
+    end
+
+    test "a provider without the callbacks returns :unsupported for all four calls" do
+      for provider <- [:mock, :lambda_labs, BareProvider] do
+        opts = [provider: provider, api_key: "k"]
+
+        for result <- [
+              ExAtlas.list_network_volumes(opts),
+              ExAtlas.get_network_volume("v", opts),
+              ExAtlas.create_network_volume([name: "d", size_gb: 10, region: "r"] ++ opts),
+              ExAtlas.delete_network_volume("v", opts)
+            ] do
+          assert {:error, %ExAtlas.Error{kind: :unsupported}} = result
+        end
+      end
+    end
+
+    test "the :unsupported error names the provider and the call" do
+      assert {:error, %ExAtlas.Error{provider: :lambda_labs, message: message}} =
+               ExAtlas.list_network_volumes(provider: :lambda_labs, api_key: "k")
+
+      assert message =~ "list_network_volumes"
+    end
+
+    test "capabilities: runpod manages network volumes, mock does not" do
+      assert :manage_network_volumes in ExAtlas.capabilities(:runpod)
+      refute :manage_network_volumes in ExAtlas.capabilities(:mock)
+    end
+  end
 end

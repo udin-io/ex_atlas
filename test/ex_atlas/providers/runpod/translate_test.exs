@@ -636,4 +636,63 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       File.chmod!(shim, 0o755)
     end
   end
+
+  describe "network_volume_request_to_body/1" do
+    test "sends name, size and dataCenter, and no type when tier is unset" do
+      req =
+        Spec.NetworkVolumeRequest.new!(name: "datasets", size_gb: 200, region: "EU-RO-1")
+
+      assert Translate.network_volume_request_to_body(req) ==
+               %{"name" => "datasets", "size" => 200, "dataCenter" => "EU-RO-1"}
+    end
+
+    test "provider_opts merge over the body" do
+      req =
+        Spec.NetworkVolumeRequest.new!(
+          name: "d",
+          size_gb: 10,
+          region: "r",
+          provider_opts: %{type: "STANDARD"}
+        )
+
+      assert %{"type" => "STANDARD"} = Translate.network_volume_request_to_body(req)
+    end
+
+    test "maps each tier to RunPod's type" do
+      for {tier, type} <- [standard: "STANDARD", high_performance: "HIGH_PERFORMANCE"] do
+        req = Spec.NetworkVolumeRequest.new!(name: "d", size_gb: 10, region: "r", tier: tier)
+        assert %{"type" => ^type} = Translate.network_volume_request_to_body(req)
+      end
+    end
+  end
+
+  describe "network_volume_to_spec/1" do
+    test "normalizes a RunPod volume and keeps the body in raw" do
+      raw = %{
+        "id" => "2q9m7x4c",
+        "name" => "datasets",
+        "size" => 200,
+        "dataCenter" => "EU-RO-1",
+        "type" => "HIGH_PERFORMANCE"
+      }
+
+      assert %Spec.NetworkVolume{
+               id: "2q9m7x4c",
+               provider: :runpod,
+               name: "datasets",
+               size_gb: 200,
+               region: "EU-RO-1",
+               tier: :high_performance,
+               raw: ^raw
+             } = Translate.network_volume_to_spec(raw)
+    end
+
+    test "STANDARD maps to :standard and an unknown or missing type to nil" do
+      assert %{tier: :standard} =
+               Translate.network_volume_to_spec(%{"id" => "a", "type" => "STANDARD"})
+
+      assert %{tier: nil} = Translate.network_volume_to_spec(%{"id" => "a", "type" => "NEW"})
+      assert %{tier: nil} = Translate.network_volume_to_spec(%{"id" => "a"})
+    end
+  end
 end

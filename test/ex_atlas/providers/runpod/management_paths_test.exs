@@ -9,7 +9,7 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
     {:ok, bypass: bypass, ctx: ctx}
   end
 
-  defp expect_path(bypass, method, path) do
+  defp expect_path(bypass, method, path, body \\ "{}") do
     status = if method == "POST", do: 201, else: 200
     test_pid = self()
 
@@ -18,7 +18,7 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
 
       conn
       |> Plug.Conn.put_resp_header("content-type", "application/json")
-      |> Plug.Conn.resp(status, "{}")
+      |> Plug.Conn.resp(status, body)
     end)
   end
 
@@ -48,7 +48,7 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
       assert {:ok, _} = NetworkVolumes.create(ctx, %{})
       assert_received {:hit, "POST", "/network-volumes"}
 
-      expect_path(bypass, "GET", "/network-volumes")
+      expect_path(bypass, "GET", "/network-volumes", ~s({"networkVolumes": []}))
       assert {:ok, _} = NetworkVolumes.list(ctx)
       assert_received {:hit, "GET", "/network-volumes"}
 

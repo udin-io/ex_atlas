@@ -561,4 +561,172 @@ defmodule ExAtlas.Providers.RunPodTest do
                ExAtlas.get_job("job_1", Keyword.delete(opts, :endpoint))
     end
   end
+
+  describe "network volumes" do
+    alias ExAtlas.Providers.RunPod
+    alias ExAtlas.Spec.NetworkVolume
+
+    @volume %{
+      "id" => "2q9m7x4c",
+      "name" => "datasets",
+      "size" => 200,
+      "dataCenter" => "EU-RO-1",
+      "type" => "HIGH_PERFORMANCE"
+    }
+
+    setup %{ctx_opts: opts}, do: {:ok, ctx: ExAtlas.Config.build_ctx(:runpod, opts)}
+
+    defp volume_request(opts \\ []) do
+      ExAtlas.Spec.NetworkVolumeRequest.new!(
+        Keyword.merge([name: "datasets", size_gb: 200, region: "EU-RO-1"], opts)
+      )
+    end
+
+    test "capabilities include :manage_network_volumes" do
+      assert :manage_network_volumes in RunPod.capabilities()
+    end
+
+    test "create POSTs name, size and dataCenter and returns a NetworkVolume", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+
+        assert Jason.decode!(raw) == %{
+                 "name" => "datasets",
+                 "size" => 200,
+                 "dataCenter" => "EU-RO-1"
+               }
+
+        json(conn, 201, @volume)
+      end)
+
+      assert {:ok,
+              %NetworkVolume{
+                id: "2q9m7x4c",
+                provider: :runpod,
+                size_gb: 200,
+                region: "EU-RO-1",
+                tier: :high_performance
+              }} = RunPod.create_network_volume(volume_request(), ctx)
+    end
+
+    test "create with tier: :standard sends type STANDARD", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"type" => "STANDARD"} = Jason.decode!(raw)
+        json(conn, 201, %{@volume | "type" => "STANDARD"})
+      end)
+
+      assert {:ok, %NetworkVolume{tier: :standard}} =
+               RunPod.create_network_volume(volume_request(tier: :standard), ctx)
+    end
+
+    test "create with no region is a :validation error and sends no request", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.down(bypass)
+
+      assert {:error, %ExAtlas.Error{kind: :validation, provider: :runpod, message: message}} =
+               RunPod.create_network_volume(volume_request(region: nil), ctx)
+
+      assert message =~ "region"
+    end
+
+    test "create surfaces a provider refusal", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+        json(conn, 400, %{"error" => "size out of range"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} =
+               RunPod.create_network_volume(volume_request(), ctx)
+    end
+
+    test "list returns one NetworkVolume per entry of networkVolumes", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "GET", "/network-volumes", fn conn ->
+        json(conn, 200, %{"networkVolumes" => [@volume, %{@volume | "id" => "b"}]})
+      end)
+
+      assert {:ok, [%NetworkVolume{id: "2q9m7x4c"}, %NetworkVolume{id: "b"}]} =
+               RunPod.list_network_volumes(ctx)
+    end
+
+    test "list with no volumes returns an empty list", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/network-volumes", fn conn ->
+        json(conn, 200, %{"networkVolumes" => []})
+      end)
+
+      assert {:ok, []} = RunPod.list_network_volumes(ctx)
+    end
+
+    test "a 200 list body with no networkVolumes list is a :provider error", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      for body <- [%{"other" => 1}, [@volume], %{"networkVolumes" => "x"}] do
+        Bypass.expect_once(bypass, "GET", "/network-volumes", fn conn -> json(conn, 200, body) end)
+
+        assert {:error, %ExAtlas.Error{kind: :provider, provider: :runpod}} =
+                 RunPod.list_network_volumes(ctx)
+      end
+    end
+
+    test "a list entry that is not an object is a :provider error", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/network-volumes", fn conn ->
+        json(conn, 200, %{"networkVolumes" => [@volume, "oops"]})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = RunPod.list_network_volumes(ctx)
+    end
+
+    test "get returns the volume", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/network-volumes/2q9m7x4c", fn conn ->
+        json(conn, 200, @volume)
+      end)
+
+      assert {:ok, %NetworkVolume{id: "2q9m7x4c", name: "datasets"}} =
+               RunPod.get_network_volume("2q9m7x4c", ctx)
+    end
+
+    test "get of a missing volume is :not_found", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/network-volumes/gone", fn conn ->
+        json(conn, 404, %{"error" => "not found"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.get_network_volume("gone", ctx)
+    end
+
+    test "get with a 200 body that is not an object is a :provider error", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "GET", "/network-volumes/x", fn conn ->
+        Plug.Conn.resp(conn, 200, "null")
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = RunPod.get_network_volume("x", ctx)
+    end
+
+    test "delete returns :ok on 204", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/network-volumes/2q9m7x4c", fn conn ->
+        Plug.Conn.resp(conn, 204, "")
+      end)
+
+      assert :ok = RunPod.delete_network_volume("2q9m7x4c", ctx)
+    end
+
+    test "delete of a missing volume is :not_found", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/network-volumes/gone", fn conn ->
+        json(conn, 404, %{"error" => "not found"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} =
+               RunPod.delete_network_volume("gone", ctx)
+    end
+  end
 end

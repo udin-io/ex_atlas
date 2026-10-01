@@ -541,6 +541,7 @@ Every provider implements one callback per operation. See
 | `stream_job/2`              | Stream partial outputs                            |
 | `capabilities/0`            | Declare supported features                        |
 | `list_gpu_types/1`          | Catalog + pricing                                 |
+| `list/get/create/delete_network_volume` | Optional: manage network volumes     |
 
 Callers can check `ExAtlas.capabilities(:runpod)` before relying on an
 optional feature:
@@ -551,6 +552,20 @@ if :serverless in ExAtlas.capabilities(provider) do
 end
 ```
 
+### Network volumes
+
+```elixir
+{:ok, volume} =
+  ExAtlas.create_network_volume(provider: :runpod, name: "datasets", size_gb: 200, region: "EU-RO-1")
+
+ExAtlas.spawn_compute(provider: :runpod, gpu: :h100, image: "...", network_volume_id: volume.id)
+ExAtlas.list_network_volumes(provider: :runpod)
+ExAtlas.delete_network_volume(volume.id, provider: :runpod)
+
+ExAtlas.list_network_volumes(provider: :lambda_labs)
+# => {:error, %ExAtlas.Error{kind: :unsupported}}
+```
+
 ### Capability atoms
 
 | Atom                | Meaning                                                               |
@@ -558,6 +573,7 @@ end
 | `:spot`             | Interruptible/spot instances                                          |
 | `:serverless`       | `run_job/2` and friends                                               |
 | `:network_volumes`  | Attach persistent volumes                                             |
+| `:manage_network_volumes` | Create, list, get and delete volumes                            |
 | `:http_proxy`       | Provider terminates TLS on a `*.proxy.*` hostname                     |
 | `:raw_tcp`          | Public IP + mapped TCP ports                                          |
 | `:symmetric_ports`  | `internal == external` port guarantee                                 |

@@ -429,4 +429,43 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp gpu_cloud_type(true, false), do: :secure
   defp gpu_cloud_type(false, true), do: :community
   defp gpu_cloud_type(_, _), do: :any
+
+  @doc """
+  Build the `POST /network-volumes` body. `type` is sent only when the request
+  names a tier, so RunPod picks its own default otherwise. `provider_opts` merge
+  over the body.
+  """
+  @spec network_volume_request_to_body(Spec.NetworkVolumeRequest.t()) :: map()
+  def network_volume_request_to_body(%Spec.NetworkVolumeRequest{} = req) do
+    %{
+      "name" => req.name,
+      "size" => req.size_gb,
+      "dataCenter" => req.region,
+      "type" => volume_type(req.tier)
+    }
+    |> drop_nils()
+    |> Map.merge(stringify(req.provider_opts))
+  end
+
+  @doc "Normalize a RunPod network volume body."
+  @spec network_volume_to_spec(map()) :: Spec.NetworkVolume.t()
+  def network_volume_to_spec(%{} = raw) do
+    %Spec.NetworkVolume{
+      id: raw["id"],
+      provider: :runpod,
+      name: raw["name"],
+      size_gb: raw["size"],
+      region: raw["dataCenter"],
+      tier: tier_from_type(raw["type"]),
+      raw: raw
+    }
+  end
+
+  defp volume_type(:standard), do: "STANDARD"
+  defp volume_type(:high_performance), do: "HIGH_PERFORMANCE"
+  defp volume_type(nil), do: nil
+
+  defp tier_from_type("STANDARD"), do: :standard
+  defp tier_from_type("HIGH_PERFORMANCE"), do: :high_performance
+  defp tier_from_type(_), do: nil
 end

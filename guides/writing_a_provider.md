@@ -106,6 +106,12 @@ alias it in your own wrapper module or add it to your host app's
 - `run_job/2`, `get_job/2`, `cancel_job/2`, `stream_job/2` — skip if you
   don't implement serverless.
 - `list_gpu_types/1` — skip if your cloud has no pricing catalog.
+- `list_network_volumes/1`, `get_network_volume/2`, `create_network_volume/2`,
+  `delete_network_volume/2` — skip if your cloud has no network volumes, and
+  declare `:manage_network_volumes` only when you implement all four. A
+  caller of `ExAtlas.list_network_volumes/1` then gets
+  `{:error, %ExAtlas.Error{kind: :unsupported}}` from the facade; no stub is
+  needed.
 
 ## Register GPU mappings
 
