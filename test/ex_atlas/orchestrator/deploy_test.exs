@@ -12,14 +12,16 @@ defmodule ExAtlas.Orchestrator.DeployTest do
   use ExUnit.Case, async: false
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Adopter, Events, TrackingStore}
+  alias ExAtlas.Orchestrator.{Adopter, Events, Reaper, TrackingStore}
+  alias ExAtlas.Providers.Mock
+  alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: dir} do
     Application.put_env(:ex_atlas, :start_orchestrator, true)
     Application.put_env(:ex_atlas, :default_provider, :mock)
-    Application.put_env(:ex_atlas, :callback, secret: ExAtlas.Test.Orchestrator.callback_secret())
+    Application.put_env(:ex_atlas, :callback, secret: TestOrchestrator.callback_secret())
 
     Application.put_env(:ex_atlas, :orchestrator,
       tracking_store: TrackingStore.Dets,
@@ -28,7 +30,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
       reap_grace_ms: 0
     )
 
-    ExAtlas.Providers.Mock.reset()
+    Mock.reset()
 
     on_exit(fn ->
       Application.delete_env(:ex_atlas, :start_orchestrator)
@@ -78,7 +80,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     # and past its grace window, now finds a tracker for it and leaves it
     # alone. (That an *unadopted* record also spares it is covered by
     # `ExAtlas.Orchestrator.ReaperTest`.)
-    :ok = ExAtlas.Orchestrator.Reaper.reap_now("atlas-", [:mock])
+    :ok = Reaper.reap_now("atlas-", [:mock])
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
   end
 
@@ -96,7 +98,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
       assert {:ok, %{compute: %{id: id}}} = Orchestrator.info(compute.id)
       assert id == compute.id
 
-      :ok = ExAtlas.Orchestrator.Reaper.reap_now("atlas-", [:mock])
+      :ok = Reaper.reap_now("atlas-", [:mock])
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
 
