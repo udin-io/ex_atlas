@@ -28,6 +28,9 @@ returned an error on a live key.
 
 ## v0.6.0
 
+Tagged but not published to Hex: its `list_gpu_types/1` failed on every
+call. v0.7.0 carries every change below plus that fix.
+
 ### Changed: Runpod REST v2 (breaking, v0.6.0)
 
 Runpod retires REST v1 on 2026-11-15. Every Runpod management call now goes to
