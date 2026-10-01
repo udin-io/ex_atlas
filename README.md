@@ -901,6 +901,8 @@ reports the same owner. Those checks see **connected** nodes only:
   machines protects nothing.
 - Two machines with the same owner that are not connected delete each
   other's pods with no error.
+- A connected node that cannot report its owner, such as a v0.7.0 node
+  mid-upgrade, gets one warning per boot naming it. Reaping goes on.
 - An owner can claim older pod names. A pod named `atlas-train-42` before
   owners existed carries owner `train` to the Reaper, so a machine with owner
   `train` deletes it. Pick an owner that no pre-v0.8 pod name starts with.

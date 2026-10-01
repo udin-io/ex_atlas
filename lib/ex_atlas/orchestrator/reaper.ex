@@ -80,6 +80,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
       not count);
     * a connected node reports the same `:reap_owner` over `:erpc`.
 
+  A connected node that cannot report its owner (an ex_atlas older than
+  v0.8.0, or no answer within 5 s) gets one warning per boot, and reaping
+  goes on.
+
   These checks see connected nodes only. A node with no owner that sees no
   peers reaps every untracked prefixed pod, as v0.7.0 did, including the
   pods of machines that share the account without clustering. An owner set

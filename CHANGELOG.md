@@ -26,6 +26,8 @@ account, node B deleted node A's live pods, hours-long tasks included.
 - The Reaper reaps nothing and logs an error when the owner is invalid, when
   a node with no owner is connected to other nodes (`Node.list/0`), or when a
   connected node reports the same owner.
+- A connected node that cannot report its owner (an ex_atlas older than
+  v0.8.0, or no answer within 5 s) gets one warning per boot, naming it.
 - New `ExAtlas.Orchestrator.Ownership`: `owner/0`, `prefix/0`, `stamp/1`,
   `classify/3`.
 
