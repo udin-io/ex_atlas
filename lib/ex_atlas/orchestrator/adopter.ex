@@ -140,7 +140,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
   defp log_other_owner(owner, ids) do
     Logger.info(
       "[ExAtlas.Orchestrator.Adopter] leaving #{length(ids)} record(s) of owner #{inspect(owner)} " <>
-        "in the store, untracked on this node: #{Enum.join(ids, ", ")}. Their owner adopts them. " <>
+        "in the store, untracked on this node: #{Enum.map_join(ids, ", ", &inspect/1)}. Their owner adopts them. " <>
         "If that node is gone, delete the pods and records by hand."
     )
   end

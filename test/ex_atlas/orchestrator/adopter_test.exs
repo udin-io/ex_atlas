@@ -337,6 +337,16 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert [_once] = Regex.scan(~r/\[error\][^\n]*:reap_owner/, log)
     end
 
+    test "another owner's record with an odd id does not cost this node its adoption" do
+      mine = orphaned_task_of("b")
+      :ok = Memory.put(%{v: 2, mode: :task, owner: "a", id: {:odd, :id}})
+
+      log = boot_as("b")
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(mine.id)
+      assert log =~ "{:odd, :id}"
+    end
+
     test "another owner's record of a pod the provider forgot is kept" do
       compute = orphaned_task_of("a")
       :ok = Mock.forget(compute.id)
