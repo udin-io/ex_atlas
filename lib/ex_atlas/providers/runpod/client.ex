@@ -98,6 +98,68 @@ defmodule ExAtlas.Providers.RunPod.Client do
     {:error, ExAtlas.Error.new(:transport, provider: :runpod, raw: other)}
   end
 
+  # 1000 entries a page, RunPod's maximum. The page cap stops a cursor that
+  # never ends from looping forever.
+  @page_size 1000
+  @max_pages 100
+
+  @doc """
+  GET `path`, following `pagination.nextCursor` until RunPod has no next page.
+  `key` names the list in each page body (`"pods"`, `"templates"`).
+
+  Returns `{:ok, [entry]}`. A failed page, a page whose `key` is not a list of
+  objects, or a cursor that does not advance fails the whole call: a partial
+  list would show a live resource as missing.
+  """
+  @spec list_all(ExAtlas.Provider.ctx(), String.t(), String.t()) ::
+          {:ok, [map()]} | {:error, ExAtlas.Error.t()}
+  def list_all(ctx, path, key), do: list_pages(ctx, path, key, nil, [], 0)
+
+  defp list_pages(_ctx, path, _key, _cursor, _acc, @max_pages),
+    do: list_error("GET #{path} returned more than #{@max_pages} pages", nil)
+
+  defp list_pages(ctx, path, key, cursor, acc, page) do
+    params = if cursor, do: [limit: @page_size, cursor: cursor], else: [limit: @page_size]
+
+    result =
+      ctx
+      |> management()
+      |> Req.get(url: path, params: params)
+      |> handle_response()
+
+    with {:ok, body} <- result,
+         {:ok, entries} <- page_entries(body, path, key) do
+      case body["pagination"] do
+        %{"hasNextPage" => true, "nextCursor" => next} when is_binary(next) and next != cursor ->
+          list_pages(ctx, path, key, next, [entries | acc], page + 1)
+
+        %{"hasNextPage" => true} ->
+          list_error("GET #{path} pagination did not advance", body["pagination"])
+
+        _ ->
+          {:ok, [entries | acc] |> Enum.reverse() |> Enum.concat()}
+      end
+    end
+  end
+
+  defp page_entries(body, path, key) when is_map(body) do
+    case Map.get(body, key) do
+      entries when is_list(entries) ->
+        if Enum.all?(entries, &is_map/1),
+          do: {:ok, entries},
+          else: list_error("GET #{path} listed an entry that is not an object", nil)
+
+      _ ->
+        list_error("unexpected body for GET #{path}", nil)
+    end
+  end
+
+  # `raw` never carries entry bodies: pod and template `env` hold secrets.
+  defp page_entries(_body, path, _key), do: list_error("unexpected body for GET #{path}", nil)
+
+  defp list_error(message, raw),
+    do: {:error, ExAtlas.Error.new(:provider, provider: :runpod, message: message, raw: raw)}
+
   defp status_in?(status, %Range{} = range), do: status in range
   defp status_in?(status, expected) when is_integer(expected), do: status == expected
 
