@@ -110,14 +110,15 @@ defmodule ExAtlas.Providers.MockTest do
                ExAtlas.compute_spend(id, provider: :mock)
     end
 
-    test "spend_calls/1 counts compute_spend calls per pod", %{compute: %{id: id}} do
-      assert Mock.spend_calls(id) == 0
+    test "spend_requests/1 lists each compute_spend window for one pod", %{compute: %{id: id}} do
+      assert Mock.spend_requests(id) == []
 
+      from = ~U[2026-10-01 00:00:00Z]
       {:ok, _} = ExAtlas.compute_spend(id, provider: :mock)
-      {:ok, _} = ExAtlas.compute_spend(id, provider: :mock)
+      {:ok, _} = ExAtlas.compute_spend(id, provider: :mock, from: from)
       {:ok, _} = ExAtlas.compute_spend("other", provider: :mock)
 
-      assert Mock.spend_calls(id) == 2
+      assert Mock.spend_requests(id) == [%{from: nil, to: nil}, %{from: from, to: nil}]
     end
   end
 end

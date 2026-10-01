@@ -93,14 +93,17 @@ defmodule ExAtlas.Providers.Mock do
     :ok
   end
 
-  @doc "How many times `compute_spend/3` has been called for `id`."
-  @spec spend_calls(String.t()) :: non_neg_integer()
-  def spend_calls(id) do
+  @doc """
+  The window of every `compute_spend/3` call for `id`, oldest first, as
+  `%{from: from, to: to}`.
+  """
+  @spec spend_requests(String.t()) :: [%{from: DateTime.t() | nil, to: DateTime.t() | nil}]
+  def spend_requests(id) do
     ensure_started()
 
-    case :ets.lookup(@table, {:spend_calls, id}) do
-      [{_, count}] -> count
-      [] -> 0
+    case :ets.lookup(@table, {:spend_requests, id}) do
+      [{_, requests}] -> Enum.reverse(requests)
+      [] -> []
     end
   end
 
@@ -194,7 +197,11 @@ defmodule ExAtlas.Providers.Mock do
   @impl true
   def compute_spend(id, opts, _ctx) do
     ensure_started()
-    :ets.update_counter(@table, {:spend_calls, id}, 1, {{:spend_calls, id}, 0})
+
+    :ets.insert(
+      @table,
+      {{:spend_requests, id}, [Map.new(window(opts)) | spend_requests_desc(id)]}
+    )
 
     total =
       case :ets.lookup(@table, {:spend, id}) do
@@ -290,6 +297,15 @@ defmodule ExAtlas.Providers.Mock do
   end
 
   # --- helpers ---
+
+  defp window(opts), do: [from: opts[:from], to: opts[:to]]
+
+  defp spend_requests_desc(id) do
+    case :ets.lookup(@table, {:spend_requests, id}) do
+      [{_, requests}] -> requests
+      [] -> []
+    end
+  end
 
   defp update_compute(id, fun) do
     ensure_started()
