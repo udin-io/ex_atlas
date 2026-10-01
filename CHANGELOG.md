@@ -19,8 +19,10 @@ or `stop_tracked/1` on node B deleted node A's pod and record.
   record in the store, never asks the provider about it, and logs one info line
   per other owner with its ids.
 - The first node to adopt an unowned record (version 1, or owner `nil`) claims
-  it by writing its own owner. Two nodes that boot in the same second can both
-  adopt it once.
+  it by writing its own owner. The write is not atomic: two nodes whose
+  Adopters read the store within about 5 ms of each other can both adopt it
+  (measured on two peers: 19 of 20 records at 0 ms apart, 2 of 20 at 5 ms, 0 of
+  20 at 20 ms or more). A rolling deploy boots nodes seconds apart.
 - An invalid `:reap_owner` adopts nothing and keeps every record.
 - A dead owner's pods and records stay until you delete them. No lease or
   expiry.
