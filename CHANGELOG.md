@@ -7,6 +7,13 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: CI (#35)
+
+`bin/ci` runs format, a strict compile, `mix hex.audit`, sobelow and the test
+suite, and `.github/workflows/ci.yml` calls it. Sobelow fails on any Medium or
+High finding, and on any finding in the callback code. Dev tooling only: no
+library behaviour changes.
+
 ### Fixed: a shared tracking store adopts other nodes' tasks (breaking, #46)
 
 A `TrackingStore` backed by one shared database made every node adopt every

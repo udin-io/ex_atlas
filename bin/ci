@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# The one place CI's steps live. .github/workflows/ci.yml calls this script;
+# you run it before every push. Stops at the first failing step.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export MIX_ENV=test
+
+# The callback boundary takes untrusted input. Sobelow rates every finding in a
+# non-controller module "low", so `exit: :medium` in .sobelow-conf never fails
+# on one. Fail on a finding of ANY confidence in the callback files.
+callback_boundary_clean() {
+  local json hits stray
+  json=$(mix sobelow --config --format json)
+  # A path outside lib/ means sobelow changed its output shape: fail instead of
+  # letting the callback filter below match nothing.
+  stray=$(jq -r '.findings[][] | select(.file | startswith("lib/") | not) | .file' <<<"$json")
+  if [ -n "$stray" ]; then
+    printf 'sobelow reported a path outside lib/:\n%s\n' "$stray" >&2
+    return 1
+  fi
+  hits=$(jq -r '.findings[][] | select(.file | test("^lib/ex_atlas/callback(\\.ex$|/)")) | "\(.file):\(.line) \(.type)"' <<<"$json")
+  if [ -n "$hits" ]; then
+    printf 'sobelow findings in the callback boundary:\n%s\n' "$hits" >&2
+    return 1
+  fi
+}
+
+step() {
+  printf '\n==> %s\n' "$1"
+  shift
+  "$@"
+}
+
+step "format"            mix format --check-formatted
+step "compile"           mix compile --force --warnings-as-errors
+step "hex.audit"         mix hex.audit
+step "sobelow"           mix sobelow --config
+step "sobelow callback"  callback_boundary_clean
+step "test"              mix test
+
+printf '\nbin/ci: all steps passed\n'
