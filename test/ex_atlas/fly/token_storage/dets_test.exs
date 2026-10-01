@@ -1,23 +1,18 @@
 defmodule ExAtlas.Fly.TokenStorage.DetsTest do
   use ExUnit.Case, async: false
 
+  @moduletag :tmp_dir
+
   alias ExAtlas.Fly.TokenStorage.Dets
 
-  @tmp_root "tmp/ex_atlas_fly_dets_test"
-
-  setup do
+  setup %{tmp_dir: storage_dir} do
     unique = System.unique_integer([:positive])
-    storage_dir = Path.expand(Path.join(@tmp_root, "#{unique}"))
-    File.rm_rf!(storage_dir)
-    File.mkdir_p!(storage_dir)
 
     # Per-test GenServer name + table names so we don't collide with the
     # application's default Dets instance already running.
     process_name = :"dets_test_#{unique}"
     cached_table = :"dets_test_cached_#{unique}"
     manual_table = :"dets_test_manual_#{unique}"
-
-    on_exit(fn -> File.rm_rf!(storage_dir) end)
 
     %{
       dir: storage_dir,
@@ -83,7 +78,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsTest do
       # Create a read-only parent so the configured subdirectory cannot
       # be created. Post-M6 this falls back to a tmp_dir path; pre-M6
       # init/1 raised on File.mkdir_p! and took down the Fly tree.
-      readonly_parent = Path.join(Path.expand(@tmp_root), "ro_#{context.unique}")
+      readonly_parent = Path.join(context.dir, "ro")
       File.mkdir_p!(readonly_parent)
       File.chmod!(readonly_parent, 0o500)
 

@@ -11,11 +11,17 @@ defmodule ExAtlas.Fly.TokenStorage.DetsConformanceTest do
 
   alias ExAtlas.Fly.TokenStorage.Dets
 
+  @moduletag :tmp_dir
+
+  # Runs before the conformance suite's own setup, which calls __setup_dets__.
+  setup %{tmp_dir: tmp_dir} do
+    Process.put(:dets_conformance_dir, tmp_dir)
+    :ok
+  end
+
   use ExAtlas.Fly.TokenStorageConformance,
     storage: __MODULE__.DetsProxy,
     setup: {__MODULE__, :__setup_dets__, []}
-
-  @tmp_root "tmp/ex_atlas_fly_dets_conformance"
 
   # The conformance suite assumes a module with fixed get/put/delete/3 API.
   # Dets has it, but is a singleton-named GenServer. To run conformance
@@ -68,9 +74,7 @@ defmodule ExAtlas.Fly.TokenStorage.DetsConformanceTest do
   def __setup_dets__ do
     unique = System.unique_integer([:positive])
 
-    storage_dir = Path.expand(Path.join(@tmp_root, "#{unique}"))
-    File.rm_rf!(storage_dir)
-    File.mkdir_p!(storage_dir)
+    storage_dir = Process.get(:dets_conformance_dir)
 
     process_name = :"dets_conformance_#{unique}"
     cached_table = :"dets_conformance_cached_#{unique}"
@@ -87,8 +91,6 @@ defmodule ExAtlas.Fly.TokenStorage.DetsConformanceTest do
        cached_table: cached_table,
        manual_table: manual_table}
     )
-
-    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(storage_dir) end)
 
     :ok
   end
