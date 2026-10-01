@@ -1689,7 +1689,9 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       {pid, id} = spawn_reconciled(base, max_cost: 1)
       :ok = Mock.set_spend(id, nil)
 
-      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _}}, 2_000
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconcile_failed, %ExAtlas.Error{kind: :provider, raw: nil}}},
+                     2_000
 
       refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
       assert Process.alive?(pid)
@@ -1717,6 +1719,16 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
       assert Mock.spend_requests(id) == []
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a bill too large for a float is reported, and the session stays", %{base: base} do
+      {pid, id} = spawn_reconciled(base, max_cost: 1)
+      ref = Process.monitor(pid)
+      :ok = Mock.set_spend(id, Integer.pow(10, 400))
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, %ExAtlas.Error{}}}, 2_000
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
     end
 

@@ -848,8 +848,32 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # Spend becomes the larger of the estimate and the bill for the current pod.
   # A lower bill changes nothing: billing lags, so it may only be late.
-  defp apply_bill({:ok, %Spec.Spend{total_usd: billed}}, _pod_id, state)
-       when is_number(billed) do
+  defp apply_bill({:ok, %Spec.Spend{total_usd: total}}, _pod_id, state) do
+    case CostMeter.usd(total) do
+      nil ->
+        reconcile_failed(
+          ExAtlas.Error.new(:provider,
+            provider: state.compute.provider,
+            message: "the bill carried no total in US dollars"
+          ),
+          state
+        )
+
+      billed ->
+        apply_billed(billed, state)
+    end
+  end
+
+  # A provider with no billing API answers the same way every time. Stop asking,
+  # and say nothing: a failure event every interval, forever, is noise.
+  defp apply_bill({:error, %ExAtlas.Error{kind: :unsupported}}, _pod_id, state),
+    do: {:noreply, %{state | reconcile_spend_ms: nil}}
+
+  defp apply_bill({:error, error}, _pod_id, state), do: reconcile_failed(error, state)
+
+  defp apply_bill(other, _pod_id, state), do: reconcile_failed({:unexpected, other}, state)
+
+  defp apply_billed(billed, state) do
     now = now_ms()
     meter = state.cost_meter
     estimated = CostMeter.pod_spent_usd(meter, now)
@@ -878,15 +902,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     schedule_reconcile(state)
     {:noreply, state}
   end
-
-  # A provider with no billing API answers the same way every time. Stop asking,
-  # and say nothing: a failure event every interval, forever, is noise.
-  defp apply_bill({:error, %ExAtlas.Error{kind: :unsupported}}, _pod_id, state),
-    do: {:noreply, %{state | reconcile_spend_ms: nil}}
-
-  defp apply_bill({:error, error}, _pod_id, state), do: reconcile_failed(error, state)
-
-  defp apply_bill(other, _pod_id, state), do: reconcile_failed({:unexpected, other}, state)
 
   defp reconcile_failed(error, state) do
     Events.broadcast(state.compute.id, {:spend_reconcile_failed, error})

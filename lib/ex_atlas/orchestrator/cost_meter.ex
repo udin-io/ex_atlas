@@ -130,15 +130,16 @@ defmodule ExAtlas.Orchestrator.CostMeter do
   the spend moved. The meter then keeps running at its rate.
   """
   @spec reconcile(t(), term(), integer()) :: t()
-  def reconcile(%__MODULE__{} = meter, billed_usd, now_ms) when is_number(billed_usd) do
-    gap = billed_usd - pod_spent_usd(meter, now_ms)
+  def reconcile(%__MODULE__{} = meter, billed_usd, now_ms) do
+    case usd(billed_usd) do
+      nil ->
+        meter
 
-    if gap > 0,
-      do: %{meter | spent_before: meter.spent_before + gap},
-      else: meter
+      billed ->
+        gap = billed - pod_spent_usd(meter, now_ms)
+        if gap > 0, do: %{meter | spent_before: meter.spent_before + gap}, else: meter
+    end
   end
-
-  def reconcile(%__MODULE__{} = meter, _not_a_bill, _now_ms), do: meter
 
   @doc "Dollars spent up to `now_ms`."
   @spec spent_usd(t(), integer()) :: float()
@@ -178,9 +179,25 @@ defmodule ExAtlas.Orchestrator.CostMeter do
       false
   """
   @spec priced?(term()) :: boolean()
-  def priced?(rate), do: not is_nil(known_rate(rate))
+  def priced?(rate), do: not is_nil(usd(rate))
 
-  defp known_rate(rate) when is_number(rate) and rate >= 0, do: rate / 1
+  @doc """
+  `value` as a float number of dollars, or `nil` when it is not a
+  non-negative number or `Decimal` that a float can hold.
+
+      iex> ExAtlas.Orchestrator.CostMeter.usd(2)
+      2.0
+      iex> ExAtlas.Orchestrator.CostMeter.usd(Integer.pow(10, 400))
+      nil
+  """
+  @spec usd(term()) :: float() | nil
+  def usd(value), do: known_rate(value)
+
+  defp known_rate(rate) when is_float(rate) and rate >= 0, do: rate
+
+  # An integer past this converts to a float only by raising, and a raise in
+  # the tracker deletes a healthy pod.
+  defp known_rate(rate) when is_integer(rate) and rate >= 0 and rate < 1.0e300, do: rate / 1
 
   # Decimal is not a dependency of ExAtlas, so its struct is read through its
   # `String.Chars` form rather than `Decimal.to_float/1`.
