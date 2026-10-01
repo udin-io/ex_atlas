@@ -1,0 +1,6 @@
+[
+  exit: :medium,
+  format: "txt",
+  router: :none,
+  verbose: false
+]
