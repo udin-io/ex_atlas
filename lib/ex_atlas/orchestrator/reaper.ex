@@ -274,7 +274,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
     %{
       interval: interval,
       providers: Keyword.get(cfg, :reap_providers, [:runpod]),
-      prefix: Keyword.get(cfg, :reap_name_prefix, "atlas-"),
+      prefix: Ownership.prefix(),
       grace_ms: Keyword.get(cfg, :reap_grace_ms, interval)
     }
   end
