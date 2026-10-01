@@ -300,6 +300,29 @@ defmodule AtlasTest do
                )
     end
 
+    test "create_network_volume/1 passes tier and provider_opts to the request", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"type" => "STANDARD", "extra" => 1} = Jason.decode!(raw)
+        respond(conn, 201, %{@volume | "type" => "STANDARD"})
+      end)
+
+      assert {:ok, %Spec.NetworkVolume{tier: :standard}} =
+               ExAtlas.create_network_volume(
+                 [
+                   name: "d",
+                   size_gb: 10,
+                   region: "r",
+                   tier: :standard,
+                   provider_opts: %{extra: 1}
+                 ] ++
+                   opts
+               )
+    end
+
     test "create_network_volume/1 raises on a missing name like spawn_compute/1 does", %{
       opts: opts
     } do
