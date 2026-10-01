@@ -834,7 +834,7 @@ ExAtlas.Orchestrator.info(compute.id)
 The tracker multiplies the pod's `cost_per_hour` by the time it has run, and
 deletes the pod when that reaches `max_cost` US dollars. Subscribers get
 `{:terminating, :cost_cap}`; a task gets `{:task, {:failed, :cost_cap}}` first.
-It works in both modes and calls no billing API.
+It works in both modes.
 
 * The spend is an estimate from the price the provider reports. A status poll
   with a new price re-prices the rest of the run; a poll with no price keeps
@@ -845,10 +845,21 @@ It works in both modes and calls no billing API.
 * With `persist: true` the tracking record carries the spend. An adopted task
   resumes its budget, and the time the node was down counts at the last known
   price, since the pod billed through it.
+* Every 15 minutes the tracker asks the provider for the current pod's bill
+  (`ExAtlas.compute_spend/2`). A bill above the estimate becomes the spend, so
+  the cap fires sooner. A lower bill changes nothing: RunPod's billing lags by
+  an amount its docs do not state, so a low bill may only be late. A provider
+  with no billing API is asked once, and the session runs on the estimate.
 
-| Option      | Default | Meaning                                              |
-| ----------- | ------- | ---------------------------------------------------- |
-| `:max_cost` | `false` | US dollars; a positive number. Delete the pod at it  |
+```elixir
+# estimate $1.49, RunPod bills $1.80
+# {:atlas_compute, id, {:spend_reconciled, %{estimated_usd: 1.49, billed_usd: 1.8, spent_usd: 1.8}}}
+```
+
+| Option                | Default  | Meaning                                                  |
+| --------------------- | -------- | -------------------------------------------------------- |
+| `:max_cost`           | `false`  | US dollars; a positive number. Delete the pod at it      |
+| `:reconcile_spend_ms` | 15 min   | How often to read the bill when `max_cost` is set; `false` turns it off |
 
 ### PubSub events
 
@@ -865,7 +876,9 @@ Every state change is broadcast over `ExAtlas.PubSub` on the topic
 | `{:respawned, new_id}`               | Preempted resource replaced (sent on the old id)                               |
 | `{:respawn_failed, {reason, error}}` | Replacement couldn't be spawned                                                |
 | `{:task, outcome}`                   | A `mode: :task` session ended: `:completed`, `:timed_out`, `{:failed, reason}`  |
-| `{:terminating, :cost_cap}`          | The estimated spend reached `max_cost`; teardown follows                        |
+| `{:spend_reconciled, %{estimated_usd: e, billed_usd: b, spent_usd: s}}` | The tracker read the current pod's bill; `e` is this pod's estimate, `s` the session's spend after |
+| `{:spend_reconcile_failed, error}`   | Reading the bill failed; nothing changed, and it is read again next interval    |
+| `{:terminating, :cost_cap}`          | The spend reached `max_cost`; teardown follows                                  |
 | `{:terminating, reason}`             | Server is about to shut down                                                   |
 | `{:status, :terminated}`             | Upstream provider confirmed termination, or had nothing left to terminate       |
 | `{:terminate_failed, error}`         | Upstream `terminate` call returned an error                                    |

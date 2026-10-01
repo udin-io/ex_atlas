@@ -87,7 +87,8 @@ defmodule ExAtlas.Orchestrator do
 
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
   `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`,
-  `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`, `:max_cost`)
+  `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`, `:max_cost`,
+  `:reconcile_spend_ms`)
   are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
@@ -118,6 +119,18 @@ defmodule ExAtlas.Orchestrator do
   back, since a cap nothing can enforce is worse than none. With
   `persist: true` the tracking record carries the spend, so an adopted task
   resumes its budget and counts the downtime at the last known price.
+
+  Every `:reconcile_spend_ms` (default 15 minutes; `false` turns it off) the
+  tracker reads the current pod's bill with `ExAtlas.compute_spend/2`. A bill
+  above the estimate becomes the spend; a lower one changes nothing, since
+  billing lags. Each read broadcasts `{:spend_reconciled, %{estimated_usd: e,
+  billed_usd: b, spent_usd: s}}`, or `{:spend_reconcile_failed, error}`. A
+  provider with no billing API is asked once.
+
+  Every option that arms a timer (`:heartbeat_ms`, `:status_poll_ms`,
+  `:max_runtime_ms`, `:ready_timeout_ms`, `:finish_grace_ms`,
+  `:reconcile_spend_ms`) takes at most 4,294,967,295 ms, about 49.7 days: the
+  longest delay every OTP release accepts.
 
   ## `persist: true` — surviving a deploy
 

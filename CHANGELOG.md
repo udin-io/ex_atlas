@@ -7,6 +7,31 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: the cost cap reads the provider's bill (#66, slice 3 of #28)
+
+A tracked session with `max_cost` reads the current pod's bill every
+`:reconcile_spend_ms` (default 15 minutes; `false` turns it off) through
+`ExAtlas.compute_spend/2`. A bill above the estimate becomes the spend, so the
+cap fires sooner; a lower bill changes nothing. Each read broadcasts
+`{:spend_reconciled, %{estimated_usd: e, billed_usd: b, spent_usd: s}}` or
+`{:spend_reconcile_failed, error}`. A provider with no billing API is asked
+once and sends neither. A raised spend rewrites the tracking record. After a
+respawn the bill is compared with the replacement's spend alone; an adopted
+task compares it with its whole stored spend, since the record does not say
+which pod spent it. `ExAtlas.Providers.Mock` gains `compute_spend/3`, the
+`:billing` capability, `set_spend/2` and `spend_requests/1`;
+`ExAtlas.Orchestrator.CostMeter` gains `reconcile/3`, `new_pod/2` and
+`pod_spent_usd/2`.
+
+### Fixed
+
+- A spent budget on a pod that reads $0 an hour fires `:cost_cap`. Before, a
+  rate of 0 never armed the timer, even with the spend over the cap.
+- `:heartbeat_ms`, `:status_poll_ms`, `:max_runtime_ms`, `:ready_timeout_ms`
+  and `:finish_grace_ms` above 4,294,967,295 ms are refused before renting.
+  Before, a value past the OTP release's timer limit crashed the tracker after
+  the pod was rented. The status poll's backoff stays under the same limit.
+
 ### Added: a persisted task keeps its cost cap across a restart (#65, slice 2 of #28)
 
 `max_cost` with `persist: true` is accepted. Tracking records are version 3

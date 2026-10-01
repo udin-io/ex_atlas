@@ -62,8 +62,9 @@ not export the function.
 
 - A new optional callback adds its name to `@optional_callbacks` and its
   public function calls `dispatch_optional/3`, never the module directly.
-  The Fly, Vast and Lambda Labs stubs and the Mock define none of them, so a
-  direct call raises `UndefinedFunctionError` there.
+  The Fly, Vast and Lambda Labs stubs define none of them, and the Mock
+  defines only `compute_spend/3`, so a direct call raises
+  `UndefinedFunctionError` there.
 - Test the `:unsupported` path with a provider that lacks the callback.
 
 ### The Mock's price drives every cost test
@@ -78,3 +79,8 @@ status poll sees it.
 - To prove a path that a later status poll would also cover, arm
   `ExAtlas.Test.FaultyProvider` with `{:block, self()}` on `:get_compute`.
   It holds every later poll open. #67's respawn re-pricing test does this.
+- `Mock.set_spend/2` sets a pod's bill, and `Mock.spend_requests/1` lists the
+  window of each billing read. `FaultyProvider` faults `:compute_spend` like
+  any other call; `{:notify, self(), fault}` counts calls. A provider with no
+  `compute_spend/3` at all is `NoBillingProvider` in
+  `compute_server_test.exs` (#66).

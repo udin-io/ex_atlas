@@ -393,6 +393,12 @@ H100s. The cap carries across a respawn, like the deadline, and across a
 restart with `persist: true`. `ExAtlas.Orchestrator.info/1` reports
 `:spent_usd` as the run goes.
 
+The hourly price is an estimate. Every 15 minutes the tracker also reads the
+pod's bill from RunPod; when the bill is higher, it becomes the spend and the
+cap fires sooner. A lower bill changes nothing, because RunPod's billing lags
+by an amount its docs do not state. `reconcile_spend_ms: false` turns the
+reads off; subscribers see `{:spend_reconciled, %{...}}` after each one.
+
 ### `:completed` does not mean "succeeded"
 
 It means *the container ended and the pod is gone*. Because the trap fires on

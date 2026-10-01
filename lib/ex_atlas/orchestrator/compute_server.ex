@@ -70,6 +70,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   cap is never respawned, and a respawn carries the spend, as it carries the
   `:max_runtime_ms` deadline.
 
+  Every `:reconcile_spend_ms` a capped server reads the current pod's bill,
+  in a task like the status poll. A bill above the pod's estimate raises the
+  spend (`ExAtlas.Orchestrator.CostMeter.reconcile/3`), rewrites the tracking
+  record and re-arms the timer; a lower bill changes nothing, since billing
+  lags. An `:unsupported` answer stops the reads for the session, silently.
+  A bill asked for before a respawn is ignored: it is for the old pod.
+
   ## Adopted trackers
 
   With `persist: true` a task is recorded in an
