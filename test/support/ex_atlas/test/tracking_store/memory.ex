@@ -25,6 +25,27 @@ defmodule ExAtlas.Test.TrackingStore.Memory do
     Agent.start_link(fn -> %{records: %{}, all_error: nil} end, name: __MODULE__)
   end
 
+  @doc """
+  The record for `id` once `fun` returns true for it. Polls every 5 ms for up to
+  2 s, because a tracker writes its record from its own mailbox after a status
+  poll it starts on a timer, and sends no message a test could wait on.
+  """
+  def await(id, fun, tries \\ 400) do
+    {:ok, record} = get(id)
+
+    cond do
+      fun.(record) ->
+        record
+
+      tries > 0 ->
+        Process.sleep(5)
+        await(id, fun, tries - 1)
+
+      true ->
+        raise ExUnit.AssertionError, message: "the record never matched: #{inspect(record)}"
+    end
+  end
+
   @doc "Make `all/0` answer `{:error, reason}`, as an unreadable store does."
   def fail_all(reason) do
     Agent.update(__MODULE__, &%{&1 | all_error: reason})

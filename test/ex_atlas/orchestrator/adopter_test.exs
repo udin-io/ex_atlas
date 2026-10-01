@@ -212,7 +212,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       :ok = Mock.set_cost_per_hour(compute.id, 3.0)
 
-      assert %{spent_usd: spent} = await_record(compute.id, &(&1.cost_rate == 3.0))
+      assert %{spent_usd: spent} = Memory.await(compute.id, &(&1.cost_rate == 3.0))
       assert_in_delta spent, 1.0, 0.01
     end
 
@@ -516,24 +516,6 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     test "settles immediately so the Reaper is not blocked" do
       assert :ok = Adopter.run(notify: self())
       assert_receive :adoption_complete, 2_000
-    end
-  end
-
-  # Until the stored record matches `fun`. The tracker writes it from its own
-  # mailbox, after a status poll it starts on a timer.
-  defp await_record(id, fun, tries \\ 400) do
-    {:ok, record} = Memory.get(id)
-
-    cond do
-      fun.(record) ->
-        record
-
-      tries > 0 ->
-        Process.sleep(5)
-        await_record(id, fun, tries - 1)
-
-      true ->
-        flunk("the record never matched: #{inspect(record)}")
     end
   end
 
