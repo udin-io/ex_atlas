@@ -406,6 +406,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   #     once rather than starting a second one.
   #   * `:respawns` and `:report` are carried, so an `on_failure: {:respawn, n}`
   #     budget stays spent and work that already reported is never re-run.
+  #   * The cost meter resumes from the record's spend, and counts the downtime
+  #     at the record's last known rate: the pod billed while the node was
+  #     down. A budget spent by then fires `:cost_cap` at once.
   #   * `:ready_timeout_ms` is deliberately *not* re-armed. It answers "did
   #     this ever come up?", and an adopted resource has been up for hours.
   def init({:adopted, record}) do
@@ -421,7 +424,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         | respawns: record.respawns,
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
-          store: TrackingStore.impl()
+          store: TrackingStore.impl(),
+          cost_meter: resumed_cost_meter(record, compute)
       })
 
     register_callback(state.callback_task_id)
@@ -484,6 +488,21 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp remaining_runtime_ms(%{max_runtime_ms: ms, spawned_at_ms: spawned_at_ms}),
     do: max(ms - (System.system_time(:millisecond) - spawned_at_ms), 0)
+
+  # The record's open segment began at wall-clock `cost_since_ms`; the meter
+  # runs on monotonic time, so the segment start moves back by the downtime.
+  # A wall clock that went backwards counts no downtime rather than a refund.
+  # The adopted compute's rate then opens a new segment from now.
+  defp resumed_cost_meter(%{max_cost: false}, _compute), do: nil
+
+  defp resumed_cost_meter(record, compute) do
+    now = now_ms()
+    downtime_ms = max(System.system_time(:millisecond) - record.cost_since_ms, 0)
+
+    record.max_cost
+    |> CostMeter.resume(record.spent_usd, record.cost_rate, now - downtime_ms)
+    |> CostMeter.rate_changed(compute.cost_per_hour, now)
+  end
 
   defp poll_now(%{status_poll_ms: nil}), do: :ok
   defp poll_now(_state), do: send(self(), :status_poll)

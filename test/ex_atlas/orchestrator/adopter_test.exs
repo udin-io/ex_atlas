@@ -131,6 +131,75 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  @hour 60 * 60 * 1_000
+
+  # Give an orphaned task's record a cost cap and a meter, as a capped
+  # persisted task writes them. `since_ago_ms` is how long before now the open
+  # segment began; negative puts it in the future.
+  defp cap_record!(id, max_cost, spent_usd, cost_rate, since_ago_ms) do
+    {:ok, record} = Memory.get(id)
+
+    :ok =
+      Memory.put(%{
+        record
+        | max_cost: max_cost,
+          spent_usd: spent_usd,
+          cost_rate: cost_rate,
+          cost_since_ms: System.system_time(:millisecond) - since_ago_ms
+      })
+  end
+
+  describe "the carried cost cap" do
+    test "a budget spent while the node was down fails the task at once" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0})
+      # $1 an hour for three hours against a $2.50 cap. A fresh meter would
+      # give the pod another two and a half hours.
+      cap_record!(compute.id, 2.5, 0.0, 1.0, 3 * @hour)
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      :ok = Adopter.run(notify: self())
+
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task, {:failed, :cost_cap}}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:status, :terminated}}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a budget with money left resumes with the stored spend plus the downtime" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0})
+      cap_record!(compute.id, 2.5, 0.5, 1.0, @hour)
+
+      :ok = Adopter.run(notify: self())
+
+      # $0.50 stored, plus an hour at $1 while the node was down.
+      assert {:ok, %{max_cost: 2.5, spent_usd: spent, compute: %{status: :running}}} =
+               Orchestrator.info(compute.id)
+
+      assert_in_delta spent, 1.5, 0.01
+    end
+
+    test "the downtime counts at the last known rate, not the adopted pod's" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 2.0})
+      cap_record!(compute.id, 10, 0.0, 1.0, @hour)
+
+      :ok = Adopter.run(notify: self())
+
+      assert {:ok, %{spent_usd: spent}} = Orchestrator.info(compute.id)
+      assert_in_delta spent, 1.0, 0.01
+    end
+
+    test "a wall clock that moved backwards refunds nothing" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0})
+      cap_record!(compute.id, 10, 0.5, 1.0, -@hour)
+
+      :ok = Adopter.run(notify: self())
+
+      assert {:ok, %{spent_usd: spent}} = Orchestrator.info(compute.id)
+      assert_in_delta spent, 0.5, 0.01
+    end
+  end
+
   describe "reconciling against the provider" do
     test "a task that died while the node was down ends through the normal path" do
       compute = orphaned_task(status_poll_ms: 30)
