@@ -1631,6 +1631,60 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_received {:atlas_compute, ^id, {:spend_reconcile_failed, _}}
     end
 
+    test "after a respawn the bill is compared with the replacement's spend alone",
+         %{base: base} do
+      {_pid, id} =
+        spawn_reconciled(base,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 10
+        )
+
+      :ok = Mock.set_spend(id, 3.0)
+      assert_receive {:atlas_compute, ^id, {:spend_reconciled, %{billed_usd: 3.0}}}, 2_000
+
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      :ok = Mock.set_spend(new_id, 2.0)
+
+      # $3 billed for the first pod, then $2 for the replacement.
+      assert_receive {:atlas_compute, ^new_id,
+                      {:spend_reconciled,
+                       %{estimated_usd: estimated, billed_usd: 2.0, spent_usd: spent}}},
+                     2_000
+
+      assert estimated < 1.0
+      assert spent >= 5.0
+    end
+
+    test "a bill for the pod a respawn replaced is ignored", %{base: base} do
+      {_pid, id} =
+        spawn_reconciled(base,
+          provider: FaultyProvider,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 1
+        )
+
+      FaultyProvider.arm(:compute_spend, {:block, self()})
+      assert_receive {:blocked, :compute_spend, held}, 2_000
+
+      # The old pod's bill is over the cap, but it lands after the respawn.
+      :ok = Mock.set_spend(id, 5.0)
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      send(held, :release)
+
+      refute_receive {:atlas_compute, ^new_id, {:terminating, :cost_cap}}, 200
+      refute_received {:atlas_compute, ^new_id, {:spend_reconciled, _}}
+      assert {:ok, %{spent_usd: spent}} = ExAtlas.Orchestrator.info(new_id)
+      assert spent < 1
+    end
+
     test "a session without max_cost never asks for its bill", %{base: base} do
       {_pid, uncapped} = spawn_reconciled(base, [])
       {_pid, switched_off} = spawn_reconciled(base, max_cost: 1, reconcile_spend_ms: false)

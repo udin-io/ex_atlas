@@ -804,6 +804,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # --- billing reconciliation ---
 
+  # A bill asked for before a respawn is for a pod this session no longer runs.
+  # Its spend is already in the meter.
+  defp apply_bill(_result, pod_id, %{compute: %{id: current}} = state) when pod_id != current do
+    schedule_reconcile(state)
+    {:noreply, state}
+  end
+
   # Spend becomes the larger of the estimate and the bill for the current pod.
   # A lower bill changes nothing: billing lags, so it may only be late.
   defp apply_bill({:ok, %Spec.Spend{total_usd: billed}}, _pod_id, state)
@@ -910,11 +917,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
         # The meter carries over, like the deadline: a replacement continues
         # the old budget at its own price. Repriced before the broadcast, so
-        # the replacement's record holds that price once subscribers hear.
+        # the replacement's record holds that price once subscribers hear. Its
+        # bill starts at zero, so the meter marks where its spend begins.
         state =
           reprice(%{
             state
             | compute: replacement,
+              cost_meter: new_pod(state.cost_meter),
               respawns: state.respawns + 1,
               poll_failures: 0,
               upstream_deletable?: true,
@@ -1165,6 +1174,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   defp spend_from(_compute), do: DateTime.utc_now()
+
+  defp new_pod(nil), do: nil
+  defp new_pod(meter), do: CostMeter.new_pod(meter, now_ms())
 
   defp cost_meter(false, _compute), do: nil
   defp cost_meter(max_cost, compute), do: CostMeter.new(max_cost, compute.cost_per_hour, now_ms())
