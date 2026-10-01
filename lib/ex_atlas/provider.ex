@@ -93,6 +93,7 @@ defmodule ExAtlas.Provider do
     * `:network_volumes` — can attach persistent storage
     * `:manage_network_volumes` — implements the four network volume callbacks
     * `:manage_templates` — implements the four template callbacks
+    * `:billing` — implements `compute_spend/3`
     * `:http_proxy` — auto-terminated HTTPS proxy per pod
     * `:raw_tcp` — public IP + mapped TCP ports
     * `:symmetric_ports` — inside-port == outside-port guarantee
@@ -131,7 +132,16 @@ defmodule ExAtlas.Provider do
   @doc "Delete a template."
   @callback delete_template(id, ctx) :: :ok | {:error, term()}
 
+  @doc """
+  One compute resource's spend in US dollars.
+
+  `opts` may carry `:from` and `:to` (`DateTime`). With neither, the provider
+  covers its own default window, and the returned `Spend` names it.
+  """
+  @callback compute_spend(id, keyword(), ctx) :: result(Spec.Spend.t())
+
   @optional_callbacks [
+    compute_spend: 3,
     list_templates: 1,
     get_template: 2,
     create_template: 2,

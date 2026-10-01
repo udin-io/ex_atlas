@@ -986,4 +986,140 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.delete_template("gone", ctx)
     end
   end
+
+  describe "compute_spend/3" do
+    alias ExAtlas.Providers.RunPod
+    alias ExAtlas.Spec.Spend
+
+    setup %{ctx_opts: opts}, do: {:ok, ctx: ExAtlas.Config.build_ctx(:runpod, opts)}
+
+    @spend_body %{
+      "records" => [
+        %{
+          "startTime" => "2026-09-01T00:00:00Z",
+          "endTime" => "2026-09-02T00:00:00Z",
+          "podId" => "pod_9",
+          "totalAmount" => 12.34,
+          "gpuAmount" => 11.1,
+          "cpuAmount" => 0,
+          "diskAmount" => 1.24
+        }
+      ],
+      "metadata" => %{
+        "query" => %{
+          "startTime" => "2026-09-01T00:00:00Z",
+          "endTime" => "2026-10-02T00:00:00Z",
+          "bucketSize" => "day",
+          "podId" => "pod_9"
+        },
+        "recordCount" => 1,
+        "uniquePodCount" => 1,
+        "totals" => %{
+          "totalAmount" => 12.34,
+          "gpuAmount" => 11.1,
+          "cpuAmount" => 0,
+          "diskAmount" => 1.24
+        }
+      }
+    }
+
+    defp expect_spend(bypass, body \\ @spend_body) do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+        send(test_pid, {:query, URI.decode_query(conn.query_string)})
+        json(conn, 200, body)
+      end)
+    end
+
+    test "capabilities include :billing" do
+      assert :billing in RunPod.capabilities()
+    end
+
+    test "asks for the pod and returns its totals as dollars", %{bypass: bypass, ctx: ctx} do
+      expect_spend(bypass)
+
+      assert {:ok,
+              %Spend{
+                compute_id: "pod_9",
+                provider: :runpod,
+                total_usd: 12.34,
+                gpu_usd: 11.1,
+                cpu_usd: +0.0,
+                disk_usd: 1.24
+              }} = RunPod.compute_spend("pod_9", [], ctx)
+
+      assert_received {:query, %{"podId" => "pod_9"}}
+    end
+
+    test "with no window it sends neither startTime nor endTime", %{bypass: bypass, ctx: ctx} do
+      expect_spend(bypass)
+
+      assert {:ok, %Spend{}} = RunPod.compute_spend("pod_9", [], ctx)
+      assert_received {:query, query}
+      assert query == %{"podId" => "pod_9"}
+    end
+
+    test "from and to become RFC 3339 startTime and endTime", %{bypass: bypass, ctx: ctx} do
+      expect_spend(bypass)
+
+      assert {:ok, %Spend{}} =
+               RunPod.compute_spend(
+                 "pod_9",
+                 [from: ~U[2026-09-30 00:00:00Z], to: ~U[2026-10-01 12:30:00Z]],
+                 ctx
+               )
+
+      assert_received {:query,
+                       %{
+                         "podId" => "pod_9",
+                         "startTime" => "2026-09-30T00:00:00Z",
+                         "endTime" => "2026-10-01T12:30:00Z"
+                       }}
+    end
+
+    test "from alone sends startTime and no endTime", %{bypass: bypass, ctx: ctx} do
+      expect_spend(bypass)
+
+      assert {:ok, %Spend{}} =
+               RunPod.compute_spend("pod_9", [from: ~U[2026-09-30 00:00:00Z]], ctx)
+
+      assert_received {:query, query}
+      assert query == %{"podId" => "pod_9", "startTime" => "2026-09-30T00:00:00Z"}
+    end
+
+    test "from and to are the window RunPod resolved", %{bypass: bypass, ctx: ctx} do
+      expect_spend(bypass)
+
+      assert {:ok, %Spend{from: ~U[2026-09-01 00:00:00Z], to: ~U[2026-10-02 00:00:00Z]}} =
+               RunPod.compute_spend("pod_9", [], ctx)
+    end
+
+    test "a pod with no records is 0.0 dollars", %{bypass: bypass, ctx: ctx} do
+      zero = %{"totalAmount" => 0, "gpuAmount" => 0, "cpuAmount" => 0, "diskAmount" => 0}
+      body = %{"records" => [], "metadata" => %{"totals" => zero, "recordCount" => 0}}
+      expect_spend(bypass, body)
+
+      assert {:ok, %Spend{total_usd: +0.0, gpu_usd: +0.0, cpu_usd: +0.0, disk_usd: +0.0}} =
+               RunPod.compute_spend("pod_9", [], ctx)
+    end
+
+    test "a body with no metadata.totals is a :provider error", %{bypass: bypass, ctx: ctx} do
+      expect_spend(bypass, %{"records" => []})
+
+      assert {:error, %ExAtlas.Error{kind: :provider, provider: :runpod, message: message}} =
+               RunPod.compute_spend("pod_9", [], ctx)
+
+      assert message =~ "/billing/pods"
+    end
+
+    test "surfaces a provider refusal", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+        json(conn, 401, %{"error" => "bad key"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :unauthorized}} =
+               RunPod.compute_spend("pod_9", [], ctx)
+    end
+  end
 end
