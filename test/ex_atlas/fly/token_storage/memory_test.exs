@@ -11,16 +11,14 @@ defmodule ExAtlas.Fly.TokenStorage.MemoryTest do
 
   @doc false
   def __setup_memory__ do
-    if pid = Process.whereis(Memory), do: GenServer.stop(pid)
-    {:ok, _} = Memory.start_link()
+    start_supervised!(Memory)
     :ok
   end
 
   describe "parity with Dets pre-init behavior (M10)" do
     test "get/2 returns :error when the Memory Agent has not been started" do
-      # Make sure the Agent is definitely not started. It's not started by the
-      # application by default — Memory is test-support only — but be safe.
-      if pid = Process.whereis(Memory), do: GenServer.stop(pid)
+      # The suite's setup started it under the test supervisor; stop that one.
+      stop_supervised!(Memory)
 
       assert Process.whereis(Memory) == nil
 
