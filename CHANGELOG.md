@@ -18,8 +18,15 @@ every new price, including the replacement's price on a respawn, before it
 broadcasts `{:respawned, id}`. Version 1 and 2 records adopt uncapped, as
 before, and stay on disk as they are; a node that claims one writes it back as
 version 3. A host store that maps fields to columns needs the four new
-columns. `ExAtlas.Orchestrator.CostMeter.resume/4` seeds a meter with spend
-already made.
+columns; without them an adopted task keeps its tracker and deadline, and its
+budget starts fresh. `ExAtlas.Orchestrator.CostMeter.resume/4` seeds a meter
+with spend already made.
+
+Rolling back to a build before this one leaves every record written since the
+upgrade unadopted: older builds skip version 3 records, and keep them in the
+store so their Reaper leaves the pods alone. End those tasks with
+`stop_tracked/1` before the rollback, or delete their pods and records by hand
+after it.
 
 ### Added: a cost cap on tracked sessions, `max_cost` (#64, slice 1 of #28)
 
