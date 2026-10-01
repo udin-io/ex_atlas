@@ -781,11 +781,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
         {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
 
-        Events.broadcast(old_id, {:respawned, replacement.id})
-        Events.broadcast(replacement.id, {:status, replacement.status})
-
         # The meter carries over, like the deadline: a replacement continues
-        # the old budget at its own price.
+        # the old budget at its own price. Repriced before the broadcast, so
+        # the replacement's record holds that price once subscribers hear.
         state =
           reprice(%{
             state
@@ -795,6 +793,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
               upstream_deletable?: true,
               last_activity_ms: now_ms()
           })
+
+        Events.broadcast(old_id, {:respawned, replacement.id})
+        Events.broadcast(replacement.id, {:status, replacement.status})
 
         schedule_status_poll(state)
         {:noreply, state}

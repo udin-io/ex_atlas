@@ -185,6 +185,35 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       # ...and the pod that is gone must not be adopted at all.
       assert :error = Memory.get(old_id)
     end
+
+    test "a respawn carries the spend into the replacement's record" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            spot: true,
+            status_poll_ms: 10,
+            on_failure: {:respawn, 1},
+            max_cost: 100,
+            provider_opts: %{cost_per_hour: 3600.0}
+          )
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      # Close a segment, so the record holds spend worth carrying.
+      :ok = Mock.set_cost_per_hour(old_id, 7200.0)
+      %{spent_usd: spent_before} = Memory.await(old_id, &(&1.cost_rate == 7200.0))
+      assert spent_before > 0.0
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      # The replacement runs at the spawn price again, so its record opens a
+      # segment at 3600 on top of everything spent so far.
+      assert {:ok, %{spent_usd: spent_after, cost_rate: 3600.0}} = Memory.get(new_id)
+      assert spent_after > spent_before
+    end
   end
 
   # `DynamicSupervisor.terminate_child/2` delivers `:shutdown`, the reason a
