@@ -150,6 +150,54 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     end
   end
 
+  describe "an adopted task on the next graceful stop" do
+    test "survives a second deploy" do
+      boot()
+      {:ok, _tracker, compute} = run_task(persist: true)
+      shutdown()
+
+      boot()
+      assert {:ok, _} = Orchestrator.info(compute.id)
+      shutdown()
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+      boot()
+      assert {:ok, %{compute: %{id: id}}} = Orchestrator.info(compute.id)
+      assert id == compute.id
+    end
+
+    test "deletes its pod once it carries an exit code reported before the restart" do
+      boot()
+
+      {:ok, tracker, compute} =
+        run_task(
+          persist: true,
+          callback: "https://app.example.com/atlas/cb",
+          finish_grace_ms: 60_000
+        )
+
+      # Subscribing links this process to the PubSub registry, which each tree
+      # stop below takes down with it.
+      Process.flag(:trap_exit, true)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {:ok, %{callback_task_id: task_id}} = TrackingStore.Dets.get(compute.id)
+      :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+
+      # The VM goes away inside the finish grace window: no `terminate/2`.
+      ref = Process.monitor(tracker)
+      Process.exit(tracker, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^tracker, :killed}, 2_000
+      shutdown()
+
+      boot()
+      assert {:ok, _} = Orchestrator.info(compute.id)
+      shutdown()
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
   defp run_task(overrides) do
     Orchestrator.run_task(
       Keyword.merge(
