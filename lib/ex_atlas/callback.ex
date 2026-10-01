@@ -228,10 +228,12 @@ defmodule ExAtlas.Callback do
     :ex_atlas |> Application.get_env(:callback, []) |> Keyword.get(:base_url)
   end
 
+  # The Registry drops a dead owner's entry asynchronously, so an entry can name
+  # a pid that already exited. The registry is node-local, so the pid is too.
   defp lookup(task_id) do
     if Process.whereis(ComputeRegistry) do
       case Registry.lookup(ComputeRegistry, {:callback, task_id}) do
-        [{pid, _}] -> {:ok, pid}
+        [{pid, _}] -> if Process.alive?(pid), do: {:ok, pid}, else: {:error, :not_tracked}
         [] -> {:error, :not_tracked}
       end
     else
