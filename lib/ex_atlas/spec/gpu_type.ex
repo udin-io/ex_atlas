@@ -1,5 +1,11 @@
 defmodule ExAtlas.Spec.GpuType do
-  @moduledoc "Normalized GPU type + pricing entry returned by `list_gpu_types/1`."
+  @moduledoc """
+  Normalized GPU type + pricing entry returned by `list_gpu_types/1`.
+
+  On Runpod, `spot_price_per_hour` is always `nil` (Runpod sells no spot pods)
+  and `raw` is `%{"SECURE" => entry, "COMMUNITY" => entry}`: the v2 catalog
+  entry for each cloud, `nil` where that read did not list the GPU.
+  """
 
   @enforce_keys [:id, :provider]
   defstruct id: nil,
