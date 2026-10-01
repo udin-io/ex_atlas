@@ -862,4 +862,97 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
              } = Translate.template_to_spec(raw)
     end
   end
+
+  describe "pod_billing_to_spend/2" do
+    defp billing_body(overrides \\ %{}) do
+      Map.merge(
+        %{
+          "records" => [
+            %{
+              "startTime" => "2026-09-01T00:00:00Z",
+              "endTime" => "2026-09-02T00:00:00Z",
+              "podId" => "pod_9",
+              "totalAmount" => 12.34,
+              "gpuAmount" => 11.1,
+              "cpuAmount" => 0,
+              "diskAmount" => 1.24
+            }
+          ],
+          "metadata" => %{
+            "query" => %{
+              "startTime" => "2026-09-01T00:00:00Z",
+              "endTime" => "2026-10-02T00:00:00Z",
+              "bucketSize" => "day",
+              "podId" => "pod_9"
+            },
+            "recordCount" => 1,
+            "uniquePodCount" => 1,
+            "totals" => %{
+              "totalAmount" => 12.34,
+              "gpuAmount" => 11.1,
+              "cpuAmount" => 0,
+              "diskAmount" => 1.24
+            }
+          }
+        },
+        overrides
+      )
+    end
+
+    test "reads metadata.totals as floats and metadata.query as the window" do
+      assert {:ok,
+              %Spec.Spend{
+                compute_id: "pod_9",
+                provider: :runpod,
+                total_usd: 12.34,
+                gpu_usd: 11.1,
+                cpu_usd: +0.0,
+                disk_usd: 1.24,
+                from: ~U[2026-09-01 00:00:00Z],
+                to: ~U[2026-10-02 00:00:00Z],
+                raw: %{"records" => [_]}
+              }} = Translate.pod_billing_to_spend(billing_body(), "pod_9")
+    end
+
+    test "totals come from metadata, not from a sum of the records" do
+      body = put_in(billing_body(), ["metadata", "totals", "totalAmount"], 99.5)
+
+      assert {:ok, %Spec.Spend{total_usd: 99.5}} = Translate.pod_billing_to_spend(body, "pod_9")
+    end
+
+    test "a pod with no records and zero totals is 0.0 dollars" do
+      zero = %{"totalAmount" => 0, "gpuAmount" => 0, "cpuAmount" => 0, "diskAmount" => 0}
+
+      body =
+        billing_body(%{"records" => []})
+        |> put_in(["metadata", "totals"], zero)
+
+      assert {:ok, %Spec.Spend{total_usd: +0.0, gpu_usd: +0.0, cpu_usd: +0.0, disk_usd: +0.0}} =
+               Translate.pod_billing_to_spend(body, "pod_9")
+    end
+
+    test "a body with no numeric metadata.totals is an error" do
+      for body <- [
+            %{},
+            %{"records" => []},
+            %{"metadata" => %{}},
+            %{"metadata" => %{"totals" => %{}}},
+            billing_body() |> put_in(["metadata", "totals", "totalAmount"], "12.34"),
+            billing_body() |> put_in(["metadata", "totals", "diskAmount"], nil),
+            nil,
+            []
+          ] do
+        assert :error = Translate.pod_billing_to_spend(body, "pod_9")
+      end
+    end
+
+    test "a missing or unparsable window reads as nil and keeps the totals" do
+      for query <- [nil, %{}, %{"startTime" => "yesterday", "endTime" => 5}] do
+        body = put_in(billing_body(), ["metadata", "query"], query)
+
+        assert {:ok, %Spec.Spend{from: nil, to: nil, total_usd: 12.34}} =
+                 Translate.pod_billing_to_spend(body, "pod_9")
+      end
+    end
+  end
 end

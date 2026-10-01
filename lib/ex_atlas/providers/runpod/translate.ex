@@ -326,16 +326,8 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   # judge, and a pod that was just (re)started is freshly rented no matter when
   # its record was first written. v1 answered the same question with
   # `lastStartedAt`.
-  defp parse_created_at(pod) do
-    Enum.find_value(["startedAt", "createdAt"], fn key ->
-      with s when is_binary(s) <- Map.get(pod, key),
-           {:ok, dt, _} <- DateTime.from_iso8601(s) do
-        dt
-      else
-        _ -> nil
-      end
-    end)
-  end
+  defp parse_created_at(pod),
+    do: Enum.find_value(["startedAt", "createdAt"], &parse_datetime(Map.get(pod, &1)))
 
   # --- job helpers ---
 
@@ -518,6 +510,48 @@ defmodule ExAtlas.Providers.RunPod.Translate do
     |> drop_nils()
     |> Map.merge(stringify(req.provider_opts))
   end
+
+  @doc """
+  Normalize a `GET /billing/pods` body for one pod.
+
+  Reads `metadata.totals`, not a sum of `records`, and `metadata.query` for the
+  window. Returns `:error` when `metadata.totals` lacks a number.
+  """
+  @spec pod_billing_to_spend(term(), String.t()) :: {:ok, Spec.Spend.t()} | :error
+  def pod_billing_to_spend(%{"metadata" => %{"totals" => %{} = totals} = metadata} = body, id) do
+    amounts = Enum.map(~w(totalAmount gpuAmount cpuAmount diskAmount), &Map.get(totals, &1))
+
+    if Enum.all?(amounts, &is_number/1) do
+      [total, gpu, cpu, disk] = Enum.map(amounts, &(&1 / 1))
+      query = if is_map(metadata["query"]), do: metadata["query"], else: %{}
+
+      {:ok,
+       %Spec.Spend{
+         compute_id: id,
+         provider: :runpod,
+         total_usd: total,
+         gpu_usd: gpu,
+         cpu_usd: cpu,
+         disk_usd: disk,
+         from: parse_datetime(query["startTime"]),
+         to: parse_datetime(query["endTime"]),
+         raw: body
+       }}
+    else
+      :error
+    end
+  end
+
+  def pod_billing_to_spend(_body, _id), do: :error
+
+  defp parse_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      {:error, _} -> nil
+    end
+  end
+
+  defp parse_datetime(_), do: nil
 
   @doc "Normalize a RunPod template body."
   @spec template_to_spec(map()) :: Spec.Template.t()
