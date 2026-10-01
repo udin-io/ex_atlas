@@ -1,0 +1,38 @@
+{
+  "_note": "Hand-built from the v2 GpuType schema, not recorded: shapes the recording lacks (a HIGH level, a secure LOW beside a community HIGH, an entry with no cudaVersions, no dataCenters, no price.serverless, a null pool, an unknown level, a GPU in one read only).",
+  "secure": [
+    {"id": "GPU A", "name": "A", "pool": "P_A", "manufacturer": "NVIDIA", "memory": 24, "secure": true, "community": true,
+     "price": {"secure": 0.8, "community": 0.3, "serverless": 1.0}, "maxCount": {"secure": 8, "community": 4},
+     "availability": "LOW", "dataCenters": [{"id": "US-KS-2", "name": "US Kansas 2", "availability": "LOW"}],
+     "cudaVersions": [{"version": "12.4", "availability": "LOW"}]},
+    {"id": "GPU B", "name": "B", "pool": null, "manufacturer": "AMD", "memory": 192, "secure": true, "community": false,
+     "price": {"secure": 2.0, "community": 0}, "maxCount": {"secure": 8, "community": 0},
+     "availability": "HIGH"},
+    {"id": "GPU C", "name": "C", "pool": null, "manufacturer": "NVIDIA", "memory": 16, "secure": false, "community": true,
+     "price": {"secure": 0, "community": 0.2}, "maxCount": {"secure": 0, "community": 4},
+     "availability": "HIGH"},
+    {"id": "GPU D", "name": "D", "pool": null, "manufacturer": "NVIDIA", "memory": 48, "secure": true, "community": false,
+     "price": {"secure": 1.0, "community": 0}, "maxCount": {"secure": 1, "community": 0},
+     "availability": "MEDIUM"},
+    {"id": "GPU E", "name": "E", "pool": null, "manufacturer": "NVIDIA", "memory": 48, "secure": true, "community": false,
+     "price": {"secure": 1.1, "community": 0}, "maxCount": {"secure": 1, "community": 0},
+     "availability": "NONE"},
+    {"id": "GPU F", "name": "F", "pool": null, "manufacturer": "NVIDIA", "memory": 8, "secure": true, "community": false,
+     "price": {"secure": 0.1, "community": 0}, "maxCount": {"secure": 1, "community": 0},
+     "availability": "EXTREME"}
+  ],
+  "community": [
+    {"id": "GPU A", "name": "A", "pool": "P_A", "manufacturer": "NVIDIA", "memory": 24, "secure": true, "community": true,
+     "price": {"secure": 0.8, "community": 0.3, "serverless": 1.0}, "maxCount": {"secure": 8, "community": 4},
+     "availability": "HIGH", "dataCenters": [{"id": "EU-RO-1", "name": "EU Romania 1", "availability": "HIGH"}]},
+    {"id": "GPU B", "name": "B", "pool": null, "manufacturer": "AMD", "memory": 192, "secure": true, "community": false,
+     "price": {"secure": 2.0, "community": 0}, "maxCount": {"secure": 8, "community": 0},
+     "availability": "NONE"},
+    {"id": "GPU C", "name": "C", "pool": null, "manufacturer": "NVIDIA", "memory": 16, "secure": false, "community": true,
+     "price": {"secure": 0, "community": 0.2}, "maxCount": {"secure": 0, "community": 4},
+     "availability": "LOW"},
+    {"id": "GPU G", "name": "G", "pool": null, "manufacturer": "NVIDIA", "memory": 12, "secure": false, "community": true,
+     "price": {"secure": 0, "community": 0.15}, "maxCount": {"secure": 0, "community": 2},
+     "availability": "MEDIUM"}
+  ]
+}

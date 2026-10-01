@@ -1,0 +1,132 @@
+{
+  "gpus": [
+    {
+      "availability": "NONE",
+      "community": false,
+      "id": "AMD Instinct MI300X OAM",
+      "manufacturer": "AMD",
+      "maxCount": {
+        "community": 0,
+        "secure": 8
+      },
+      "memory": 192,
+      "name": "MI300X",
+      "pool": null,
+      "price": {
+        "community": 0.5,
+        "secure": 2.39
+      },
+      "secure": true
+    },
+    {
+      "availability": "NONE",
+      "community": true,
+      "cudaVersions": [
+        {
+          "available": false,
+          "version": "13.1"
+        }
+      ],
+      "id": "NVIDIA A100-SXM4-40GB",
+      "manufacturer": "NVIDIA",
+      "maxCount": {
+        "community": 2,
+        "secure": 0
+      },
+      "memory": 40,
+      "name": "A100 SXM 40GB",
+      "pool": null,
+      "price": {
+        "community": 1,
+        "secure": 0
+      },
+      "secure": false
+    },
+    {
+      "availability": "NONE",
+      "community": true,
+      "cudaVersions": [
+        {
+          "available": false,
+          "version": "12.2"
+        },
+        {
+          "available": false,
+          "version": "12.4"
+        },
+        {
+          "available": false,
+          "version": "12.6"
+        },
+        {
+          "available": false,
+          "version": "12.8"
+        },
+        {
+          "available": false,
+          "version": "12.9"
+        },
+        {
+          "available": false,
+          "version": "13.0"
+        },
+        {
+          "available": false,
+          "version": "13.2"
+        }
+      ],
+      "id": "NVIDIA GeForce RTX 4090",
+      "manufacturer": "NVIDIA",
+      "maxCount": {
+        "community": 8,
+        "secure": 8
+      },
+      "memory": 24,
+      "name": "RTX 4090",
+      "pool": "ADA_24",
+      "price": {
+        "community": 0.34,
+        "secure": 0.74,
+        "serverless": 1.1
+      },
+      "secure": true
+    },
+    {
+      "availability": "NONE",
+      "community": true,
+      "id": "NVIDIA H100 80GB HBM3",
+      "manufacturer": "NVIDIA",
+      "maxCount": {
+        "community": 1,
+        "secure": 8
+      },
+      "memory": 80,
+      "name": "H100 SXM",
+      "pool": "ADA_80_PRO",
+      "price": {
+        "community": 2.69,
+        "secure": 3.49,
+        "serverless": 4.79
+      },
+      "secure": true
+    },
+    {
+      "availability": "NONE",
+      "community": false,
+      "id": "unknown",
+      "manufacturer": "UNKNOWN",
+      "maxCount": {
+        "community": 1,
+        "secure": 1
+      },
+      "memory": 0,
+      "name": "unknown",
+      "pool": null,
+      "price": {
+        "community": 0,
+        "secure": 0
+      },
+      "secure": false
+    }
+  ]
+}
