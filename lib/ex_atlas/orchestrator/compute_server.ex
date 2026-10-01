@@ -564,6 +564,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # DELETE a perfectly healthy resource.
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # OTP prints the whole state in a crash report. Print it without the provider
+  # credential in `opts` or the resource's bearer token, which `compute.auth`
+  # holds and `compute.raw` can echo back in the container's env.
+  @impl true
+  def format_status(%{state: %{opts: opts, compute: compute} = state} = status) do
+    compute = %{compute | auth: compute.auth && :redacted, raw: :redacted}
+    %{status | state: %{state | opts: TrackingStore.scrub_opts(opts), compute: compute}}
+  end
+
+  def format_status(status), do: status
+
   @impl true
   def terminate(reason, state) do
     cancel_poll(state)
