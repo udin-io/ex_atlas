@@ -28,8 +28,10 @@ defmodule ExAtlas.Orchestrator.TaskOutcome do
     * `{:failed, reason}` — the resource died of something that is not the
       task finishing. `reason` is the death reason `UpstreamStatus` reported
       (`:preempted`, `:terminated`, `:failed`), `:never_ready` when the
-      resource never left `:provisioning` within `:ready_timeout_ms`, or
-      `{:exit_code, n}` when the container reported a non-zero exit.
+      resource never left `:provisioning` within `:ready_timeout_ms`,
+      `:cost_cap` when the spend reached `:max_cost` (a local clock, like
+      `:timed_out`, so not produced here), or `{:exit_code, n}` when the
+      container reported a non-zero exit.
 
   ## What a finish report changes
 
@@ -69,7 +71,7 @@ defmodule ExAtlas.Orchestrator.TaskOutcome do
   @type mode :: :interactive | :task
 
   @type failure_reason ::
-          UpstreamStatus.dead_reason() | :never_ready | {:exit_code, pos_integer()}
+          UpstreamStatus.dead_reason() | :never_ready | :cost_cap | {:exit_code, pos_integer()}
 
   @type t :: :completed | :timed_out | {:failed, failure_reason()}
 

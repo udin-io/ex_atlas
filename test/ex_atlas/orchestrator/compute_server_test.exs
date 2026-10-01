@@ -1146,4 +1146,88 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
                ComputeServer.validate_opts(mode: :task, persist: true, max_cost: false)
     end
   end
+
+  describe "max_cost" do
+    # $1 per second, so a cap of a few cents fires in tens of milliseconds.
+    @per_second 3600.0
+
+    setup do
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: false,
+        provider_opts: %{cost_per_hour: @per_second}
+      ]
+
+      {:ok, base: base}
+    end
+
+    defp spawn_capped(base, overrides) do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(Keyword.merge(base, overrides))
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {pid, compute.id}
+    end
+
+    defp next_events(id, count) do
+      for _ <- 1..count do
+        assert_receive {:atlas_compute, ^id, event}, 2_000
+        event
+      end
+    end
+
+    test "an interactive session is deleted when its spend reaches the cap", %{base: base} do
+      {pid, id} = spawn_capped(base, max_cost: 0.05)
+      ref = Process.monitor(pid)
+
+      assert [{:terminating, :cost_cap}, {:terminating, :normal}, {:status, :terminated}] =
+               next_events(id, 3)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a task fails as :cost_cap before the end-of-session pair", %{base: base} do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          Keyword.merge(base, command: ["/app/train.sh"], max_cost: 0.05)
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      ref = Process.monitor(pid)
+
+      assert [
+               {:task, {:failed, :cost_cap}},
+               {:terminating, :cost_cap},
+               {:terminating, _},
+               {:status, :terminated}
+             ] = next_events(id, 4)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "info/1 reports the cap and a spend that grows", %{base: base} do
+      {_pid, id} = spawn_capped(base, max_cost: 100)
+
+      assert {:ok, %{max_cost: 100, spent_usd: first}} = ExAtlas.Orchestrator.info(id)
+      Process.sleep(20)
+      assert {:ok, %{spent_usd: second}} = ExAtlas.Orchestrator.info(id)
+
+      assert is_float(first)
+      assert second > first
+    end
+
+    test "without a cap the same price ends nothing", %{base: base} do
+      {pid, id} = spawn_capped(base, [])
+      ref = Process.monitor(pid)
+
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{max_cost: false, spent_usd: +0.0}} = ExAtlas.Orchestrator.info(id)
+    end
+  end
 end
