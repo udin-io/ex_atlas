@@ -646,6 +646,18 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
                %{"name" => "datasets", "size" => 200, "dataCenter" => "EU-RO-1"}
     end
 
+    test "provider_opts merge over the body" do
+      req =
+        Spec.NetworkVolumeRequest.new!(
+          name: "d",
+          size_gb: 10,
+          region: "r",
+          provider_opts: %{type: "STANDARD"}
+        )
+
+      assert %{"type" => "STANDARD"} = Translate.network_volume_request_to_body(req)
+    end
+
     test "maps each tier to RunPod's type" do
       for {tier, type} <- [standard: "STANDARD", high_performance: "HIGH_PERFORMANCE"] do
         req = Spec.NetworkVolumeRequest.new!(name: "d", size_gb: 10, region: "r", tier: tier)

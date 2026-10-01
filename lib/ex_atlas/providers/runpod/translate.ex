@@ -432,12 +432,19 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   @doc """
   Build the `POST /network-volumes` body. `type` is sent only when the request
-  names a tier, so RunPod picks its own default otherwise.
+  names a tier, so RunPod picks its own default otherwise. `provider_opts` merge
+  over the body.
   """
   @spec network_volume_request_to_body(Spec.NetworkVolumeRequest.t()) :: map()
   def network_volume_request_to_body(%Spec.NetworkVolumeRequest{} = req) do
-    %{"name" => req.name, "size" => req.size_gb, "dataCenter" => req.region}
-    |> put_unless_nil("type", volume_type(req.tier))
+    %{
+      "name" => req.name,
+      "size" => req.size_gb,
+      "dataCenter" => req.region,
+      "type" => volume_type(req.tier)
+    }
+    |> drop_nils()
+    |> Map.merge(stringify(req.provider_opts))
   end
 
   @doc "Normalize a RunPod network volume body."
@@ -461,7 +468,4 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp tier_from_type("STANDARD"), do: :standard
   defp tier_from_type("HIGH_PERFORMANCE"), do: :high_performance
   defp tier_from_type(_), do: nil
-
-  defp put_unless_nil(map, _key, nil), do: map
-  defp put_unless_nil(map, key, value), do: Map.put(map, key, value)
 end
