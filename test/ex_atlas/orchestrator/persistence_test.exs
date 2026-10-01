@@ -186,6 +186,33 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert :error = Memory.get(old_id)
     end
 
+    test "a respawn at the same price carries the open segment unchanged" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            spot: true,
+            status_poll_ms: 10,
+            on_failure: {:respawn, 1},
+            max_cost: 100,
+            provider_opts: %{cost_per_hour: 3600.0}
+          )
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+      {:ok, original} = Memory.get(old_id)
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      # Nothing reprices a replacement at the old price, so only the carried
+      # record keeps the segment's start: a restart then counts it once.
+      assert {:ok, replacement} = Memory.get(new_id)
+
+      assert Map.take(replacement, [:max_cost, :spent_usd, :cost_rate, :cost_since_ms]) ==
+               Map.take(original, [:max_cost, :spent_usd, :cost_rate, :cost_since_ms])
+    end
+
     test "a respawn carries the spend into the replacement's record" do
       {:ok, _pid, compute} =
         Orchestrator.spawn(
