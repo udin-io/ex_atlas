@@ -99,19 +99,21 @@ defmodule ExAtlas.Orchestrator.CostMeter do
 
   @doc """
   Milliseconds from `now_ms` until spend reaches `max_cost` at the current
-  rate, rounded up. `0` once it has; `:infinity` at rate `0.0`. Never more
-  than 4,294,967,295 (about 49.7 days); the caller re-checks then.
+  rate, rounded up. `0` once it has, at any rate; otherwise `:infinity` at
+  rate `0.0`. Never more than 4,294,967,295 (about 49.7 days); the caller
+  re-checks then.
   """
   @spec ms_to_cap(t(), integer()) :: non_neg_integer() | :infinity
-  def ms_to_cap(%__MODULE__{rate: rate}, _now_ms) when rate == 0, do: :infinity
-
   def ms_to_cap(%__MODULE__{} = meter, now_ms) do
     left = meter.max_cost - spent_usd(meter, now_ms)
 
-    # Compared by division, so a huge cap cannot overflow the multiplication.
-    if left / @max_timer_hours >= meter.rate,
-      do: @max_timer_ms,
-      else: max(ceil(left * @ms_per_hour / meter.rate), 0)
+    cond do
+      left <= 0 -> 0
+      meter.rate == 0 -> :infinity
+      # Compared by division, so a huge cap cannot overflow the multiplication.
+      left / @max_timer_hours >= meter.rate -> @max_timer_ms
+      true -> ceil(left * @ms_per_hour / meter.rate)
+    end
   end
 
   @doc """

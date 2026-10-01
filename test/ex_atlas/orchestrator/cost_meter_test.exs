@@ -86,6 +86,13 @@ defmodule ExAtlas.Orchestrator.CostMeterTest do
       assert CostMeter.ms_to_cap(CostMeter.new(1, 0.0, 0), 0) == :infinity
     end
 
+    test "is 0 at rate 0.0 once the carried spend has reached the cap" do
+      # An adopted record whose budget ran out while the node was down, on a
+      # pod that now reads $0 an hour.
+      assert CostMeter.ms_to_cap(CostMeter.resume(1, 1.0, 0.0, 0), 0) == 0
+      assert CostMeter.ms_to_cap(CostMeter.resume(1, 2.0, nil, 0), 0) == 0
+    end
+
     test "is never longer than the longest timer every OTP release accepts" do
       # $1000 at $0.0001 per hour is 3.6e13 ms; Process.send_after raises above
       # its limit, and a raise in the tracker deletes a healthy pod.
