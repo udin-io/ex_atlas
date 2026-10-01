@@ -81,6 +81,30 @@ defmodule ExAtlas.Providers.Mock do
   def set_cost_per_hour(id, rate), do: update_compute(id, &%{&1 | cost_per_hour: rate})
 
   @doc """
+  Set the billed total `compute_spend/3` reports for `id`, in US dollars.
+
+  Works for any id, including a resource already forgotten: a provider still
+  bills a pod after it is gone. Until it is set, a pod has billed `0.0`.
+  """
+  @spec set_spend(String.t(), float()) :: :ok
+  def set_spend(id, total_usd) do
+    ensure_started()
+    :ets.insert(@table, {{:spend, id}, total_usd})
+    :ok
+  end
+
+  @doc "How many times `compute_spend/3` has been called for `id`."
+  @spec spend_calls(String.t()) :: non_neg_integer()
+  def spend_calls(id) do
+    ensure_started()
+
+    case :ets.lookup(@table, {:spend_calls, id}) do
+      [{_, count}] -> count
+      [] -> 0
+    end
+  end
+
+  @doc """
   Drop a resource from the store entirely, so it 404s like a pod that was
   deleted upstream or a spot instance that was preempted out from under you.
 
@@ -95,7 +119,7 @@ defmodule ExAtlas.Providers.Mock do
 
   @impl true
   def capabilities,
-    do: [:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks]
+    do: [:spot, :serverless, :network_volumes, :billing, :http_proxy, :raw_tcp, :webhooks]
 
   @impl true
   def spawn_compute(%Spec.ComputeRequest{} = req, _ctx) do
@@ -165,6 +189,27 @@ defmodule ExAtlas.Providers.Mock do
       [] ->
         {:error, ExAtlas.Error.new(:not_found, provider: :mock)}
     end
+  end
+
+  @impl true
+  def compute_spend(id, opts, _ctx) do
+    ensure_started()
+    :ets.update_counter(@table, {:spend_calls, id}, 1, {{:spend_calls, id}, 0})
+
+    total =
+      case :ets.lookup(@table, {:spend, id}) do
+        [{_, total_usd}] -> total_usd
+        [] -> 0.0
+      end
+
+    {:ok,
+     %Spec.Spend{
+       compute_id: id,
+       provider: :mock,
+       total_usd: total,
+       from: opts[:from],
+       to: opts[:to]
+     }}
   end
 
   @impl true

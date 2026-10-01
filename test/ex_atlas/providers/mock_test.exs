@@ -77,4 +77,47 @@ defmodule ExAtlas.Providers.MockTest do
       assert {:error, %ExAtlas.Error{kind: :not_found}} = Mock.set_cost_per_hour("nope", 1.0)
     end
   end
+
+  describe "billing" do
+    setup do
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      {:ok, compute: compute}
+    end
+
+    test "reports :billing" do
+      assert :billing in ExAtlas.capabilities(:mock)
+    end
+
+    test "a pod has billed nothing until set_spend/2", %{compute: %{id: id}} do
+      assert {:ok, %ExAtlas.Spec.Spend{compute_id: ^id, provider: :mock, total_usd: +0.0}} =
+               ExAtlas.compute_spend(id, provider: :mock)
+    end
+
+    test "set_spend/2 sets the total the next compute_spend reports", %{compute: %{id: id}} do
+      from = ~U[2026-10-01 00:00:00Z]
+
+      assert :ok = Mock.set_spend(id, 1.8)
+
+      assert {:ok, %ExAtlas.Spec.Spend{total_usd: 1.8, from: ^from}} =
+               ExAtlas.compute_spend(id, provider: :mock, from: from)
+    end
+
+    test "set_spend/2 bills a pod that is already gone", %{compute: %{id: id}} do
+      :ok = Mock.forget(id)
+      :ok = Mock.set_spend(id, 0.5)
+
+      assert {:ok, %ExAtlas.Spec.Spend{total_usd: 0.5}} =
+               ExAtlas.compute_spend(id, provider: :mock)
+    end
+
+    test "spend_calls/1 counts compute_spend calls per pod", %{compute: %{id: id}} do
+      assert Mock.spend_calls(id) == 0
+
+      {:ok, _} = ExAtlas.compute_spend(id, provider: :mock)
+      {:ok, _} = ExAtlas.compute_spend(id, provider: :mock)
+      {:ok, _} = ExAtlas.compute_spend("other", provider: :mock)
+
+      assert Mock.spend_calls(id) == 2
+    end
+  end
 end
