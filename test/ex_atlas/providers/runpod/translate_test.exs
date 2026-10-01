@@ -863,6 +863,86 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     end
   end
 
+  describe "endpoint_to_spec/1" do
+    @endpoint %{
+      "id" => "4m7x2k9q",
+      "name" => "image-generator",
+      "type" => "QUEUE",
+      "image" => "ghcr.io/acme/gen:3",
+      "env" => %{"HF_TOKEN" => "s3cr3t-value"},
+      "gpu" => %{"pools" => ["ADA_24", "AMPERE_48"], "count" => 1},
+      "workers" => %{"min" => 0, "max" => 3},
+      "dataCenterIds" => ["US-TX-3"],
+      "networkVolumes" => ["vol_abc"],
+      "createdAt" => "2026-03-13T20:00:00Z"
+    }
+
+    test "normalizes a RunPod endpoint and keeps the body in raw" do
+      assert %Spec.Endpoint{
+               id: "4m7x2k9q",
+               provider: :runpod,
+               name: "image-generator",
+               type: :queue,
+               workers_min: 0,
+               workers_max: 3,
+               gpu_pools: ["ADA_24", "AMPERE_48"],
+               region_hints: ["US-TX-3"],
+               network_volume_ids: ["vol_abc"],
+               created_at: ~U[2026-03-13 20:00:00Z],
+               raw: @endpoint
+             } = Translate.endpoint_to_spec(@endpoint)
+    end
+
+    test "LOAD_BALANCER maps to :load_balancer, an unknown type to :unknown, an absent one to nil" do
+      assert %{type: :load_balancer} =
+               Translate.endpoint_to_spec(%{"id" => "a", "type" => "LOAD_BALANCER"})
+
+      assert %{type: :unknown} = Translate.endpoint_to_spec(%{"id" => "a", "type" => "STREAM"})
+      assert %{type: nil} = Translate.endpoint_to_spec(%{"id" => "a"})
+      assert %{type: nil} = Translate.endpoint_to_spec(%{"id" => "a", "type" => 7})
+    end
+
+    test "a sparse body reads as absent fields" do
+      assert %Spec.Endpoint{
+               id: "a",
+               name: nil,
+               workers_min: nil,
+               workers_max: nil,
+               gpu_pools: [],
+               region_hints: [],
+               network_volume_ids: [],
+               created_at: nil
+             } = Translate.endpoint_to_spec(%{"id" => "a"})
+    end
+
+    test "a CPU endpoint has no gpu and no pools" do
+      raw = %{"id" => "a", "gpu" => nil, "cpu" => [%{"memory" => 16}]}
+      assert %{gpu_pools: []} = Translate.endpoint_to_spec(raw)
+    end
+
+    test "fields of the wrong type read as absent" do
+      raw = %{
+        "id" => "a",
+        "name" => 5,
+        "workers" => %{"min" => "none", "max" => 2.5},
+        "gpu" => %{"pools" => "ADA_24"},
+        "dataCenterIds" => "US-TX-3",
+        "networkVolumes" => [1, "vol_abc"],
+        "createdAt" => "yesterday"
+      }
+
+      assert %Spec.Endpoint{
+               name: nil,
+               workers_min: nil,
+               workers_max: nil,
+               gpu_pools: [],
+               region_hints: [],
+               network_volume_ids: ["vol_abc"],
+               created_at: nil
+             } = Translate.endpoint_to_spec(raw)
+    end
+  end
+
   describe "pod_billing_to_spend/2" do
     defp billing_body(overrides \\ %{}) do
       Map.merge(

@@ -592,4 +592,36 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   end
 
   defp template_command(_), do: nil
+
+  @doc "Normalize a RunPod serverless endpoint body."
+  @spec endpoint_to_spec(map()) :: Spec.Endpoint.t()
+  def endpoint_to_spec(%{} = raw) do
+    workers = if is_map(raw["workers"]), do: raw["workers"], else: %{}
+    gpu = if is_map(raw["gpu"]), do: raw["gpu"], else: %{}
+
+    %Spec.Endpoint{
+      id: raw["id"],
+      provider: :runpod,
+      name: if(is_binary(raw["name"]), do: raw["name"]),
+      type: endpoint_type(raw["type"]),
+      workers_min: non_neg_integer_or_nil(workers["min"]),
+      workers_max: non_neg_integer_or_nil(workers["max"]),
+      gpu_pools: string_list(gpu["pools"]),
+      region_hints: string_list(raw["dataCenterIds"]),
+      network_volume_ids: string_list(raw["networkVolumes"]),
+      created_at: parse_datetime(raw["createdAt"]),
+      raw: raw
+    }
+  end
+
+  defp endpoint_type("QUEUE"), do: :queue
+  defp endpoint_type("LOAD_BALANCER"), do: :load_balancer
+  defp endpoint_type(type) when is_binary(type), do: :unknown
+  defp endpoint_type(_), do: nil
+
+  defp non_neg_integer_or_nil(n) when is_integer(n) and n >= 0, do: n
+  defp non_neg_integer_or_nil(_), do: nil
+
+  defp string_list(list) when is_list(list), do: Enum.filter(list, &is_binary/1)
+  defp string_list(_), do: []
 end
