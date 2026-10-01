@@ -7,6 +7,31 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: templates through the public API (#57, slice 2 of #27)
+
+`ExAtlas.list_templates/1`, `get_template/2`, `create_template/1` and
+`delete_template/2` manage RunPod templates with plain options and a
+`%ExAtlas.Spec.Template{}` back. `create_template/1` takes `ssh:` and
+`jupyter:`; it sends them only when you set them, so RunPod's defaults (both
+on) hold otherwise. `inspect/1` of a template leaves out `env` and `raw`.
+A provider without the new optional callbacks returns
+`{:error, %ExAtlas.Error{kind: :unsupported}}`. RunPod declares the new
+capability `:manage_templates`.
+
+### Fixed: a pod spawned from a template lost its ports and disk (#57)
+
+`spawn_compute(template_id: ...)` sent `"ports" => []` and `"disk" => 50`,
+and REST v2 applies body fields over the template's. The body now leaves
+`ports` out when the spawn sets none and `disk` out when it sets no
+`container_disk_gb`. A spawn without `template_id` is unchanged. Passing
+`ports: []` with a template cannot clear the template's ports.
+
+### Fixed: template and endpoint lists read only the first page (#57)
+
+`RunPod.Templates.list/1` and `RunPod.Endpoints.list/1` now follow
+`pagination.nextCursor` through `Client.list_all/3`, the pager that `Pods.list/1`
+used. Both return the list of entries instead of the raw page body.
+
 ### Added: network volumes through the public API (#56, slice 1 of #27)
 
 `ExAtlas.list_network_volumes/1`, `get_network_volume/2`,

@@ -542,6 +542,7 @@ Every provider implements one callback per operation. See
 | `capabilities/0`            | Declare supported features                        |
 | `list_gpu_types/1`          | Catalog + pricing                                 |
 | `list/get/create/delete_network_volume` | Optional: manage network volumes     |
+| `list/get/create/delete_template` | Optional: manage templates                 |
 
 Callers can check `ExAtlas.capabilities(:runpod)` before relying on an
 optional feature:
@@ -566,6 +567,33 @@ ExAtlas.list_network_volumes(provider: :lambda_labs)
 # => {:error, %ExAtlas.Error{kind: :unsupported}}
 ```
 
+### Templates
+
+Keep a trainer image as a template and spawn pods from it. A pod spawned with
+`template_id:` keeps the template's ports and disk unless the spawn sets
+`ports:` or `container_disk_gb:`.
+
+```elixir
+{:ok, template} =
+  ExAtlas.create_template(
+    provider: :runpod,
+    name: "trainer-v7",
+    image: "ghcr.io/acme/trainer:7",
+    ports: [{8000, :http}],
+    env: %{"WANDB_PROJECT" => "atlas"},
+    container_disk_gb: 80,
+    volume_gb: 100
+  )
+
+ExAtlas.spawn_compute(provider: :runpod, gpu: :h100, template_id: template.id)
+ExAtlas.list_templates(provider: :runpod)
+ExAtlas.delete_template(template.id, provider: :runpod)
+```
+
+RunPod starts SSH and Jupyter in a template's pods by default. Pass
+`ssh: false` or `jupyter: false` to `create_template/1` to turn one off.
+`inspect/1` of a `%ExAtlas.Spec.Template{}` leaves out `env` and `raw`.
+
 ### Capability atoms
 
 | Atom                | Meaning                                                               |
@@ -574,6 +602,7 @@ ExAtlas.list_network_volumes(provider: :lambda_labs)
 | `:serverless`       | `run_job/2` and friends                                               |
 | `:network_volumes`  | Attach persistent volumes                                             |
 | `:manage_network_volumes` | Create, list, get and delete volumes                            |
+| `:manage_templates` | Create, list, get and delete templates                                |
 | `:http_proxy`       | Provider terminates TLS on a `*.proxy.*` hostname                     |
 | `:raw_tcp`          | Public IP + mapped TCP ports                                          |
 | `:symmetric_ports`  | `internal == external` port guarantee                                 |

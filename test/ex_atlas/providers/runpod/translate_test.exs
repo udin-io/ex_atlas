@@ -146,6 +146,43 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert body["disk"] == 50
     end
 
+    # REST v2 applies body fields over the template's own, so an empty `ports`
+    # list or a default `disk` would replace the template's.
+    test "template_id with no ports and no container_disk_gb sends neither ports nor disk" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, template_id: "9x4m2p7v")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["templateId"] == "9x4m2p7v"
+      refute Map.has_key?(body, "ports")
+      refute Map.has_key?(body, "disk")
+    end
+
+    test "template_id with ports and container_disk_gb still sends both" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          template_id: "9x4m2p7v",
+          ports: [{8000, :http}],
+          container_disk_gb: 20
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["ports"] == ["8000/http"]
+      assert body["disk"] == 20
+    end
+
+    test "template_id with only container_disk_gb sends the disk and no ports" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, template_id: "t", container_disk_gb: 20)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["disk"] == 20
+      refute Map.has_key?(body, "ports")
+    end
+
+    test "without template_id an empty ports list is still sent" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["ports"] == []
+    end
+
     test "no volume_gb and no network_volume_id sends no mounts, so no /workspace volume" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
@@ -693,6 +730,136 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       assert %{tier: nil} = Translate.network_volume_to_spec(%{"id" => "a", "type" => "NEW"})
       assert %{tier: nil} = Translate.network_volume_to_spec(%{"id" => "a"})
+    end
+  end
+
+  describe "template_request_to_body/1" do
+    test "maps name, image, ports, env, disk, mounts and cmd" do
+      req =
+        Spec.TemplateRequest.new!(
+          name: "trainer-v7",
+          image: "ghcr.io/acme/trainer:7",
+          ports: [{8000, :http}, {22, :tcp}],
+          env: %{"WANDB_PROJECT" => "atlas"},
+          container_disk_gb: 80,
+          volume_gb: 100,
+          command: ["python", "train.py"]
+        )
+
+      assert Translate.template_request_to_body(req) == %{
+               "name" => "trainer-v7",
+               "image" => "ghcr.io/acme/trainer:7",
+               "ports" => ["8000/http", "22/tcp"],
+               "env" => %{"WANDB_PROJECT" => "atlas"},
+               "disk" => 80,
+               "mounts" => %{"persistent" => %{"size" => 100, "path" => "/workspace"}},
+               "cmd" => ["python", "train.py"]
+             }
+    end
+
+    test "a bare request sends only name and image" do
+      req = Spec.TemplateRequest.new!(name: "n", image: "i")
+      assert Translate.template_request_to_body(req) == %{"name" => "n", "image" => "i"}
+    end
+
+    test "ssh: false and jupyter: false send both keys as false" do
+      req = Spec.TemplateRequest.new!(name: "n", image: "i", ssh: false, jupyter: false)
+
+      assert %{"startSsh" => false, "startJupyter" => false} =
+               Translate.template_request_to_body(req)
+    end
+
+    test "ssh: true and jupyter: true send both keys as true" do
+      req = Spec.TemplateRequest.new!(name: "n", image: "i", ssh: true, jupyter: true)
+
+      assert %{"startSsh" => true, "startJupyter" => true} =
+               Translate.template_request_to_body(req)
+    end
+
+    test "omitting ssh and jupyter sends neither key, so RunPod's defaults hold" do
+      body = Translate.template_request_to_body(Spec.TemplateRequest.new!(name: "n", image: "i"))
+      refute Map.has_key?(body, "startSsh")
+      refute Map.has_key?(body, "startJupyter")
+    end
+
+    test "serverless: true is sent and false is not" do
+      on = Spec.TemplateRequest.new!(name: "n", image: "i", serverless: true)
+      off = Spec.TemplateRequest.new!(name: "n", image: "i")
+      assert %{"serverless" => true} = Translate.template_request_to_body(on)
+      refute Map.has_key?(Translate.template_request_to_body(off), "serverless")
+    end
+
+    test "provider_opts merge over the body" do
+      req = Spec.TemplateRequest.new!(name: "n", image: "i", provider_opts: %{category: "AMD"})
+      assert %{"category" => "AMD"} = Translate.template_request_to_body(req)
+    end
+  end
+
+  describe "template_to_spec/1" do
+    @template %{
+      "id" => "9x4m2p7v",
+      "name" => "trainer-v7",
+      "image" => "ghcr.io/acme/trainer:7",
+      "args" => "",
+      "cmd" => ["python", "train.py"],
+      "disk" => 80,
+      "mounts" => %{"persistent" => %{"size" => 100, "path" => "/workspace"}},
+      "ports" => ["8000/http", "22/tcp"],
+      "env" => %{"WANDB_PROJECT" => "atlas"},
+      "serverless" => false,
+      "startSsh" => true,
+      "startJupyter" => false
+    }
+
+    test "normalizes a RunPod template and keeps the body in raw" do
+      assert %Spec.Template{
+               id: "9x4m2p7v",
+               provider: :runpod,
+               name: "trainer-v7",
+               image: "ghcr.io/acme/trainer:7",
+               ports: [{8000, :http}, {22, :tcp}],
+               env: %{"WANDB_PROJECT" => "atlas"},
+               container_disk_gb: 80,
+               volume_gb: 100,
+               command: ["python", "train.py"],
+               serverless: false,
+               ssh: true,
+               jupyter: false,
+               raw: @template
+             } = Translate.template_to_spec(@template)
+    end
+
+    test "a sparse body reads as absent fields" do
+      assert %Spec.Template{
+               id: "a",
+               ports: [],
+               env: %{},
+               container_disk_gb: nil,
+               volume_gb: nil,
+               command: nil,
+               serverless: false,
+               ssh: nil,
+               jupyter: nil
+             } = Translate.template_to_spec(%{"id" => "a"})
+    end
+
+    test "fields of the wrong type read as absent and a bad port string is skipped" do
+      raw = %{
+        "id" => "a",
+        "ports" => ["8000/http", "junk", 7],
+        "env" => "x",
+        "mounts" => [],
+        "cmd" => "run",
+        "disk" => "big"
+      }
+
+      assert %Spec.Template{
+               ports: [{8000, :http}],
+               env: %{},
+               volume_gb: nil,
+               command: nil,
+               container_disk_gb: nil
+             } = Translate.template_to_spec(raw)
     end
   end
 end

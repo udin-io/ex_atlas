@@ -49,9 +49,9 @@ defmodule ExAtlas.Providers.RunPod.Translate do
         "image" => req.image,
         "gpu" => %{"id" => gpu_type_id!(req.gpu), "count" => req.gpu_count},
         "cloud" => cloud(req.cloud_type),
-        "ports" => Enum.map(req.ports, &format_port/1),
+        "ports" => pod_ports_field(req),
         "env" => env,
-        "disk" => req.container_disk_gb || @default_disk_gb,
+        "disk" => pod_disk(req),
         "mounts" => mounts(req),
         "templateId" => req.template_id,
         "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints),
@@ -120,6 +120,19 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # v2 has no "any cloud" value. Omitting the field takes Runpod's default,
   # SECURE.
+  # With a `template_id`, v2 applies body fields over the template's own. An
+  # empty `ports` list or the default `disk` would replace the template's, so
+  # both stay out of the body until the caller sets them.
+  defp pod_ports_field(%Spec.ComputeRequest{template_id: id, ports: []}) when is_binary(id),
+    do: nil
+
+  defp pod_ports_field(%Spec.ComputeRequest{ports: ports}), do: Enum.map(ports, &format_port/1)
+
+  defp pod_disk(%Spec.ComputeRequest{template_id: id, container_disk_gb: nil}) when is_binary(id),
+    do: nil
+
+  defp pod_disk(%Spec.ComputeRequest{container_disk_gb: gb}), do: gb || @default_disk_gb
+
   defp cloud(:any), do: nil
   defp cloud(:secure), do: "SECURE"
   defp cloud(:community), do: "COMMUNITY"
@@ -146,6 +159,18 @@ defmodule ExAtlas.Providers.RunPod.Translate do
                 "Known: #{inspect(Spec.GpuCatalog.supported_gpus(:runpod))}"
     end
   end
+
+  # The inverse of `format_port/1`, for RunPod's `"8000/http"` strings.
+  defp parse_port(spec) when is_binary(spec) do
+    with [port_str, type] <- String.split(spec, "/", parts: 2),
+         {port, ""} <- Integer.parse(port_str) do
+      {:ok, port, protocol_atom(type)}
+    else
+      _ -> :error
+    end
+  end
+
+  defp parse_port(_), do: :error
 
   defp format_port({port, :http}), do: "#{port}/http"
   defp format_port({port, :tcp}), do: "#{port}/tcp"
@@ -246,23 +271,22 @@ defmodule ExAtlas.Providers.RunPod.Translate do
     live = pod |> runtime_ports() |> Map.new(&{&1["private"], &1})
 
     Enum.flat_map(specs, fn spec ->
-      with true <- is_binary(spec),
-           [port_str, type] <- String.split(spec, "/", parts: 2),
-           {port, ""} <- Integer.parse(port_str) do
-        mapping = Map.get(live, port, %{})
-        protocol = protocol_atom(type)
-        external = mapping["public"]
+      case parse_port(spec) do
+        {:ok, port, protocol} ->
+          mapping = Map.get(live, port, %{})
+          external = mapping["public"]
 
-        [
-          %{
-            internal: port,
-            external: external,
-            protocol: protocol,
-            url: port_url(pod_id, protocol, port, mapping["ip"], external)
-          }
-        ]
-      else
-        _ -> []
+          [
+            %{
+              internal: port,
+              external: external,
+              protocol: protocol,
+              url: port_url(pod_id, protocol, port, mapping["ip"], external)
+            }
+          ]
+
+        :error ->
+          []
       end
     end)
   end
@@ -343,6 +367,8 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   end
 
   # --- generic helpers ---
+
+  defp stringify_values(map), do: Map.new(map, fn {k, v} -> {to_string(k), to_string(v)} end)
 
   defp stringify(map) when is_map(map),
     do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
@@ -468,4 +494,68 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp tier_from_type("STANDARD"), do: :standard
   defp tier_from_type("HIGH_PERFORMANCE"), do: :high_performance
   defp tier_from_type(_), do: nil
+
+  @doc """
+  Build the `POST /templates` body. Optional keys are sent only when the
+  request sets them, so RunPod's own defaults (SSH and Jupyter on) hold
+  otherwise. `provider_opts` merge over the body.
+  """
+  @spec template_request_to_body(Spec.TemplateRequest.t()) :: map()
+  def template_request_to_body(%Spec.TemplateRequest{} = req) do
+    %{
+      "name" => req.name,
+      "image" => req.image,
+      "ports" => if(req.ports == [], do: nil, else: Enum.map(req.ports, &format_port/1)),
+      "env" => if(req.env == %{}, do: nil, else: stringify_values(req.env)),
+      "disk" => req.container_disk_gb,
+      "mounts" =>
+        req.volume_gb && %{"persistent" => %{"size" => req.volume_gb, "path" => @mount_path}},
+      "cmd" => req.command,
+      "serverless" => if(req.serverless, do: true, else: nil),
+      "startSsh" => req.ssh,
+      "startJupyter" => req.jupyter
+    }
+    |> drop_nils()
+    |> Map.merge(stringify(req.provider_opts))
+  end
+
+  @doc "Normalize a RunPod template body."
+  @spec template_to_spec(map()) :: Spec.Template.t()
+  def template_to_spec(%{} = raw) do
+    %Spec.Template{
+      id: raw["id"],
+      provider: :runpod,
+      name: raw["name"],
+      image: raw["image"],
+      ports: template_ports(raw["ports"]),
+      env: if(is_map(raw["env"]), do: raw["env"], else: %{}),
+      container_disk_gb: if(is_integer(raw["disk"]), do: raw["disk"]),
+      volume_gb: persistent_size(raw["mounts"]),
+      command: template_command(raw["cmd"]),
+      serverless: raw["serverless"] == true,
+      ssh: if(is_boolean(raw["startSsh"]), do: raw["startSsh"]),
+      jupyter: if(is_boolean(raw["startJupyter"]), do: raw["startJupyter"]),
+      raw: raw
+    }
+  end
+
+  defp template_ports(specs) when is_list(specs) do
+    Enum.flat_map(specs, fn spec ->
+      case parse_port(spec) do
+        {:ok, port, protocol} -> [{port, protocol}]
+        :error -> []
+      end
+    end)
+  end
+
+  defp template_ports(_), do: []
+
+  defp persistent_size(%{"persistent" => %{"size" => size}}) when is_integer(size), do: size
+  defp persistent_size(_), do: nil
+
+  defp template_command([_ | _] = cmd) do
+    if Enum.all?(cmd, &is_binary/1), do: cmd
+  end
+
+  defp template_command(_), do: nil
 end

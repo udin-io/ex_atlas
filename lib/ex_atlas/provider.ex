@@ -92,6 +92,7 @@ defmodule ExAtlas.Provider do
     * `:serverless` — supports `run_job/2`
     * `:network_volumes` — can attach persistent storage
     * `:manage_network_volumes` — implements the four network volume callbacks
+    * `:manage_templates` — implements the four template callbacks
     * `:http_proxy` — auto-terminated HTTPS proxy per pod
     * `:raw_tcp` — public IP + mapped TCP ports
     * `:symmetric_ports` — inside-port == outside-port guarantee
@@ -118,7 +119,23 @@ defmodule ExAtlas.Provider do
   @doc "Delete a network volume. Destroys its data."
   @callback delete_network_volume(id, ctx) :: :ok | {:error, term()}
 
+  @doc "List the account's templates."
+  @callback list_templates(ctx) :: result([Spec.Template.t()])
+
+  @doc "Fetch one template by id."
+  @callback get_template(id, ctx) :: result(Spec.Template.t())
+
+  @doc "Create a template."
+  @callback create_template(Spec.TemplateRequest.t(), ctx) :: result(Spec.Template.t())
+
+  @doc "Delete a template."
+  @callback delete_template(id, ctx) :: :ok | {:error, term()}
+
   @optional_callbacks [
+    list_templates: 1,
+    get_template: 2,
+    create_template: 2,
+    delete_template: 2,
     list_network_volumes: 1,
     get_network_volume: 2,
     create_network_volume: 2,

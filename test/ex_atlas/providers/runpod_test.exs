@@ -60,6 +60,50 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert url == "https://pod_abc123-8000.proxy.runpod.net"
       assert compute.auth.scheme == :bearer
     end
+
+    test "template_id with no ports and no disk POSTs neither key", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        assert body["templateId"] == "9x4m2p7v"
+        refute Map.has_key?(body, "ports")
+        refute Map.has_key?(body, "disk")
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, %{id: "p1"}} =
+               ExAtlas.spawn_compute([gpu: :h100, template_id: "9x4m2p7v"] ++ opts)
+    end
+
+    test "template_id with ports and container_disk_gb still POSTs both", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"ports" => ["8000/http"], "disk" => 20} = Jason.decode!(raw)
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, _} =
+               ExAtlas.spawn_compute(
+                 [gpu: :h100, template_id: "t", ports: [{8000, :http}], container_disk_gb: 20] ++
+                   opts
+               )
+    end
+
+    test "without template_id the body still carries disk 50", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"disk" => 50, "ports" => []} = Jason.decode!(raw)
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, _} = ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
+    end
   end
 
   describe "get_compute/2" do
@@ -320,7 +364,10 @@ defmodule ExAtlas.Providers.RunPodTest do
           })
         end)
 
-        assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_compute(opts)
+        assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
+                 ExAtlas.list_compute(opts)
+
+        assert message =~ "did not advance"
       end
     end
 
@@ -727,6 +774,216 @@ defmodule ExAtlas.Providers.RunPodTest do
 
       assert {:error, %ExAtlas.Error{kind: :not_found}} =
                RunPod.delete_network_volume("gone", ctx)
+    end
+  end
+
+  describe "templates" do
+    alias ExAtlas.Providers.RunPod
+    alias ExAtlas.Spec.Template
+
+    @template %{
+      "id" => "9x4m2p7v",
+      "name" => "trainer-v7",
+      "image" => "ghcr.io/acme/trainer:7",
+      "args" => "",
+      "disk" => 80,
+      "mounts" => %{"persistent" => %{"size" => 100, "path" => "/workspace"}},
+      "ports" => ["8000/http"],
+      "env" => %{"WANDB_PROJECT" => "atlas", "WANDB_API_KEY" => "s3cr3t-value"},
+      "serverless" => false,
+      "startSsh" => true,
+      "startJupyter" => true
+    }
+
+    setup %{ctx_opts: opts}, do: {:ok, ctx: ExAtlas.Config.build_ctx(:runpod, opts)}
+
+    defp template_request(opts \\ []) do
+      ExAtlas.Spec.TemplateRequest.new!(
+        Keyword.merge(
+          [
+            name: "trainer-v7",
+            image: "ghcr.io/acme/trainer:7",
+            ports: [{8000, :http}],
+            env: %{"WANDB_PROJECT" => "atlas"},
+            container_disk_gb: 80,
+            volume_gb: 100
+          ],
+          opts
+        )
+      )
+    end
+
+    test "capabilities include :manage_templates" do
+      assert :manage_templates in RunPod.capabilities()
+    end
+
+    test "create POSTs the template body and returns a Template", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+
+        assert Jason.decode!(raw) == %{
+                 "name" => "trainer-v7",
+                 "image" => "ghcr.io/acme/trainer:7",
+                 "ports" => ["8000/http"],
+                 "env" => %{"WANDB_PROJECT" => "atlas"},
+                 "disk" => 80,
+                 "mounts" => %{"persistent" => %{"size" => 100, "path" => "/workspace"}}
+               }
+
+        json(conn, 201, @template)
+      end)
+
+      assert {:ok,
+              %Template{
+                id: "9x4m2p7v",
+                provider: :runpod,
+                image: "ghcr.io/acme/trainer:7",
+                ports: [{8000, :http}],
+                container_disk_gb: 80,
+                volume_gb: 100
+              }} = RunPod.create_template(template_request(), ctx)
+    end
+
+    test "create with ssh: false and jupyter: false sends both as false", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"startSsh" => false, "startJupyter" => false} = Jason.decode!(raw)
+        json(conn, 201, %{@template | "startSsh" => false, "startJupyter" => false})
+      end)
+
+      assert {:ok, %Template{ssh: false, jupyter: false}} =
+               RunPod.create_template(template_request(ssh: false, jupyter: false), ctx)
+    end
+
+    test "create without ssh and jupyter sends neither key", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        refute Map.has_key?(body, "startSsh")
+        refute Map.has_key?(body, "startJupyter")
+        json(conn, 201, @template)
+      end)
+
+      assert {:ok, %Template{}} = RunPod.create_template(template_request(), ctx)
+    end
+
+    test "create surfaces a provider refusal", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+        json(conn, 400, %{"error" => "bad image"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} =
+               RunPod.create_template(template_request(), ctx)
+    end
+
+    test "list returns the templates of every page", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect(bypass, "GET", "/templates", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        case conn.query_params["cursor"] do
+          nil ->
+            json(conn, 200, %{
+              "templates" => [@template],
+              "pagination" => %{"nextCursor" => "c2", "hasNextPage" => true}
+            })
+
+          "c2" ->
+            json(conn, 200, %{
+              "templates" => [%{@template | "id" => "b"}],
+              "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
+            })
+        end
+      end)
+
+      assert {:ok, [%Template{id: "9x4m2p7v"}, %Template{id: "b"}]} =
+               RunPod.list_templates(ctx)
+    end
+
+    test "list fails whole when the second page fails", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect(bypass, "GET", "/templates", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        case conn.query_params["cursor"] do
+          nil ->
+            json(conn, 200, %{
+              "templates" => [@template],
+              "pagination" => %{"nextCursor" => "c2", "hasNextPage" => true}
+            })
+
+          "c2" ->
+            json(conn, 404, %{"error" => "bad cursor"})
+        end
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.list_templates(ctx)
+    end
+
+    test "get returns the template", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/templates/9x4m2p7v", fn conn ->
+        json(conn, 200, @template)
+      end)
+
+      assert {:ok, %Template{id: "9x4m2p7v", name: "trainer-v7"}} =
+               RunPod.get_template("9x4m2p7v", ctx)
+    end
+
+    test "get of a missing template is :not_found", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/templates/gone", fn conn ->
+        json(conn, 404, %{"error" => "not found"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.get_template("gone", ctx)
+    end
+
+    test "get with a 200 body that is not an object is a :provider error without the body", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "GET", "/templates/x", fn conn ->
+        json(conn, 200, [@template])
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, raw: nil} = error} =
+               RunPod.get_template("x", ctx)
+
+      refute inspect(error) =~ "s3cr3t-value"
+    end
+
+    test "inspect of a returned template does not show an env value", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/templates/9x4m2p7v", fn conn ->
+        json(conn, 200, @template)
+      end)
+
+      {:ok, template} = RunPod.get_template("9x4m2p7v", ctx)
+      assert template.env["WANDB_API_KEY"] == "s3cr3t-value"
+      refute inspect(template) =~ "s3cr3t-value"
+    end
+
+    test "delete returns :ok on 204", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/templates/9x4m2p7v", fn conn ->
+        Plug.Conn.resp(conn, 204, "")
+      end)
+
+      assert :ok = RunPod.delete_template("9x4m2p7v", ctx)
+    end
+
+    test "delete of a template in use is a refusal, not :ok", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/templates/busy", fn conn ->
+        json(conn, 400, %{"error" => "template is in use"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = RunPod.delete_template("busy", ctx)
+    end
+
+    test "delete of a missing template is :not_found", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/templates/gone", fn conn ->
+        json(conn, 404, %{"error" => "not found"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.delete_template("gone", ctx)
     end
   end
 end

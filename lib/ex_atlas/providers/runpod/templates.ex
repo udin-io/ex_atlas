@@ -10,8 +10,8 @@ defmodule ExAtlas.Providers.RunPod.Templates do
       |> Req.post(url: "/templates", json: body)
       |> Client.handle_response(201)
 
-  def list(ctx),
-    do: ctx |> Client.management() |> Req.get(url: "/templates") |> Client.handle_response()
+  @doc "Every template on the account, following the cursor. Returns `{:ok, [template]}`."
+  def list(ctx), do: Client.list_all(ctx, "/templates", "templates")
 
   def get(ctx, id),
     do: ctx |> Client.management() |> Req.get(url: "/templates/#{id}") |> Client.handle_response()
