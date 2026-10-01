@@ -16,8 +16,8 @@ defmodule ExAtlas.Providers.RunPod do
 
   RunPod reports the following capability atoms:
 
-      [:serverless, :network_volumes, :manage_network_volumes, :http_proxy, :raw_tcp,
-       :symmetric_ports, :webhooks, :global_networking, :self_terminate]
+      [:serverless, :network_volumes, :manage_network_volumes, :manage_templates, :http_proxy,
+       :raw_tcp, :symmetric_ports, :webhooks, :global_networking, :self_terminate]
 
   Runpod no longer sells spot pods, so `spot: true` returns
   `{:error, %ExAtlas.Error{kind: :unsupported}}` before any request.
@@ -54,7 +54,16 @@ defmodule ExAtlas.Providers.RunPod do
 
   @behaviour ExAtlas.Provider
 
-  alias ExAtlas.Providers.RunPod.{Catalog, Endpoints, Jobs, NetworkVolumes, Pods, Translate}
+  alias ExAtlas.Providers.RunPod.{
+    Catalog,
+    Endpoints,
+    Jobs,
+    NetworkVolumes,
+    Pods,
+    Templates,
+    Translate
+  }
+
   alias ExAtlas.Spec
 
   @impl true
@@ -63,6 +72,7 @@ defmodule ExAtlas.Providers.RunPod do
       :serverless,
       :network_volumes,
       :manage_network_volumes,
+      :manage_templates,
       :http_proxy,
       :raw_tcp,
       :symmetric_ports,
@@ -263,6 +273,35 @@ defmodule ExAtlas.Providers.RunPod do
     end
   end
 
+  @impl true
+  def list_templates(ctx) do
+    with {:ok, templates} <- Templates.list(ctx) do
+      {:ok, Enum.map(templates, &Translate.template_to_spec/1)}
+    end
+  end
+
+  @impl true
+  def get_template(id, ctx) do
+    with {:ok, template} <- Templates.get(ctx, id),
+         do: template_spec(template, "GET /templates/#{id}")
+  end
+
+  @impl true
+  def create_template(%Spec.TemplateRequest{} = req, ctx) do
+    body = Translate.template_request_to_body(req)
+
+    with {:ok, template} <- Templates.create(ctx, body),
+         do: template_spec(template, "POST /templates")
+  end
+
+  @impl true
+  def delete_template(id, ctx) do
+    case Templates.delete(ctx, id) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
   @doc false
   def endpoints_module, do: Endpoints
 
@@ -270,7 +309,14 @@ defmodule ExAtlas.Providers.RunPod do
 
   defp volume_spec(%{} = volume, _call), do: {:ok, Translate.network_volume_to_spec(volume)}
 
-  defp volume_spec(other, call) do
+  defp volume_spec(other, call), do: unexpected_body(other, call)
+
+  defp template_spec(%{} = template, _call), do: {:ok, Translate.template_to_spec(template)}
+
+  # A template body can carry env secrets, so the error keeps it out of `raw`.
+  defp template_spec(_other, call), do: unexpected_body(nil, call)
+
+  defp unexpected_body(other, call) do
     {:error,
      ExAtlas.Error.new(:provider,
        provider: :runpod,
