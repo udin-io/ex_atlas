@@ -924,7 +924,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       raw = %{
         "id" => "a",
         "name" => 5,
-        "workers" => %{"min" => "none", "max" => 2.5},
+        "workers" => %{"min" => -1, "max" => 2.5},
         "gpu" => %{"pools" => "ADA_24"},
         "dataCenterIds" => "US-TX-3",
         "networkVolumes" => [1, "vol_abc"],
