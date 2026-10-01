@@ -416,6 +416,26 @@ defmodule ExAtlas do
     end
   end
 
+  @doc """
+  List the account's serverless endpoints, every page.
+
+  Returns `{:error, %ExAtlas.Error{kind: :unsupported}}` for a provider that
+  cannot manage endpoints; `:manage_endpoints` in `capabilities/1` says which
+  can. Pass an endpoint's `id` as `endpoint:` to `run_job/1`.
+
+  This library does not create endpoints. Create one in the provider's console.
+  """
+  @spec list_endpoints(opts()) :: {:ok, [Spec.Endpoint.t()]} | {:error, term()}
+  def list_endpoints(opts \\ []), do: dispatch_optional(:list_endpoints, [], opts)
+
+  @doc "Fetch a serverless endpoint by id."
+  @spec get_endpoint(String.t(), opts()) :: {:ok, Spec.Endpoint.t()} | {:error, term()}
+  def get_endpoint(id, opts \\ []), do: dispatch_optional(:get_endpoint, [id], opts)
+
+  @doc "Delete a serverless endpoint."
+  @spec delete_endpoint(String.t(), opts()) :: :ok | {:error, term()}
+  def delete_endpoint(id, opts \\ []), do: dispatch_optional(:delete_endpoint, [id], opts)
+
   @doc "Return the capability atoms honored by a provider."
   @spec capabilities(atom() | module()) :: [atom()]
   def capabilities(provider), do: provider |> Config.provider_module() |> apply(:capabilities, [])

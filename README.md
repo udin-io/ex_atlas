@@ -544,6 +544,7 @@ Every provider implements one callback per operation. See
 | `list/get/create/delete_network_volume` | Optional: manage network volumes     |
 | `list/get/create/delete_template` | Optional: manage templates                 |
 | `compute_spend/3`           | Optional: one compute resource's spend            |
+| `list/get/delete_endpoint`  | Optional: manage serverless endpoints             |
 
 Callers can check `ExAtlas.capabilities(:runpod)` before relying on an
 optional feature:
@@ -616,6 +617,31 @@ the result are the window RunPod resolved, `[from, to)`, snapped to its
 billing buckets. RunPod's docs do not say how soon a new hour of spend shows
 up, so do not read the total as a live cost.
 
+### Serverless endpoints
+
+Find the id that `run_job/1` takes, without RunPod's console:
+
+```elixir
+{:ok, [endpoint | _]} = ExAtlas.list_endpoints(provider: :runpod)
+endpoint.name
+# => "image-generator"
+endpoint.type
+# => :queue
+{endpoint.workers_min, endpoint.workers_max, endpoint.gpu_pools}
+# => {0, 3, ["ADA_24"]}
+
+ExAtlas.run_job(provider: :runpod, endpoint: endpoint.id, input: %{prompt: "a fox"})
+ExAtlas.get_endpoint(endpoint.id, provider: :runpod)
+ExAtlas.delete_endpoint(endpoint.id, provider: :runpod)
+# => :ok
+```
+
+`gpu_pools` holds RunPod's pool ids (`"ADA_24"`), not card names. `type` is
+`:queue`, `:load_balancer`, `:unknown` for a type this library does not know,
+or `nil`. ExAtlas does not create endpoints: create one in RunPod's console.
+`inspect/1` of a `%ExAtlas.Spec.Endpoint{}` leaves out `raw`, which holds the
+endpoint's env.
+
 ### Capability atoms
 
 | Atom                | Meaning                                                               |
@@ -625,6 +651,7 @@ up, so do not read the total as a live cost.
 | `:network_volumes`  | Attach persistent volumes                                             |
 | `:manage_network_volumes` | Create, list, get and delete volumes                            |
 | `:manage_templates` | Create, list, get and delete templates                                |
+| `:manage_endpoints` | List, get and delete serverless endpoints                             |
 | `:billing`          | `compute_spend/2`                                                     |
 | `:http_proxy`       | Provider terminates TLS on a `*.proxy.*` hostname                     |
 | `:raw_tcp`          | Public IP + mapped TCP ports                                          |
@@ -647,6 +674,7 @@ to know each provider's native shape.
   `:public_ip`, `:ports`, `:gpu_type`, `:gpu_count`, `:cost_per_hour`,
   `:region`, `:image`, `:name`, `:auth`, `:created_at`, `:raw`.
 - `ExAtlas.Spec.JobRequest` / `ExAtlas.Spec.Job` — serverless jobs.
+- `ExAtlas.Spec.Endpoint` — serverless endpoint from `list_endpoints/1`.
 - `ExAtlas.Spec.GpuType` — catalog entries returned by `list_gpu_types/1`.
 - `ExAtlas.Spec.GpuCatalog` — atom ↔ provider ID mapping.
 

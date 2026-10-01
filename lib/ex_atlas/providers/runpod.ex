@@ -16,8 +16,9 @@ defmodule ExAtlas.Providers.RunPod do
 
   RunPod reports the following capability atoms:
 
-      [:serverless, :network_volumes, :manage_network_volumes, :manage_templates, :billing,
-       :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking, :self_terminate]
+      [:serverless, :network_volumes, :manage_network_volumes, :manage_templates,
+       :manage_endpoints, :billing, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks,
+       :global_networking, :self_terminate]
 
   Runpod no longer sells spot pods, so `spot: true` returns
   `{:error, %ExAtlas.Error{kind: :unsupported}}` before any request.
@@ -74,6 +75,7 @@ defmodule ExAtlas.Providers.RunPod do
       :network_volumes,
       :manage_network_volumes,
       :manage_templates,
+      :manage_endpoints,
       :billing,
       :http_proxy,
       :raw_tcp,
@@ -322,8 +324,26 @@ defmodule ExAtlas.Providers.RunPod do
     end
   end
 
-  @doc false
-  def endpoints_module, do: Endpoints
+  @impl true
+  def list_endpoints(ctx) do
+    with {:ok, endpoints} <- Endpoints.list(ctx) do
+      {:ok, Enum.map(endpoints, &Translate.endpoint_to_spec/1)}
+    end
+  end
+
+  @impl true
+  def get_endpoint(id, ctx) do
+    with {:ok, endpoint} <- Endpoints.get(ctx, id),
+         do: endpoint_spec(endpoint, "GET /serverless/#{id}")
+  end
+
+  @impl true
+  def delete_endpoint(id, ctx) do
+    case Endpoints.delete(ctx, id) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
 
   # --- helpers ---
 
@@ -335,6 +355,10 @@ defmodule ExAtlas.Providers.RunPod do
 
   # A template body can carry env secrets, so the error keeps it out of `raw`.
   defp template_spec(_other, call), do: unexpected_body(nil, call)
+
+  # An endpoint body carries env secrets, so the error keeps it out of `raw`.
+  defp endpoint_spec(%{} = endpoint, _call), do: {:ok, Translate.endpoint_to_spec(endpoint)}
+  defp endpoint_spec(_other, call), do: unexpected_body(nil, call)
 
   defp unexpected_body(other, call) do
     {:error,

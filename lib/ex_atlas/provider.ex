@@ -93,6 +93,7 @@ defmodule ExAtlas.Provider do
     * `:network_volumes` — can attach persistent storage
     * `:manage_network_volumes` — implements the four network volume callbacks
     * `:manage_templates` — implements the four template callbacks
+    * `:manage_endpoints` — implements the three serverless endpoint callbacks
     * `:billing` — implements `compute_spend/3`
     * `:http_proxy` — auto-terminated HTTPS proxy per pod
     * `:raw_tcp` — public IP + mapped TCP ports
@@ -132,6 +133,15 @@ defmodule ExAtlas.Provider do
   @doc "Delete a template."
   @callback delete_template(id, ctx) :: :ok | {:error, term()}
 
+  @doc "List the account's serverless endpoints."
+  @callback list_endpoints(ctx) :: result([Spec.Endpoint.t()])
+
+  @doc "Fetch one serverless endpoint by id."
+  @callback get_endpoint(id, ctx) :: result(Spec.Endpoint.t())
+
+  @doc "Delete a serverless endpoint."
+  @callback delete_endpoint(id, ctx) :: :ok | {:error, term()}
+
   @doc """
   One compute resource's spend in US dollars.
 
@@ -141,6 +151,9 @@ defmodule ExAtlas.Provider do
   @callback compute_spend(id, keyword(), ctx) :: result(Spec.Spend.t())
 
   @optional_callbacks [
+    list_endpoints: 1,
+    get_endpoint: 2,
+    delete_endpoint: 2,
     compute_spend: 3,
     list_templates: 1,
     get_template: 2,

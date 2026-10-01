@@ -7,6 +7,22 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: serverless endpoints through the public API (#59, slice 4 of #27)
+
+`ExAtlas.list_endpoints/1`, `get_endpoint/2` and `delete_endpoint/2` list,
+read and delete RunPod serverless endpoints and return
+`%ExAtlas.Spec.Endpoint{}`: `id`, `name`, `type` (`:queue`, `:load_balancer`,
+`:unknown` or `nil`), `workers_min`, `workers_max`, `gpu_pools` (RunPod pool
+ids such as `"ADA_24"`), `region_hints`, `network_volume_ids`, `created_at`
+and `raw`. `inspect/1` leaves out `raw`, which holds the endpoint's env. A
+provider without the new optional callbacks returns
+`{:error, %ExAtlas.Error{kind: :unsupported}}`. RunPod declares the new
+capability `:manage_endpoints`. There is no `create_endpoint`.
+
+### Removed: `ExAtlas.Providers.RunPod.endpoints_module/0` (#59)
+
+A `@doc false` accessor with no caller.
+
 ### Added: per-pod spend through the public API (#58, slice 3 of #27)
 
 `ExAtlas.compute_spend/2` returns a `%ExAtlas.Spec.Spend{}`: one pod's

@@ -480,6 +480,74 @@ defmodule AtlasTest do
     end
   end
 
+  describe "serverless endpoints" do
+    setup do
+      bypass = Bypass.open()
+
+      {:ok,
+       bypass: bypass,
+       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+    end
+
+    @endpoint %{
+      "id" => "ep_1",
+      "name" => "image-generator",
+      "type" => "QUEUE",
+      "workers" => %{"min" => 0, "max" => 3}
+    }
+
+    defp endpoint_respond(conn, status, body) do
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(status, Jason.encode!(body))
+    end
+
+    test "list, get and delete go to the provider", %{bypass: bypass, opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/serverless", fn conn ->
+        assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
+
+        endpoint_respond(conn, 200, %{
+          "endpoints" => [@endpoint],
+          "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
+        })
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/serverless/ep_1", fn conn ->
+        endpoint_respond(conn, 200, @endpoint)
+      end)
+
+      Bypass.expect_once(bypass, "DELETE", "/serverless/ep_1", fn conn ->
+        Plug.Conn.resp(conn, 204, "")
+      end)
+
+      assert {:ok, [%Spec.Endpoint{id: "ep_1", type: :queue}]} = ExAtlas.list_endpoints(opts)
+
+      assert {:ok, %Spec.Endpoint{id: "ep_1", workers_max: 3}} =
+               ExAtlas.get_endpoint("ep_1", opts)
+
+      assert :ok = ExAtlas.delete_endpoint("ep_1", opts)
+    end
+
+    test "a provider without the callbacks returns :unsupported for all three calls" do
+      for provider <- [:mock, :lambda_labs, :fly, BareProvider] do
+        opts = [provider: provider, api_key: "k"]
+
+        for result <- [
+              ExAtlas.list_endpoints(opts),
+              ExAtlas.get_endpoint("e", opts),
+              ExAtlas.delete_endpoint("e", opts)
+            ] do
+          assert {:error, %ExAtlas.Error{kind: :unsupported}} = result
+        end
+      end
+    end
+
+    test "capabilities: runpod manages endpoints, mock does not" do
+      assert :manage_endpoints in ExAtlas.capabilities(:runpod)
+      refute :manage_endpoints in ExAtlas.capabilities(:mock)
+    end
+  end
+
   describe "compute_spend/2" do
     setup do
       bypass = Bypass.open()
