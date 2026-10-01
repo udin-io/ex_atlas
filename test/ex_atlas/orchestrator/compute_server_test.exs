@@ -490,6 +490,41 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
     end
 
+    # A delay over 4,294,967,295 ms raises in `Process.send_after/3` on older
+    # OTP releases (and over about 2^57 on OTP 27), after the pod is rented.
+    @timer_opts [
+      :heartbeat_ms,
+      :status_poll_ms,
+      :max_runtime_ms,
+      :ready_timeout_ms,
+      :finish_grace_ms
+    ]
+
+    test "a timer option past the longest portable timer is refused before renting" do
+      for key <- @timer_opts do
+        assert {:error, %NimbleOptions.ValidationError{key: ^key}} =
+                 ExAtlas.Orchestrator.spawn(
+                   [provider: :mock, gpu: :h100, image: "x", mode: :task] ++
+                     [{key, 4_294_967_296}]
+                 ),
+               "#{key} accepted 4_294_967_296"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a timer option at the longest portable timer starts a tracker" do
+      for key <- @timer_opts do
+        assert {:ok, pid, _compute} =
+                 ExAtlas.Orchestrator.spawn(
+                   [provider: :mock, gpu: :h100, image: "x", mode: :task] ++
+                     [{key, 4_294_967_295}]
+                 )
+
+        assert Process.alive?(pid)
+      end
+    end
+
     test "`on_failure: :respawn` — the plausible typo — is refused" do
       assert {:error, %NimbleOptions.ValidationError{}} =
                ExAtlas.Orchestrator.spawn(

@@ -27,10 +27,9 @@ defmodule ExAtlas.Orchestrator.CostMeter do
 
   @ms_per_hour 3_600_000
 
-  # The longest `Process.send_after/3` delay every OTP release accepts. A
-  # longer delay raises, and a raise in the tracker deletes a healthy pod, so
-  # a cap further away than this (about 49.7 days) is re-checked when it fires.
-  @max_timer_ms 4_294_967_295
+  # A cap further away than the longest portable timer (about 49.7 days) is
+  # re-checked when that timer fires.
+  @max_timer_ms ExAtlas.Orchestrator.Timer.max_ms()
   @max_timer_hours @max_timer_ms / @ms_per_hour
 
   @enforce_keys [:max_cost, :rate, :spent_before, :since_ms]

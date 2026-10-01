@@ -179,6 +179,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     CostMeter,
     Events,
     TaskOutcome,
+    Timer,
     TrackingStore,
     UpstreamStatus
   }
@@ -229,11 +230,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # `ExAtlas.Orchestrator.spawn/1` boundary — *before* the provider is asked to
   # rent anything — so a typo can never leave a live resource behind an
   # `init/1` that refuses to start.
+  #
+  # Every option that arms a timer is bounded by `Timer.option_type/0`.
   @schema [
     idle_ttl_ms: [type: :pos_integer, default: @default_idle_ttl_ms],
-    heartbeat_ms: [type: :pos_integer, default: @default_heartbeat_interval_ms],
+    heartbeat_ms: [type: Timer.option_type(), default: @default_heartbeat_interval_ms],
     status_poll_ms: [
-      type: {:or, [:pos_integer, {:in, [false]}]},
+      type: {:or, [Timer.option_type(), {:in, [false]}]},
       default: @default_status_poll_ms
     ],
     on_failure: [
@@ -242,17 +245,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     ],
     mode: [type: {:in, [:interactive, :task]}, default: :interactive],
     max_runtime_ms: [
-      type: {:or, [:pos_integer, {:in, [false]}]},
+      type: {:or, [Timer.option_type(), {:in, [false]}]},
       default: false
     ],
     ready_timeout_ms: [
-      type: {:or, [:pos_integer, {:in, [false]}]},
+      type: {:or, [Timer.option_type(), {:in, [false]}]},
       default: false
     ],
     callback: [type: {:or, [:map, nil]}, default: nil],
     allow_insecure_callback: [type: :boolean, default: false],
     finish_grace_ms: [
-      type: {:or, [:pos_integer, {:in, [false]}]},
+      type: {:or, [Timer.option_type(), {:in, [false]}]},
       default: @default_finish_grace_ms
     ],
     user_id: [type: :any, default: nil],
