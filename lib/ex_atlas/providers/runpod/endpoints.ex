@@ -14,8 +14,8 @@ defmodule ExAtlas.Providers.RunPod.Endpoints do
     do:
       ctx |> Client.management() |> Req.get(url: "/serverless/#{id}") |> Client.handle_response()
 
-  def list(ctx),
-    do: ctx |> Client.management() |> Req.get(url: "/serverless") |> Client.handle_response()
+  @doc "Every endpoint on the account, following the cursor. Returns `{:ok, [endpoint]}`."
+  def list(ctx), do: Client.list_all(ctx, "/serverless", "endpoints")
 
   def delete(ctx, id),
     do:

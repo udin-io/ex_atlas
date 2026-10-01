@@ -1,7 +1,7 @@
 defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   use ExUnit.Case, async: false
 
-  alias ExAtlas.Providers.RunPod.{Billing, Endpoints, NetworkVolumes}
+  alias ExAtlas.Providers.RunPod.{Billing, Endpoints, NetworkVolumes, Templates}
 
   setup do
     bypass = Bypass.open()
@@ -32,13 +32,61 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
       assert {:ok, _} = Endpoints.get(ctx, "ep1")
       assert_received {:hit, "GET", "/serverless/ep1"}
 
-      expect_path(bypass, "GET", "/serverless")
-      assert {:ok, _} = Endpoints.list(ctx)
+      expect_path(bypass, "GET", "/serverless", ~s({"endpoints": []}))
+      assert {:ok, []} = Endpoints.list(ctx)
       assert_received {:hit, "GET", "/serverless"}
 
       expect_path(bypass, "DELETE", "/serverless/ep1")
       assert {:ok, _} = Endpoints.delete(ctx, "ep1")
       assert_received {:hit, "DELETE", "/serverless/ep1"}
+    end
+  end
+
+  describe "templates live under /templates in REST v2" do
+    test "create, list, get and delete", %{bypass: bypass, ctx: ctx} do
+      expect_path(bypass, "POST", "/templates")
+      assert {:ok, _} = Templates.create(ctx, %{})
+      assert_received {:hit, "POST", "/templates"}
+
+      expect_path(bypass, "GET", "/templates", ~s({"templates": []}))
+      assert {:ok, []} = Templates.list(ctx)
+      assert_received {:hit, "GET", "/templates"}
+
+      expect_path(bypass, "GET", "/templates/t1")
+      assert {:ok, _} = Templates.get(ctx, "t1")
+      assert_received {:hit, "GET", "/templates/t1"}
+
+      expect_path(bypass, "DELETE", "/templates/t1")
+      assert {:ok, _} = Templates.delete(ctx, "t1")
+      assert_received {:hit, "DELETE", "/templates/t1"}
+    end
+  end
+
+  describe "list follows pagination.nextCursor" do
+    for {module, path, key} <- [
+          {Templates, "/templates", "templates"},
+          {Endpoints, "/serverless", "endpoints"}
+        ] do
+      test "#{path} returns the entries of both pages", %{bypass: bypass, ctx: ctx} do
+        Bypass.expect(bypass, "GET", unquote(path), fn conn ->
+          conn = Plug.Conn.fetch_query_params(conn)
+
+          {entries, pagination} =
+            case conn.query_params["cursor"] do
+              nil -> {[%{"id" => "a"}], %{"nextCursor" => "c2", "hasNextPage" => true}}
+              "c2" -> {[%{"id" => "b"}], %{"nextCursor" => nil, "hasNextPage" => false}}
+            end
+
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(
+            200,
+            Jason.encode!(%{unquote(key) => entries, "pagination" => pagination})
+          )
+        end)
+
+        assert {:ok, [%{"id" => "a"}, %{"id" => "b"}]} = unquote(module).list(ctx)
+      end
     end
   end
 
