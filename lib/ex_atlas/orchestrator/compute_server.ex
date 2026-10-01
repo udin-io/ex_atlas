@@ -297,7 +297,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           user_id: term() | nil,
           store: module() | nil,
           cost_meter: CostMeter.t() | nil,
-          cost_timer: {reference(), reference()} | nil
+          cost_timer: {reference(), reference()} | nil,
+          reconcile_spend_ms: pos_integer() | nil,
+          reconcile_task: {Task.t(), String.t()} | nil,
+          reconcile_timeout: reference() | nil,
+          spend_from: DateTime.t()
         }
 
   @doc false
@@ -420,7 +424,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
-          cost_meter: resumed_cost_meter(record)
+          cost_meter: resumed_cost_meter(record),
+          spend_from: DateTime.from_unix!(record.spawned_at_ms, :millisecond)
       }
       |> reprice()
       |> arm_cost_cap()
@@ -429,6 +434,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Events.broadcast(compute.id, {:status, compute.status})
     schedule_heartbeat(state)
     schedule_deadline(remaining_ms)
+    schedule_reconcile(state)
     # Nothing has watched this resource since the node went down, so the first
     # look is now rather than one poll interval from now.
     poll_now(state)
@@ -449,6 +455,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     schedule_status_poll(state)
     schedule_deadline(tracking[:max_runtime_ms])
     schedule_ready_timeout(state, tracking[:ready_timeout_ms])
+    schedule_reconcile(state)
     {:ok, state}
   end
 
@@ -474,7 +481,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       user_id: tracking[:user_id],
       store: store_for(tracking[:persist]),
       cost_meter: cost_meter(tracking[:max_cost], compute),
-      cost_timer: nil
+      cost_timer: nil,
+      reconcile_spend_ms: reconcile_interval(tracking[:max_cost], tracking[:reconcile_spend_ms]),
+      reconcile_task: nil,
+      reconcile_timeout: nil,
+      spend_from: spend_from(compute)
     }
   end
 
@@ -606,6 +617,45 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     apply_observation({:poll_failed, reason}, clear_poll(state))
   end
 
+  # --- billing reconciliation ---
+  #
+  # Run like the status poll: in a task, so a slow billing API never parks
+  # this mailbox. The task remembers the pod it asked about.
+
+  def handle_info(:reconcile_spend, %{reconcile_task: nil, reconcile_spend_ms: ms} = state)
+      when is_integer(ms) do
+    case start_reconcile(state) do
+      {:ok, task} ->
+        timer = Process.send_after(self(), {:reconcile_timeout, task.ref}, @poll_task_timeout_ms)
+        {:noreply, %{state | reconcile_task: {task, state.compute.id}, reconcile_timeout: timer}}
+
+      :error ->
+        reconcile_failed(:no_task_supervisor, state)
+    end
+  end
+
+  def handle_info(:reconcile_spend, state), do: {:noreply, state}
+
+  def handle_info(
+        {:reconcile_timeout, ref},
+        %{reconcile_task: {%Task{ref: ref} = task, _pod_id}} = state
+      ) do
+    Task.shutdown(task, :brutal_kill)
+    reconcile_failed(:timeout, clear_reconcile(state))
+  end
+
+  def handle_info({ref, result}, %{reconcile_task: {%Task{ref: ref}, pod_id}} = state) do
+    Process.demonitor(ref, [:flush])
+    apply_bill(result, pod_id, clear_reconcile(state))
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{reconcile_task: {%Task{ref: ref}, _pod_id}} = state
+      ) do
+    reconcile_failed(reason, clear_reconcile(state))
+  end
+
   # --- pod callbacks ---
   #
   # These arrive from `ExAtlas.Callback.ingest/3` as plain messages, never as
@@ -675,6 +725,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @impl true
   def terminate(reason, state) do
     cancel_poll(state)
+    cancel_reconcile(state)
     Events.broadcast(state.compute.id, {:terminating, reason})
 
     cond do
@@ -749,6 +800,51 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     Events.broadcast(state.compute.id, {:terminating, :cost_cap})
     {:stop, :normal, state}
+  end
+
+  # --- billing reconciliation ---
+
+  # Spend becomes the larger of the estimate and the bill for the current pod.
+  # A lower bill changes nothing: billing lags, so it may only be late.
+  defp apply_bill({:ok, %Spec.Spend{total_usd: billed}}, _pod_id, state)
+       when is_number(billed) do
+    now = now_ms()
+    meter = state.cost_meter
+    estimated = CostMeter.pod_spent_usd(meter, now)
+
+    state =
+      case CostMeter.reconcile(meter, billed, now) do
+        ^meter ->
+          state
+
+        raised ->
+          state = %{state | cost_meter: raised}
+          record_cost(state)
+          arm_cost_cap(state)
+      end
+
+    Events.broadcast(
+      state.compute.id,
+      {:spend_reconciled,
+       %{
+         estimated_usd: estimated,
+         billed_usd: billed,
+         spent_usd: CostMeter.spent_usd(state.cost_meter, now)
+       }}
+    )
+
+    schedule_reconcile(state)
+    {:noreply, state}
+  end
+
+  defp apply_bill({:error, error}, _pod_id, state), do: reconcile_failed(error, state)
+
+  defp apply_bill(other, _pod_id, state), do: reconcile_failed({:unexpected, other}, state)
+
+  defp reconcile_failed(error, state) do
+    Events.broadcast(state.compute.id, {:spend_reconcile_failed, error})
+    schedule_reconcile(state)
+    {:noreply, state}
   end
 
   # `get_compute/2` can't return the auth handle — it was minted locally at
@@ -938,6 +1034,26 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
+  defp start_reconcile(state) do
+    if Process.whereis(@task_supervisor) do
+      id = state.compute.id
+      opts = Keyword.put(poll_opts(state.opts), :from, state.spend_from)
+
+      {:ok,
+       Task.Supervisor.async_nolink(@task_supervisor, fn -> ExAtlas.compute_spend(id, opts) end)}
+    else
+      :error
+    end
+  end
+
+  defp clear_reconcile(%{reconcile_timeout: timer} = state) do
+    if timer, do: Process.cancel_timer(timer)
+    %{state | reconcile_task: nil, reconcile_timeout: nil}
+  end
+
+  defp cancel_reconcile(%{reconcile_task: nil}), do: :ok
+  defp cancel_reconcile(%{reconcile_task: {task, _pod_id}}), do: Task.shutdown(task, :brutal_kill)
+
   defp poll_opts(opts) do
     Keyword.put(
       opts,
@@ -990,6 +1106,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp arm_finish_grace(state), do: state
 
+  defp schedule_reconcile(%{reconcile_spend_ms: nil}), do: :ok
+
+  defp schedule_reconcile(%{reconcile_spend_ms: ms}),
+    do: Process.send_after(self(), :reconcile_spend, ms)
+
   defp schedule_status_poll(%{status_poll_ms: nil}), do: :ok
 
   defp schedule_status_poll(%{status_poll_ms: base, poll_failures: failures}) do
@@ -1023,6 +1144,22 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, nil)
     :ok
   end
+
+  # Reconciliation reads the bill to raise the spend toward `max_cost`, so it
+  # runs only with a cap.
+  defp reconcile_interval(false, _ms), do: nil
+  defp reconcile_interval(_max_cost, false), do: nil
+  defp reconcile_interval(_max_cost, ms), do: ms
+
+  # The bill is asked for from the pod's spawn. The provider's own timestamp
+  # when it has one, else now: the tracker starts seconds after the spawn, and
+  # RunPod snaps the start down to its bucket edge (a day by default).
+  defp spend_from(%Spec.Compute{created_at: %DateTime{} = created_at}) do
+    now = DateTime.utc_now()
+    if DateTime.compare(created_at, now) == :gt, do: now, else: created_at
+  end
+
+  defp spend_from(_compute), do: DateTime.utc_now()
 
   defp cost_meter(false, _compute), do: nil
   defp cost_meter(max_cost, compute), do: CostMeter.new(max_cost, compute.cost_per_hour, now_ms())

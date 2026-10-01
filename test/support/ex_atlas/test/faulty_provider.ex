@@ -29,6 +29,11 @@ defmodule ExAtlas.Test.FaultyProvider do
     * `{:error_once, error}` — return `{:error, error}` for the *next* call
       only, then disarm. A transient 5xx or socket blip, which callers are
       required to ride out rather than treat as news about the resource.
+    * `{:notify, pid, fault}` — send `{:called, callback, self()}` to `pid`,
+      then apply `fault` (`nil` to delegate). Lets a test count calls.
+
+  `compute_spend/3` delegates to the Mock's billing, so a test can fault the
+  billing call the same way.
   """
 
   @behaviour ExAtlas.Provider
@@ -65,6 +70,10 @@ defmodule ExAtlas.Test.FaultyProvider do
   def terminate(id, ctx), do: with_fault(:terminate, fn -> Mock.terminate(id, ctx) end)
 
   @impl true
+  def compute_spend(id, opts, ctx),
+    do: with_fault(:compute_spend, fn -> Mock.compute_spend(id, opts, ctx) end)
+
+  @impl true
   def run_job(req, ctx), do: Mock.run_job(req, ctx)
 
   @impl true
@@ -83,7 +92,11 @@ defmodule ExAtlas.Test.FaultyProvider do
   def capabilities, do: Mock.capabilities()
 
   defp with_fault(callback, delegate) do
-    case Map.get(faults(), callback) do
+    apply_fault(Map.get(faults(), callback), callback, delegate)
+  end
+
+  defp apply_fault(fault, callback, delegate) do
+    case fault do
       nil ->
         delegate.()
 
@@ -111,6 +124,10 @@ defmodule ExAtlas.Test.FaultyProvider do
       {:error_once, error} ->
         disarm(callback)
         {:error, error}
+
+      {:notify, pid, inner} ->
+        send(pid, {:called, callback, self()})
+        apply_fault(inner, callback, delegate)
     end
   end
 
