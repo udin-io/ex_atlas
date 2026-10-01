@@ -7,6 +7,16 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: network volumes through the public API (#56, slice 1 of #27)
+
+`ExAtlas.list_network_volumes/1`, `get_network_volume/2`,
+`create_network_volume/1` and `delete_network_volume/2` manage RunPod network
+volumes with plain options and a `%ExAtlas.Spec.NetworkVolume{}` back. A
+provider without the new optional `ExAtlas.Provider` callbacks returns
+`{:error, %ExAtlas.Error{kind: :unsupported}}`. RunPod declares the new
+capability `:manage_network_volumes`, and its create call returns `:validation`
+when `:region` is missing.
+
 ### Added: CI (#35)
 
 `bin/ci` runs format, a strict compile, `mix hex.audit`, sobelow and the test
