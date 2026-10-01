@@ -57,7 +57,7 @@ defmodule ExAtlas.Providers.RunPod do
 
   @behaviour ExAtlas.Provider
 
-  alias ExAtlas.Providers.RunPod.{Endpoints, GraphQL, Jobs, Pods, Translate}
+  alias ExAtlas.Providers.RunPod.{Catalog, Endpoints, Jobs, Pods, Translate}
   alias ExAtlas.Spec
 
   @impl true
@@ -224,25 +224,9 @@ defmodule ExAtlas.Providers.RunPod do
 
   @impl true
   def list_gpu_types(ctx) do
-    query = """
-    query AtlasGpuTypes {
-      gpuTypes {
-        id
-        displayName
-        memoryInGb
-        secureCloud
-        communityCloud
-        lowestPrice(input: {gpuCount: 1}) {
-          minimumBidPrice
-          uninterruptablePrice
-        }
-        stockStatus
-      }
-    }
-    """
-
-    with {:ok, %{"gpuTypes" => types}} <- GraphQL.query(ctx, query) do
-      {:ok, Enum.map(types, &to_gpu_type/1)}
+    with {:ok, secure} <- Catalog.list_gpus(ctx, "SECURE"),
+         {:ok, community} <- Catalog.list_gpus(ctx, "COMMUNITY") do
+      {:ok, Translate.gpu_types(secure, community)}
     end
   end
 
@@ -267,31 +251,4 @@ defmodule ExAtlas.Providers.RunPod do
       {:error, _} -> false
     end
   end
-
-  defp to_gpu_type(gpu) do
-    low = gpu["lowestPrice"] || %{}
-
-    %Spec.GpuType{
-      id: gpu["id"],
-      provider: :runpod,
-      display_name: gpu["displayName"],
-      memory_gb: gpu["memoryInGb"],
-      lowest_price_per_hour: low["uninterruptablePrice"],
-      spot_price_per_hour: low["minimumBidPrice"],
-      stock: stock_atom(gpu["stockStatus"]),
-      cloud_type: derive_cloud_type(gpu),
-      raw: gpu
-    }
-  end
-
-  defp stock_atom("High"), do: :high
-  defp stock_atom("Medium"), do: :medium
-  defp stock_atom("Low"), do: :low
-  defp stock_atom("Unavailable"), do: :unavailable
-  defp stock_atom(_), do: :unknown
-
-  defp derive_cloud_type(%{"secureCloud" => true, "communityCloud" => true}), do: :any
-  defp derive_cloud_type(%{"secureCloud" => true}), do: :secure
-  defp derive_cloud_type(%{"communityCloud" => true}), do: :community
-  defp derive_cloud_type(_), do: :any
 end
