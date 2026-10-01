@@ -57,6 +57,8 @@ defmodule ExAtlas.Orchestrator.Events do
   Statuses are ordinary state changes, not necessarily endings: a session that
   ends emits `{:terminating, _}` and a final `{:status, :terminated}`, so
   that pair — not any individual status — is the reliable "it's over" signal.
+  A `persist: true` task on a node stop sends `{:terminating, :shutdown}`
+  alone: its resource keeps running for the next boot to adopt.
 
   If `phoenix_pubsub` is not available in the host app, broadcasts are silently
   skipped.

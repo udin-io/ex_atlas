@@ -6,8 +6,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     * Hold the resource's normalized `ExAtlas.Spec.Compute`, its `:user_id`,
       `:idle_ttl_ms`, last-activity timestamp, and spawn opts.
-    * Trap exits so `terminate/2` always calls `ExAtlas.terminate/2` on the
-      upstream provider — even on supervisor shutdown or crash.
+    * Trap exits so `terminate/2` calls `ExAtlas.terminate/2` on the
+      upstream provider — even on supervisor shutdown or crash. The one
+      exception is a `persist: true` task on a node stop: see "Adopted
+      trackers".
     * Drive its own idle reaper: every `:heartbeat_ms` it compares
       `:last_activity_ms` against `:idle_ttl_ms`, and stops (terminating the
       upstream resource) once the session has gone quiet.
@@ -68,6 +70,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `on_failure` budget and any landed report are carried across as well. The
   first status poll runs immediately, since nothing has watched the resource
   since the node went down.
+
+  A graceful node stop leaves such a task's resource running and its record
+  in place: its supervisor's `:shutdown` is the one reason `terminate/2` does
+  not delete for. A task whose container already reported its exit code still
+  deletes, as does `ExAtlas.Orchestrator.stop_tracked/1`, whose reason is
+  `{:shutdown, :stopped}`.
 
   ## Why a task needs both a self-terminating container and a deadline
 
@@ -561,13 +569,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     cancel_poll(state)
     Events.broadcast(state.compute.id, {:terminating, reason})
 
-    if state.upstream_deletable? do
-      terminate_upstream(state)
-    else
-      # Nothing left to delete — a DELETE would only earn us an error and a
-      # misleading `{:terminate_failed, _}`.
-      Events.broadcast(state.compute.id, {:status, :terminated})
-      forget(state, state.compute.id)
+    cond do
+      # A node stop (SIGTERM, `System.stop/0`, `Application.stop(:ex_atlas)`)
+      # reaches every tracker as its supervisor's `:shutdown`. A persisted task
+      # with no report yet keeps its pod and its record, so the next boot
+      # adopts it. The node cannot tell a deploy from a machine removed for
+      # good; both keep the pod.
+      reason == :shutdown and state.store != nil and is_nil(state.report) ->
+        :ok
+
+      state.upstream_deletable? ->
+        terminate_upstream(state)
+
+      true ->
+        # Nothing left to delete — a DELETE would only earn us an error and a
+        # misleading `{:terminate_failed, _}`.
+        Events.broadcast(state.compute.id, {:status, :terminated})
+        forget(state, state.compute.id)
     end
 
     :ok
