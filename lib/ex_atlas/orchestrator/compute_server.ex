@@ -315,6 +315,20 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @doc "Return the current tracked state."
   def info(pid), do: GenServer.call(pid, :info)
 
+  @doc """
+  Stop the tracker and delete its resource, persisted or not.
+
+  The reason is `{:shutdown, :stopped}`, never the supervisor's `:shutdown`,
+  so `terminate/2` can tell an explicit stop from a node stop. Returns `:ok`
+  when the tracker has already exited, and after 30 s while it is still
+  deleting.
+  """
+  def stop(pid) do
+    GenServer.stop(pid, {:shutdown, :stopped}, @shutdown_timeout_ms)
+  catch
+    :exit, _ -> :ok
+  end
+
   # --- callbacks ---
 
   @impl true

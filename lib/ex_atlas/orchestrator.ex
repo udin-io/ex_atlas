@@ -473,8 +473,7 @@ defmodule ExAtlas.Orchestrator do
   def stop_tracked(id) do
     case lookup(id) do
       {:ok, pid} ->
-        DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
-        :ok
+        ComputeServer.stop(pid)
 
       :error ->
         {:error, :not_tracked}

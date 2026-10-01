@@ -32,6 +32,18 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     assert gone.status == :terminated
   end
 
+  test "stop_tracked/1 ends the tracker with its own reason, not a node stop's" do
+    {:ok, _pid, compute} =
+      ExAtlas.Orchestrator.spawn(provider: :mock, gpu: :h100, image: "x", status_poll_ms: false)
+
+    id = compute.id
+    Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+    :ok = ExAtlas.Orchestrator.stop_tracked(id)
+
+    assert_receive {:atlas_compute, ^id, {:terminating, {:shutdown, :stopped}}}, 2_000
+  end
+
   test "idle timeout triggers termination" do
     if Code.ensure_loaded?(Phoenix.PubSub),
       do: Phoenix.PubSub.subscribe(ExAtlas.PubSub, "compute:")

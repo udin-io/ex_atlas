@@ -48,7 +48,10 @@ defmodule ExAtlas.Orchestrator.Events do
       it is proven: the container said `exit_code: 0`. A non-zero exit arrives
       as `{:task, {:failed, {:exit_code, n}}}`. See
       `ExAtlas.Orchestrator.run_task/1`.
-    * `{:terminating, reason}` — server is shutting down.
+    * `{:terminating, reason}` — server is shutting down. `reason` is
+      `{:shutdown, :stopped}` after `ExAtlas.Orchestrator.stop_tracked/1`,
+      `:shutdown` when its supervisor stops it (a node stop), `:normal` when
+      the session ended itself, and anything else on a crash.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 
   Statuses are ordinary state changes, not necessarily endings: a session that
