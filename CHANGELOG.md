@@ -42,7 +42,7 @@ Upgrade:
 
 | Deployment | After upgrading |
 |---|---|
-| One node, no `:reap_owner` | No change. |
+| One machine on the account, no `:reap_owner` | No change. Several unclustered machines on one account also see no change, and still delete each other's pods: set an owner on each. |
 | Cluster, no `:reap_owner` | The Reaper stops reaping and logs an error. Nothing is deleted; crash leftovers bill until you set an owner. |
 | Cluster, `:reap_owner` set | New pods get stamped names. Pods named by v0.7.0 are left alone, with one warning each; their trackers still end them. |
 

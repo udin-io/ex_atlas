@@ -188,8 +188,12 @@ pods:
 config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
 ```
 
-`FLY_MACHINE_ID` is unique per machine and survives restarts and deploys of
-that machine. Do not use `node()`: the Phoenix Fly template puts the image ref
+`FLY_MACHINE_ID` is unique per machine and survives restarts of that machine
+and deploys that update it in place. A step that creates a new machine, such
+as a `bluegreen` deploy, gives it a new id: the old machine's crash leftovers
+are then yours to delete, since no node carries their owner. Nothing is
+deleted by mistake; the leftovers bill until you remove them. Do not use
+`node()`: the Phoenix Fly template puts the image ref
 in `RELEASE_NODE`, so it changes on every deploy. Set it on every machine; an
 owner on only some of them protects nothing. See the README's "More than one
 node" for the upgrade from v0.7.0.

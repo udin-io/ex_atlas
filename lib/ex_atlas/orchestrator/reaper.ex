@@ -8,8 +8,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
     2. Compares against the `ComputeServer` processes in the Registry **and**
        the `ExAtlas.Orchestrator.TrackingStore`.
     3. Flags any resource that exists at the provider but appears in neither
-       (symptom of a node restart after a crash) and calls
-       `ExAtlas.terminate/2` to reclaim the runaway spend.
+       (symptom of a node restart after a crash) and, with a `:reap_owner`
+       set, is named with this node's owner. It calls `ExAtlas.terminate/2`
+       on each to reclaim the runaway spend. See "More than one node" for
+       when it reaps nothing at all.
 
   Configuration:
 
