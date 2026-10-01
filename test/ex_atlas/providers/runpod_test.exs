@@ -364,7 +364,10 @@ defmodule ExAtlas.Providers.RunPodTest do
           })
         end)
 
-        assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_compute(opts)
+        assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
+                 ExAtlas.list_compute(opts)
+
+        assert message =~ "did not advance"
       end
     end
 
