@@ -84,12 +84,7 @@ defmodule ExAtlas.Fly.Logs.Client do
       {:ok, token} ->
         case fetch_logs(app_name, token, opts) do
           {:error, {:http_error, 401, _body}} ->
-            invalidate_fn.(app_name)
-
-            case token_fn.(app_name) do
-              {:ok, new_token} -> fetch_logs(app_name, new_token, opts)
-              {:error, reason} -> {:error, reason}
-            end
+            retry_after_401(app_name, token_fn, invalidate_fn, opts)
 
           other ->
             other
@@ -119,6 +114,15 @@ defmodule ExAtlas.Fly.Logs.Client do
   end
 
   # ── Private ──
+
+  defp retry_after_401(app_name, token_fn, invalidate_fn, opts) do
+    invalidate_fn.(app_name)
+
+    case token_fn.(app_name) do
+      {:ok, new_token} -> fetch_logs(app_name, new_token, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp build_url(app_name, opts) do
     base = base_url(opts)
