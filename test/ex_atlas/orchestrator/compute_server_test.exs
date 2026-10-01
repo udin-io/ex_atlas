@@ -1280,6 +1280,76 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
 
+    test "spend carries across a respawn", %{base: base} do
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.run_task(
+          Keyword.merge(base,
+            command: ["/app/train.sh"],
+            spot: true,
+            on_failure: {:respawn, 1},
+            status_poll_ms: 10,
+            max_cost: 100
+          )
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      # Let $0.10 accrue, so a budget that restarted at zero reads lower.
+      Process.sleep(100)
+      assert {:ok, %{spent_usd: before}} = ExAtlas.Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{spent_usd: after_respawn}} = ExAtlas.Orchestrator.info(new_id)
+      assert after_respawn >= before
+    end
+
+    test "a capped spot session with respawn budget left is not respawned", %{base: base} do
+      {pid, id} =
+        spawn_capped(base,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 0.05
+        )
+
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+    end
+
+    test "a respawn charges the replacement's price before the next poll", %{base: base} do
+      # The pod drops to $0 and is preempted; its replacement rents at $1/s.
+      # Every poll after the respawn is held open, so only the respawn itself
+      # can tell the meter about the new price.
+      {_pid, id} =
+        spawn_capped(base,
+          provider: FaultyProvider,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 0.3
+        )
+
+      :ok = Mock.set_cost_per_hour(id, 0.0)
+      await_tracked_rate(id, 0.0)
+
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      assert_receive {:blocked, :get_compute, poll}, 2_000
+      :ok = Mock.forget(id)
+      send(poll, :release)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      assert_receive {:blocked, :get_compute, _held}, 2_000
+
+      assert_receive {:atlas_compute, ^new_id, {:terminating, :cost_cap}}, 2_000
+    end
+
     test "without a cap the same price ends nothing", %{base: base} do
       {pid, id} = spawn_capped(base, [])
       ref = Process.monitor(pid)

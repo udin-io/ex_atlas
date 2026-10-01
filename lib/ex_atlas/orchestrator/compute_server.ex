@@ -765,14 +765,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         Events.broadcast(old_id, {:respawned, replacement.id})
         Events.broadcast(replacement.id, {:status, replacement.status})
 
-        state = %{
-          state
-          | compute: replacement,
-            respawns: state.respawns + 1,
-            poll_failures: 0,
-            upstream_deletable?: true,
-            last_activity_ms: now_ms()
-        }
+        # The meter carries over, like the deadline: a replacement continues
+        # the old budget at its own price.
+        state =
+          reprice(%{
+            state
+            | compute: replacement,
+              respawns: state.respawns + 1,
+              poll_failures: 0,
+              upstream_deletable?: true,
+              last_activity_ms: now_ms()
+          })
 
         schedule_status_poll(state)
         {:noreply, state}
