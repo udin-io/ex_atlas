@@ -1270,7 +1270,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
 
     test "a poll that reports no price keeps the last one", %{base: base} do
-      {pid, id} = spawn_capped(base, max_cost: 0.2, status_poll_ms: 10)
+      {pid, id} = spawn_capped(base, max_cost: 0.5, status_poll_ms: 10)
       ref = Process.monitor(pid)
 
       :ok = Mock.set_cost_per_hour(id, nil)
@@ -1372,6 +1372,25 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert Process.alive?(pid)
       assert compute.cost_per_hour == nil
       assert ExAtlas.Orchestrator.list_ids() == [compute.id]
+    end
+
+    test "a cap months away at a tiny price starts and keeps tracking", %{base: base} do
+      {pid, id} =
+        spawn_capped(base,
+          max_cost: 1000,
+          status_poll_ms: 10,
+          provider_opts: %{cost_per_hour: 0.0001}
+        )
+
+      assert Process.alive?(pid)
+      ref = Process.monitor(pid)
+
+      # A poll that re-prices to a still tinier rate re-arms the timer too.
+      :ok = Mock.set_cost_per_hour(id, 0.00001)
+      await_tracked_rate(id, 0.00001)
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
     end
 
     test "without a cap the same price ends nothing", %{base: base} do

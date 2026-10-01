@@ -27,6 +27,12 @@ defmodule ExAtlas.Orchestrator.CostMeter do
 
   @ms_per_hour 3_600_000
 
+  # The longest `Process.send_after/3` delay every OTP release accepts. A
+  # longer delay raises, and a raise in the tracker deletes a healthy pod, so
+  # a cap further away than this (about 49.7 days) is re-checked when it fires.
+  @max_timer_ms 4_294_967_295
+  @max_timer_hours @max_timer_ms / @ms_per_hour
+
   @enforce_keys [:max_cost, :rate, :spent_before, :since_ms]
   defstruct @enforce_keys
 
@@ -83,14 +89,19 @@ defmodule ExAtlas.Orchestrator.CostMeter do
 
   @doc """
   Milliseconds from `now_ms` until spend reaches `max_cost` at the current
-  rate, rounded up. `0` once it has; `:infinity` at rate `0.0`.
+  rate, rounded up. `0` once it has; `:infinity` at rate `0.0`. Never more
+  than 4,294,967,295 (about 49.7 days); the caller re-checks then.
   """
   @spec ms_to_cap(t(), integer()) :: non_neg_integer() | :infinity
   def ms_to_cap(%__MODULE__{rate: rate}, _now_ms) when rate == 0, do: :infinity
 
   def ms_to_cap(%__MODULE__{} = meter, now_ms) do
     left = meter.max_cost - spent_usd(meter, now_ms)
-    max(ceil(left * @ms_per_hour / meter.rate), 0)
+
+    # Compared by division, so a huge cap cannot overflow the multiplication.
+    if left / @max_timer_hours >= meter.rate,
+      do: @max_timer_ms,
+      else: max(ceil(left * @ms_per_hour / meter.rate), 0)
   end
 
   @doc """

@@ -64,6 +64,16 @@ defmodule ExAtlas.Orchestrator.CostMeterTest do
       assert CostMeter.ms_to_cap(CostMeter.new(1, 0.0, 0), 0) == :infinity
     end
 
+    test "is never longer than the longest timer every OTP release accepts" do
+      # $1000 at $0.0001 per hour is 3.6e13 ms; Process.send_after raises above
+      # its limit, and a raise in the tracker deletes a healthy pod.
+      assert CostMeter.ms_to_cap(CostMeter.new(1000, 0.0001, 0), 0) == 4_294_967_295
+    end
+
+    test "a cap too large to multiply does not raise" do
+      assert CostMeter.ms_to_cap(CostMeter.new(1.0e305, 1.0, 0), 0) == 4_294_967_295
+    end
+
     test "follows a rate change" do
       meter = CostMeter.new(2, 3600.0, 0) |> CostMeter.rate_changed(7200.0, 1_000)
 
