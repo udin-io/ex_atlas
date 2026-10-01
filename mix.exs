@@ -32,6 +32,7 @@ defmodule ExAtlas.MixProject do
 
   defp deps do
     [
+      {:sobelow, "~> 0.16", only: [:dev, :test], runtime: false},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:nimble_options, "~> 1.1"},
