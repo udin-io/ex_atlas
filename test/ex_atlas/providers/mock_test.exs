@@ -36,4 +36,45 @@ defmodule ExAtlas.Providers.MockTest do
       assert :ok = Mock.forget("never-existed")
     end
   end
+
+  describe "the hourly price" do
+    test "a spawn costs 0.0 per hour unless provider_opts names a price" do
+      {:ok, free} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      assert free.cost_per_hour == 0.0
+
+      {:ok, priced} =
+        ExAtlas.spawn_compute(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          provider_opts: %{cost_per_hour: 2.99}
+        )
+
+      assert priced.cost_per_hour == 2.99
+      assert {:ok, %{cost_per_hour: 2.99}} = ExAtlas.get_compute(priced.id, provider: :mock)
+    end
+
+    test "provider_opts can spawn a compute that reports no price" do
+      {:ok, compute} =
+        ExAtlas.spawn_compute(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          provider_opts: %{cost_per_hour: nil}
+        )
+
+      assert compute.cost_per_hour == nil
+    end
+
+    test "set_cost_per_hour/2 changes the price the next read reports" do
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+
+      assert :ok = Mock.set_cost_per_hour(compute.id, 3.29)
+      assert {:ok, %{cost_per_hour: 3.29}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "set_cost_per_hour/2 on an unknown id reports :not_found" do
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = Mock.set_cost_per_hour("nope", 1.0)
+    end
+  end
 end
