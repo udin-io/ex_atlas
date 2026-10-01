@@ -10,9 +10,16 @@ export MIX_ENV=test
 # non-controller module "low", so `exit: :medium` in .sobelow-conf never fails
 # on one. Fail on a finding of ANY confidence in the callback files.
 callback_boundary_clean() {
-  local hits
-  hits=$(mix sobelow --config --format json 2>/dev/null |
-    jq -r '.findings[][] | select(.file | test("^lib/ex_atlas/callback(\\.ex$|/)")) | "\(.file):\(.line) \(.type)"')
+  local json hits stray
+  json=$(mix sobelow --config --format json)
+  # A path outside lib/ means sobelow changed its output shape: fail instead of
+  # letting the callback filter below match nothing.
+  stray=$(jq -r '.findings[][] | select(.file | startswith("lib/") | not) | .file' <<<"$json")
+  if [ -n "$stray" ]; then
+    printf 'sobelow reported a path outside lib/:\n%s\n' "$stray" >&2
+    return 1
+  fi
+  hits=$(jq -r '.findings[][] | select(.file | test("^lib/ex_atlas/callback(\\.ex$|/)")) | "\(.file):\(.line) \(.type)"' <<<"$json")
   if [ -n "$hits" ]; then
     printf 'sobelow findings in the callback boundary:\n%s\n' "$hits" >&2
     return 1
