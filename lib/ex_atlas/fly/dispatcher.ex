@@ -211,27 +211,7 @@ defmodule ExAtlas.Fly.Dispatcher do
         :ok
 
       {:mfa, {mod, fun, extra}} ->
-        # A host-supplied MFA must never take down the caller (most often the
-        # log Streamer, whose death drops the pagination cursor). Rescue and
-        # log loudly so misconfigured routing is operator-visible.
-        try do
-          apply(mod, fun, [topic, message | extra])
-        rescue
-          e ->
-            Logger.error(
-              "[ExAtlas.Fly.Dispatcher] :mfa dispatcher raised; " <>
-                "topic=#{inspect(topic)} mfa=#{inspect({mod, fun, length(extra) + 2})} " <>
-                "reason=#{Exception.message(e)}"
-            )
-        catch
-          kind, payload ->
-            Logger.error(
-              "[ExAtlas.Fly.Dispatcher] :mfa dispatcher threw; " <>
-                "topic=#{inspect(topic)} mfa=#{inspect({mod, fun, length(extra) + 2})} " <>
-                "kind=#{inspect(kind)} payload=#{inspect(payload)}"
-            )
-        end
-
+        dispatch_mfa(mod, fun, extra, topic, message)
         :ok
     end
   end
@@ -244,6 +224,27 @@ defmodule ExAtlas.Fly.Dispatcher do
   @spec needs_registry?() :: boolean()
   def needs_registry? do
     mode() == :registry
+  end
+
+  # A host-supplied MFA must never take down the caller (most often the
+  # log Streamer, whose death drops the pagination cursor). Rescue and
+  # log loudly so misconfigured routing is operator-visible.
+  defp dispatch_mfa(mod, fun, extra, topic, message) do
+    apply(mod, fun, [topic, message | extra])
+  rescue
+    e ->
+      Logger.error(
+        "[ExAtlas.Fly.Dispatcher] :mfa dispatcher raised; " <>
+          "topic=#{inspect(topic)} mfa=#{inspect({mod, fun, length(extra) + 2})} " <>
+          "reason=#{Exception.message(e)}"
+      )
+  catch
+    kind, payload ->
+      Logger.error(
+        "[ExAtlas.Fly.Dispatcher] :mfa dispatcher threw; " <>
+          "topic=#{inspect(topic)} mfa=#{inspect({mod, fun, length(extra) + 2})} " <>
+          "kind=#{inspect(kind)} payload=#{inspect(payload)}"
+      )
   end
 
   defp mode do
