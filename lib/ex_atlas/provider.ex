@@ -91,6 +91,7 @@ defmodule ExAtlas.Provider do
     * `:spot` — can rent interruptible instances
     * `:serverless` — supports `run_job/2`
     * `:network_volumes` — can attach persistent storage
+    * `:manage_network_volumes` — implements the four network volume callbacks
     * `:http_proxy` — auto-terminated HTTPS proxy per pod
     * `:raw_tcp` — public IP + mapped TCP ports
     * `:symmetric_ports` — inside-port == outside-port guarantee
@@ -104,7 +105,24 @@ defmodule ExAtlas.Provider do
   @doc "Return the provider's catalog of GPU types and current prices."
   @callback list_gpu_types(ctx) :: result([Spec.GpuType.t()])
 
+  @doc "List the account's network volumes."
+  @callback list_network_volumes(ctx) :: result([Spec.NetworkVolume.t()])
+
+  @doc "Fetch one network volume by id."
+  @callback get_network_volume(id, ctx) :: result(Spec.NetworkVolume.t())
+
+  @doc "Create a network volume."
+  @callback create_network_volume(Spec.NetworkVolumeRequest.t(), ctx) ::
+              result(Spec.NetworkVolume.t())
+
+  @doc "Delete a network volume. Destroys its data."
+  @callback delete_network_volume(id, ctx) :: :ok | {:error, term()}
+
   @optional_callbacks [
+    list_network_volumes: 1,
+    get_network_volume: 2,
+    create_network_volume: 2,
+    delete_network_volume: 2,
     list_gpu_types: 1,
     run_job: 2,
     get_job: 2,

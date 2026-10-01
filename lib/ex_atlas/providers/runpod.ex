@@ -16,7 +16,7 @@ defmodule ExAtlas.Providers.RunPod do
 
   RunPod reports the following capability atoms:
 
-      [:serverless, :network_volumes, :http_proxy, :raw_tcp,
+      [:serverless, :network_volumes, :manage_network_volumes, :http_proxy, :raw_tcp,
        :symmetric_ports, :webhooks, :global_networking, :self_terminate]
 
   Runpod no longer sells spot pods, so `spot: true` returns
@@ -54,7 +54,7 @@ defmodule ExAtlas.Providers.RunPod do
 
   @behaviour ExAtlas.Provider
 
-  alias ExAtlas.Providers.RunPod.{Catalog, Endpoints, Jobs, Pods, Translate}
+  alias ExAtlas.Providers.RunPod.{Catalog, Endpoints, Jobs, NetworkVolumes, Pods, Translate}
   alias ExAtlas.Spec
 
   @impl true
@@ -62,6 +62,7 @@ defmodule ExAtlas.Providers.RunPod do
     [
       :serverless,
       :network_volumes,
+      :manage_network_volumes,
       :http_proxy,
       :raw_tcp,
       :symmetric_ports,
@@ -225,10 +226,58 @@ defmodule ExAtlas.Providers.RunPod do
     end
   end
 
+  @impl true
+  def list_network_volumes(ctx) do
+    with {:ok, volumes} <- NetworkVolumes.list(ctx) do
+      {:ok, Enum.map(volumes, &Translate.network_volume_to_spec/1)}
+    end
+  end
+
+  @impl true
+  def get_network_volume(id, ctx) do
+    with {:ok, volume} <- NetworkVolumes.get(ctx, id),
+         do: volume_spec(volume, "GET /network-volumes/#{id}")
+  end
+
+  @impl true
+  def create_network_volume(%Spec.NetworkVolumeRequest{region: nil}, _ctx) do
+    {:error,
+     ExAtlas.Error.new(:validation,
+       provider: :runpod,
+       message: "RunPod needs a :region (its dataCenter) to create a network volume"
+     )}
+  end
+
+  def create_network_volume(%Spec.NetworkVolumeRequest{} = req, ctx) do
+    body = Translate.network_volume_request_to_body(req)
+
+    with {:ok, volume} <- NetworkVolumes.create(ctx, body),
+         do: volume_spec(volume, "POST /network-volumes")
+  end
+
+  @impl true
+  def delete_network_volume(id, ctx) do
+    case NetworkVolumes.delete(ctx, id) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
   @doc false
   def endpoints_module, do: Endpoints
 
   # --- helpers ---
+
+  defp volume_spec(%{} = volume, _call), do: {:ok, Translate.network_volume_to_spec(volume)}
+
+  defp volume_spec(other, call) do
+    {:error,
+     ExAtlas.Error.new(:provider,
+       provider: :runpod,
+       message: "unexpected body for #{call}",
+       raw: other
+     )}
+  end
 
   defp matches_filters?(compute, filters) do
     Enum.all?(filters, fn
