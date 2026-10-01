@@ -184,6 +184,27 @@ defmodule ExAtlas.Fly.Logs.ClientTest do
       assert :counters.get(invalidate_count, 1) == 1
     end
 
+    test "returns the token error when no new token is available after a 401" do
+      http_client = fn _url, _headers -> {:ok, 401, "Unauthorized"} end
+      token_calls = :counters.new(1, [:atomics])
+
+      token_fn = fn _app ->
+        :counters.add(token_calls, 1, 1)
+
+        case :counters.get(token_calls, 1) do
+          1 -> {:ok, "test-token"}
+          _ -> {:error, :no_token}
+        end
+      end
+
+      assert {:error, :no_token} =
+               Client.fetch_logs_with_retry("myapp",
+                 token_fn: token_fn,
+                 invalidate_fn: fn _app -> :ok end,
+                 http_client: http_client
+               )
+    end
+
     test "returns error when retry also fails with 401" do
       http_client = fn _url, _headers -> {:ok, 401, "Unauthorized"} end
       token_fn = fn _app -> {:ok, "test-token"} end

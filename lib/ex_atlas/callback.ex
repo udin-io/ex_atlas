@@ -231,13 +231,20 @@ defmodule ExAtlas.Callback do
   # The Registry drops a dead owner's entry asynchronously, so an entry can name
   # a pid that already exited. The registry is node-local, so the pid is too.
   defp lookup(task_id) do
+    with pid when is_pid(pid) <- owner_pid(task_id),
+         true <- Process.alive?(pid) do
+      {:ok, pid}
+    else
+      _ -> {:error, :not_tracked}
+    end
+  end
+
+  defp owner_pid(task_id) do
     if Process.whereis(ComputeRegistry) do
       case Registry.lookup(ComputeRegistry, {:callback, task_id}) do
-        [{pid, _}] -> if Process.alive?(pid), do: {:ok, pid}, else: {:error, :not_tracked}
-        [] -> {:error, :not_tracked}
+        [{pid, _}] -> pid
+        [] -> nil
       end
-    else
-      {:error, :not_tracked}
     end
   end
 

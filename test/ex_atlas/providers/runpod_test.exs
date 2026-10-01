@@ -531,6 +531,11 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert :ok = ExAtlas.cancel_job("job_1", opts)
     end
 
+    test "cancel_job/2 without :endpoint returns a validation error", %{ctx_opts: opts} do
+      assert {:error, %ExAtlas.Error{kind: :validation, provider: :runpod}} =
+               ExAtlas.cancel_job("job_1", opts)
+    end
+
     test "stream_job/2 carries :endpoint through to the runtime API", %{
       bypass: bypass,
       job_opts: opts

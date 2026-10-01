@@ -266,21 +266,20 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
   end
 
   defp default_config_file_fn do
-    path = Path.expand("~/.fly/config.yml")
+    case File.read(Path.expand("~/.fly/config.yml")) do
+      {:ok, content} -> parse_access_token(content)
+      {:error, _} -> :miss
+    end
+  end
 
-    case File.read(path) do
-      {:ok, content} ->
-        case Regex.run(~r/^access_token:\s*(.+)$/m, content) do
-          [_, token] ->
-            token = token |> String.trim() |> String.trim("\"")
-            if token != "", do: {:ok, token}, else: :miss
-
-          nil ->
-            :miss
-        end
-
-      {:error, _} ->
-        :miss
+  @doc false
+  @spec parse_access_token(String.t()) :: {:ok, String.t()} | :miss
+  def parse_access_token(content) do
+    with [_, raw] <- Regex.run(~r/^access_token:\s*(.+)$/m, content),
+         token when token != "" <- raw |> String.trim() |> String.trim("\"") do
+      {:ok, token}
+    else
+      _ -> :miss
     end
   end
 

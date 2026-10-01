@@ -192,19 +192,17 @@ defmodule ExAtlas.Providers.RunPod do
   def cancel_job(id, ctx) do
     endpoint = Map.get(ctx, :endpoint) || Map.get(ctx, :job_endpoint)
 
-    cond do
-      endpoint ->
-        case Jobs.cancel(ctx, endpoint, id) do
-          {:ok, _} -> :ok
-          err -> err
-        end
-
-      true ->
-        {:error,
-         ExAtlas.Error.new(:validation,
-           provider: :runpod,
-           message: "cancel_job requires :endpoint in ctx"
-         )}
+    if endpoint do
+      case Jobs.cancel(ctx, endpoint, id) do
+        {:ok, _} -> :ok
+        err -> err
+      end
+    else
+      {:error,
+       ExAtlas.Error.new(:validation,
+         provider: :runpod,
+         message: "cancel_job requires :endpoint in ctx"
+       )}
     end
   end
 

@@ -115,21 +115,21 @@ if Code.ensure_loaded?(Igniter) do
       Igniter.mkdir(igniter, "priv/ex_atlas_fly")
     end
 
+    defp gitignore_content(content) do
+      if String.contains?(content, "priv/ex_atlas_fly") do
+        content
+      else
+        trailing = if String.ends_with?(content, "\n") or content == "", do: "", else: "\n"
+
+        content <>
+          trailing <>
+          "\n# ExAtlas DETS token cache\npriv/ex_atlas_fly/*.dets\n"
+      end
+    end
+
     defp update_gitignore(igniter) do
       Igniter.update_file(igniter, ".gitignore", fn source ->
-        Rewrite.Source.update(source, :content, fn content ->
-          content = content || ""
-
-          if String.contains?(content, "priv/ex_atlas_fly") do
-            content
-          else
-            trailing = if String.ends_with?(content, "\n") or content == "", do: "", else: "\n"
-
-            content <>
-              trailing <>
-              "\n# ExAtlas DETS token cache\npriv/ex_atlas_fly/*.dets\n"
-          end
-        end)
+        Rewrite.Source.update(source, :content, &gitignore_content(&1 || ""))
       end)
     rescue
       e ->
