@@ -49,12 +49,22 @@ defmodule ExAtlas.Orchestrator.CostMeter do
   A rate the meter cannot read starts it at `0.0`.
   """
   @spec new(number(), term(), integer()) :: t()
-  def new(max_cost, rate, now_ms) do
+  def new(max_cost, rate, now_ms), do: resume(max_cost, 0.0, rate, now_ms)
+
+  @doc """
+  A meter that has already spent `spent_usd` in closed segments, with its open
+  segment at `rate` since `since_ms`.
+
+  An adopted task resumes its stored spend this way. A rate the meter cannot
+  read starts the open segment at `0.0`.
+  """
+  @spec resume(number(), number(), term(), integer()) :: t()
+  def resume(max_cost, spent_usd, rate, since_ms) do
     %__MODULE__{
       max_cost: max_cost,
       rate: known_rate(rate) || 0.0,
-      spent_before: 0.0,
-      since_ms: now_ms
+      spent_before: spent_usd / 1,
+      since_ms: since_ms
     }
   end
 

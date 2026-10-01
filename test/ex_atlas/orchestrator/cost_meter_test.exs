@@ -29,6 +29,28 @@ defmodule ExAtlas.Orchestrator.CostMeterTest do
     end
   end
 
+  describe "resume/4" do
+    test "adds the open segment's spend to the spend carried in" do
+      meter = CostMeter.resume(10, 1.5, 2.0, 0)
+
+      assert CostMeter.spent_usd(meter, 0) == 1.5
+      assert CostMeter.spent_usd(meter, @hour) == 3.5
+    end
+
+    test "counts the carried spend against the cap" do
+      meter = CostMeter.resume(2.5, 2.0, 3600.0, 0)
+
+      # $0.50 left at $1 a second.
+      assert CostMeter.ms_to_cap(meter, 0) == 500
+    end
+
+    test "a rate it cannot read starts the open segment at 0.0" do
+      meter = CostMeter.resume(10, 1.5, nil, 0)
+
+      assert CostMeter.spent_usd(meter, @hour) == 1.5
+    end
+  end
+
   describe "rate_changed/3" do
     test "a rate that is nil, negative or not a number keeps the last known rate" do
       meter = CostMeter.new(10, 2.0, 0)

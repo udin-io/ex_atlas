@@ -80,7 +80,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   so the deadline is recomputed from the record's **wall-clock**
   `:spawned_at_ms` — a 90-minute task that was down for two hours fires
   `:max_runtime` at once rather than starting a second 90 minutes — and the
-  `on_failure` budget and any landed report are carried across as well. The
+  `on_failure` budget and any landed report are carried across as well. A
+  `max_cost` meter resumes from the record's spend and counts the downtime at
+  the record's last known price, since the pod billed while the node was
+  down; the tracker rewrites those fields at every new price. The
   first status poll runs immediately, since nothing has watched the resource
   since the node went down.
 
@@ -317,9 +320,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema),
-         {:ok, tracking} <- validate_persist_mode(tracking) do
-      validate_persisted_cap(tracking)
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
+      validate_persist_mode(tracking)
     end
   end
 
@@ -328,24 +330,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   def validate_max_cost(other),
     do: {:error, "expected a positive number of US dollars, got: #{inspect(other)}"}
-
-  # An adopted task rebuilds its tracker from the record, which does not carry
-  # the spend yet, so its budget would refill on every restart. Slice 2 of the
-  # cost-cap feature stores the spend and lifts this.
-  defp validate_persisted_cap(tracking) do
-    if tracking[:persist] and tracking[:max_cost] do
-      {:error,
-       %NimbleOptions.ValidationError{
-         key: :max_cost,
-         value: tracking[:max_cost],
-         message:
-           "invalid value for :max_cost option: a persisted task cannot carry a cost cap yet. " <>
-             "Its spend is not recorded, so an adopted task would start a fresh budget."
-       }}
-    else
-      {:ok, tracking}
-    end
-  end
 
   # `persist: true` is a promise that the resource can be rebuilt at boot, and
   # for an interactive session it cannot: `compute.auth.token` is a bearer
@@ -406,6 +390,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   #     once rather than starting a second one.
   #   * `:respawns` and `:report` are carried, so an `on_failure: {:respawn, n}`
   #     budget stays spent and work that already reported is never re-run.
+  #   * The cost meter resumes from the record's spend, and counts the downtime
+  #     at the record's last known rate: the pod billed while the node was
+  #     down. A budget spent by then fires `:cost_cap` at once.
   #   * `:ready_timeout_ms` is deliberately *not* re-armed. It answers "did
   #     this ever come up?", and an adopted resource has been up for hours.
   def init({:adopted, record}) do
@@ -416,13 +403,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     remaining_ms = remaining_runtime_ms(record)
 
     state =
-      arm_cost_cap(%{
+      %{
         new_state(compute, opts, tracking)
         | respawns: record.respawns,
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
-          store: TrackingStore.impl()
-      })
+          store: TrackingStore.impl(),
+          cost_meter: resumed_cost_meter(record)
+      }
+      |> reprice()
+      |> arm_cost_cap()
 
     register_callback(state.callback_task_id)
     Events.broadcast(compute.id, {:status, compute.status})
@@ -484,6 +474,32 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp remaining_runtime_ms(%{max_runtime_ms: ms, spawned_at_ms: spawned_at_ms}),
     do: max(ms - (System.system_time(:millisecond) - spawned_at_ms), 0)
+
+  # The record's open segment began at wall-clock `cost_since_ms`; the meter
+  # runs on monotonic time, so the segment start moves back by the segment's
+  # age, run time and downtime alike. A wall clock behind the one that wrote
+  # the record clamps that age at 0: the open segment counts nothing rather
+  # than a refund. `reprice/1` then opens a segment at the adopted compute's
+  # rate.
+  #
+  # A host store without the cost columns hands back `nil` or no key at all.
+  # Its record adopts with a fresh budget (or none, without a cap) rather than
+  # crashing `init/1`, which would leave the pod with no tracker and no
+  # deadline.
+  defp resumed_cost_meter(%{max_cost: max_cost} = record)
+       when is_number(max_cost) and max_cost > 0 do
+    now_wall = System.system_time(:millisecond)
+    since_wall = number_or(Map.get(record, :cost_since_ms), now_wall)
+    spent = number_or(Map.get(record, :spent_usd), 0.0)
+    age_ms = max(now_wall - since_wall, 0)
+
+    CostMeter.resume(max_cost, spent, Map.get(record, :cost_rate), now_ms() - age_ms)
+  end
+
+  defp resumed_cost_meter(_uncapped), do: nil
+
+  defp number_or(value, _default) when is_number(value), do: value
+  defp number_or(_missing, default), do: default
 
   defp poll_now(%{status_poll_ms: nil}), do: :ok
   defp poll_now(_state), do: send(self(), :status_poll)
@@ -736,14 +752,19 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     reprice(%{state | compute: upstream})
   end
 
-  # A new price closes the meter's segment and re-arms the cap timer. A price
-  # the meter cannot read, or the same price, changes nothing.
+  # A new price closes the meter's segment, records it, and re-arms the cap
+  # timer. A price the meter cannot read, or the same price, changes nothing.
   defp reprice(%{cost_meter: nil} = state), do: state
 
   defp reprice(%{cost_meter: meter} = state) do
     case CostMeter.rate_changed(meter, state.compute.cost_per_hour, now_ms()) do
-      ^meter -> state
-      repriced -> arm_cost_cap(%{state | cost_meter: repriced})
+      ^meter ->
+        state
+
+      repriced ->
+        state = %{state | cost_meter: repriced}
+        record_cost(state)
+        arm_cost_cap(state)
     end
   end
 
@@ -775,11 +796,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
         {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
 
-        Events.broadcast(old_id, {:respawned, replacement.id})
-        Events.broadcast(replacement.id, {:status, replacement.status})
-
         # The meter carries over, like the deadline: a replacement continues
-        # the old budget at its own price.
+        # the old budget at its own price. Repriced before the broadcast, so
+        # the replacement's record holds that price once subscribers hear.
         state =
           reprice(%{
             state
@@ -789,6 +808,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
               upstream_deletable?: true,
               last_activity_ms: now_ms()
           })
+
+        Events.broadcast(old_id, {:respawned, replacement.id})
+        Events.broadcast(replacement.id, {:status, replacement.status})
 
         schedule_status_poll(state)
         {:noreply, state}
@@ -826,6 +848,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:ok, record} -> store.put(fun.(record))
       :error -> :ok
     end
+  end
+
+  # The meter's open segment began at monotonic `since_ms`; the record keeps
+  # it as wall clock, which a new VM can still read.
+  defp record_cost(%{cost_meter: meter} = state) do
+    since_ms = System.system_time(:millisecond) - (now_ms() - meter.since_ms)
+    update_record(state, &Map.merge(&1, TrackingStore.cost_fields(meter, since_ms)))
   end
 
   defp carry_record(%{store: nil}, _old_id, _new_id), do: :ok

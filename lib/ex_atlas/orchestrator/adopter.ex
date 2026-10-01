@@ -67,8 +67,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   ## Records this build does not understand
 
-  A record with a `:v` other than 1 or 2, or a `:mode` other than `:task`, is skipped
-  with a warning and **left in the store**. Deleting it would be worse than
+  A record with a `:v` other than 1, 2 or 3, or a `:mode` other than `:task`, is
+  skipped with a warning and **left in the store**. Deleting it would be worse than
   useless: the store entry is the only thing telling the Reaper that a live,
   prefix-matching pod belongs to this app.
   """
@@ -185,13 +185,11 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   defp adopt(record, owner, store) do
     cond do
-      not readable?(record.v) -> skip(record, "unknown schema version #{record.v}")
+      not TrackingStore.readable?(record.v) -> skip(record, "unknown schema version #{record.v}")
       record.mode != :task -> skip(record, "mode #{inspect(record.mode)} is not adoptable")
-      true -> adopt_by_owner(record, Map.get(record, :owner), owner, store)
+      true -> adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
     end
   end
-
-  defp readable?(version), do: version in [1, TrackingStore.version()]
 
   # Same owner, or no owner on either side: ours, as before.
   defp adopt_by_owner(record, owner, owner, store), do: reconcile(record, store)
@@ -200,7 +198,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # other nodes skip it. The claim lands before the tracker starts, so the
   # tracker's own record updates keep it.
   defp adopt_by_owner(record, nil, owner, store) do
-    claimed = record |> Map.put(:v, TrackingStore.version()) |> Map.put(:owner, owner)
+    claimed = Map.put(record, :owner, owner)
     store.put(claimed)
     reconcile(claimed, store)
   end
@@ -215,7 +213,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
   defp skip(record, why) do
     Logger.warning(
       "[ExAtlas.Orchestrator.Adopter] not adopting #{Map.get(record, :id, "?")}: #{why} " <>
-        "(this build understands versions 1 and #{TrackingStore.version()}). The record is kept " <>
+        "(this build understands versions 1 to #{TrackingStore.version()}). The record is kept " <>
         "so the Reaper still treats the resource as ours."
     )
   end

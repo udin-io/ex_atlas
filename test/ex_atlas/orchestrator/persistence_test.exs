@@ -44,7 +44,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, record} = Memory.get(compute.id)
 
       assert %{
-               v: 2,
+               v: 3,
                id: id,
                provider: :mock,
                mode: :task,
@@ -60,18 +60,53 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert_in_delta record.spawned_at_ms, System.system_time(:millisecond), 5_000
     end
 
+    test "an uncapped task records no cost cap and no meter" do
+      {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
+
+      assert {:ok, %{max_cost: false, spent_usd: +0.0, cost_rate: nil, cost_since_ms: nil}} =
+               Memory.get(compute.id)
+    end
+
+    test "a capped task records its cap and opens its meter at the pod's price" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(task_opts(max_cost: 2.5, provider_opts: %{cost_per_hour: 1.5}))
+
+      assert {:ok, %{max_cost: 2.5, spent_usd: +0.0, cost_rate: 1.5, cost_since_ms: since}} =
+               Memory.get(compute.id)
+
+      # Wall clock, like `spawned_at_ms`, so a new VM can count the downtime.
+      assert_in_delta since, System.system_time(:millisecond), 5_000
+    end
+
+    test "a price change on a capped task rewrites the record's spend and price" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            max_cost: 100,
+            status_poll_ms: 10,
+            provider_opts: %{cost_per_hour: 3600.0}
+          )
+        )
+
+      :ok = Mock.set_cost_per_hour(compute.id, 7200.0)
+
+      # The spend at $1 a second up to the change is closed into `spent_usd`.
+      assert %{spent_usd: spent} = Memory.await(compute.id, &(&1.cost_rate == 7200.0))
+      assert spent > 0.0
+    end
+
     test "stamps the spawning node's owner into the record" do
       ExAtlas.Test.Orchestrator.put_env(reap_owner: "a")
 
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 
-      assert {:ok, %{v: 2, owner: "a"}} = Memory.get(compute.id)
+      assert {:ok, %{v: 3, owner: "a"}} = Memory.get(compute.id)
     end
 
     test "records no owner when the node has none" do
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 
-      assert {:ok, %{v: 2, owner: nil}} = Memory.get(compute.id)
+      assert {:ok, %{v: 3, owner: nil}} = Memory.get(compute.id)
     end
 
     test "records the callback task id so in-flight pod callbacks survive" do
@@ -149,6 +184,62 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
 
       # ...and the pod that is gone must not be adopted at all.
       assert :error = Memory.get(old_id)
+    end
+
+    test "a respawn at the same price carries the open segment unchanged" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            spot: true,
+            status_poll_ms: 10,
+            on_failure: {:respawn, 1},
+            max_cost: 100,
+            provider_opts: %{cost_per_hour: 3600.0}
+          )
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+      {:ok, original} = Memory.get(old_id)
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      # Nothing reprices a replacement at the old price, so only the carried
+      # record keeps the segment's start: a restart then counts it once.
+      assert {:ok, replacement} = Memory.get(new_id)
+
+      assert Map.take(replacement, [:max_cost, :spent_usd, :cost_rate, :cost_since_ms]) ==
+               Map.take(original, [:max_cost, :spent_usd, :cost_rate, :cost_since_ms])
+    end
+
+    test "a respawn carries the spend into the replacement's record" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            spot: true,
+            status_poll_ms: 10,
+            on_failure: {:respawn, 1},
+            max_cost: 100,
+            provider_opts: %{cost_per_hour: 3600.0}
+          )
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      # Close a segment, so the record holds spend worth carrying.
+      :ok = Mock.set_cost_per_hour(old_id, 7200.0)
+      %{spent_usd: spent_before} = Memory.await(old_id, &(&1.cost_rate == 7200.0))
+      assert spent_before > 0.0
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      # The replacement runs at the spawn price again, so its record opens a
+      # segment at 3600 on top of everything spent so far.
+      assert {:ok, %{spent_usd: spent_after, cost_rate: 3600.0}} = Memory.get(new_id)
+      assert spent_after > spent_before
     end
   end
 

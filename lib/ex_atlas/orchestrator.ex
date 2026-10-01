@@ -115,8 +115,9 @@ defmodule ExAtlas.Orchestrator do
 
   A positive number, or `false` (the default). A provider that reports no
   price gets its pod deleted and `{:error, %ExAtlas.Error{kind: :unsupported}}`
-  back, since a cap nothing can enforce is worse than none. `persist: true`
-  with a cap is refused for now: the record does not carry the spend yet.
+  back, since a cap nothing can enforce is worse than none. With
+  `persist: true` the tracking record carries the spend, so an adopted task
+  resumes its budget and counts the downtime at the last known price.
 
   ## `persist: true` — surviving a deploy
 
