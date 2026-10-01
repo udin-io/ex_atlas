@@ -8,13 +8,11 @@ the follow-up to #67, because the repo had no root `CLAUDE.md`.
 
 ## Project source of truth
 
-The repo has no `docs/` directory yet. The next session that changes
-behaviour creates `docs/PROJECT.md` and its pages (roadmap, architecture,
-risks, decisions) from the code and the merged PRs, and links it from the top
-of `README.md`. From then on, every PR that changes behaviour, structure, a
-risk or a decision updates those pages in the same PR. A merge is not finished
-until they describe `main` as it is. Until then, `README.md`, `guides/` and
-`CHANGELOG.md` are the docs every PR updates.
+`docs/PROJECT.md` is the source of truth, with its pages: roadmap,
+architecture, risks and decisions. #70 created them. Every PR that changes
+behaviour, structure, a risk or a decision updates those pages in the same PR,
+next to `README.md`, `guides/` and `CHANGELOG.md`. A merge is not finished
+until they describe `main` as it is.
 
 ## Commands
 

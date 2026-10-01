@@ -4,6 +4,9 @@
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/atlas)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
+Project docs: [docs/PROJECT.md](docs/PROJECT.md) (roadmap, architecture, risks,
+decisions).
+
 A composable, pluggable Elixir SDK for **infrastructure management**.
 Two concerns under one roof:
 
