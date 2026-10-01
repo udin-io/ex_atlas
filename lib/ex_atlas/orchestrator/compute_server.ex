@@ -476,15 +476,30 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     do: max(ms - (System.system_time(:millisecond) - spawned_at_ms), 0)
 
   # The record's open segment began at wall-clock `cost_since_ms`; the meter
-  # runs on monotonic time, so the segment start moves back by the downtime.
-  # A wall clock that went backwards counts no downtime rather than a refund.
-  # `reprice/1` then opens a segment at the adopted compute's rate.
-  defp resumed_cost_meter(%{max_cost: false}), do: nil
+  # runs on monotonic time, so the segment start moves back by the segment's
+  # age, run time and downtime alike. A wall clock behind the one that wrote
+  # the record clamps that age at 0: the open segment counts nothing rather
+  # than a refund. `reprice/1` then opens a segment at the adopted compute's
+  # rate.
+  #
+  # A host store without the cost columns hands back `nil` or no key at all.
+  # Its record adopts with a fresh budget (or none, without a cap) rather than
+  # crashing `init/1`, which would leave the pod with no tracker and no
+  # deadline.
+  defp resumed_cost_meter(%{max_cost: max_cost} = record)
+       when is_number(max_cost) and max_cost > 0 do
+    now_wall = System.system_time(:millisecond)
+    since_wall = number_or(Map.get(record, :cost_since_ms), now_wall)
+    spent = number_or(Map.get(record, :spent_usd), 0.0)
+    age_ms = max(now_wall - since_wall, 0)
 
-  defp resumed_cost_meter(record) do
-    downtime_ms = max(System.system_time(:millisecond) - record.cost_since_ms, 0)
-    CostMeter.resume(record.max_cost, record.spent_usd, record.cost_rate, now_ms() - downtime_ms)
+    CostMeter.resume(max_cost, spent, Map.get(record, :cost_rate), now_ms() - age_ms)
   end
+
+  defp resumed_cost_meter(_uncapped), do: nil
+
+  defp number_or(value, _default) when is_number(value), do: value
+  defp number_or(_missing, default), do: default
 
   defp poll_now(%{status_poll_ms: nil}), do: :ok
   defp poll_now(_state), do: send(self(), :status_poll)

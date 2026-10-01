@@ -216,6 +216,42 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert_in_delta spent, 1.0, 0.01
     end
 
+    test "a record from a store without the cost columns still adopts on its deadline" do
+      for {name, strip} <- [
+            {"atlas-dropped", &Map.drop(&1, [:max_cost, :spent_usd, :cost_rate, :cost_since_ms])},
+            {"atlas-nils",
+             &%{&1 | max_cost: nil, spent_usd: nil, cost_rate: nil, cost_since_ms: nil}}
+          ] do
+        compute = orphaned_task(name: name)
+        {:ok, record} = Memory.get(compute.id)
+        :ok = Memory.put(strip.(record))
+        backdate!(compute.id, 30 * 60 * 1_000)
+
+        :ok = Adopter.run(notify: self())
+
+        # Uncapped, but tracked: the deadline still ends it.
+        assert {:ok, %{max_cost: false, max_runtime_remaining_ms: remaining}} =
+                 Orchestrator.info(compute.id)
+
+        assert remaining < 65 * 60 * 1_000
+      end
+    end
+
+    test "a cap with no stored meter adopts capped, on a fresh budget" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0})
+      {:ok, record} = Memory.get(compute.id)
+
+      :ok =
+        Memory.put(%{record | max_cost: 2.5, spent_usd: nil, cost_rate: nil, cost_since_ms: nil})
+
+      :ok = Adopter.run(notify: self())
+
+      assert {:ok, %{max_cost: 2.5, spent_usd: spent, compute: %{status: :running}}} =
+               Orchestrator.info(compute.id)
+
+      assert_in_delta spent, 0.0, 0.01
+    end
+
     test "a wall clock that moved backwards refunds nothing" do
       compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0})
       cap_record!(compute.id, 10, 0.5, 1.0, -@hour)
