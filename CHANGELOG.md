@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.7.0 — 2026-10-01
 
 ### Changed: `list_gpu_types` reads the Runpod v2 catalog (breaking, v0.7.0)
 
@@ -25,6 +25,8 @@ returned an error on a live key.
   not the GraphQL map.
 - Removed: `ExAtlas.Providers.RunPod.GraphQL`, `Client.graphql/1`,
   `Client.graphql_url/0`, and telemetry `api: :graphql`.
+
+## v0.6.0
 
 ### Changed: Runpod REST v2 (breaking, v0.6.0)
 
