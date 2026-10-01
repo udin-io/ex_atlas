@@ -326,7 +326,11 @@ defmodule ExAtlas.Orchestrator.Reaper do
     end
   end
 
-  defp describe_owner({:other, other}), do: "its name carries owner #{inspect(other)}"
+  defp describe_owner({:other, other}),
+    do:
+      "its name carries owner #{inspect(other)} (another node's, or a name from before " <>
+        "owners existed)"
+
   defp describe_owner(:unowned), do: "its name carries no owner"
 
   defp orphan?(compute, tracked, store, prefix, now, grace_ms) do
