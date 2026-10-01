@@ -51,6 +51,35 @@ defmodule ExAtlas.Providers.RunPodLiveTest do
     assert reason in [:vanished, :terminated]
   end
 
+  # PR 41's probe saw v2 refuse a pod body with no `disk`. With `templateId`
+  # set the OpenAPI spec says the template supplies it; this test checks that
+  # RunPod accepts the body and the pod keeps the template's port and disk.
+  test "a pod spawned from a template with no ports and no disk is accepted and keeps the template's",
+       %{opts: opts, name: name} do
+    gpu = String.to_existing_atom(System.get_env("RUNPOD_LIVE_GPU", "rtx_a4000"))
+
+    {:ok, template} =
+      ExAtlas.create_template(
+        [
+          name: name,
+          image: "curlimages/curl:8.10.1",
+          ports: [{8000, :http}],
+          container_disk_gb: 7
+        ] ++ opts
+      )
+
+    on_exit(fn -> ExAtlas.delete_template(template.id, opts) end)
+
+    assert {:ok, compute} =
+             ExAtlas.spawn_compute(
+               [gpu: gpu, cloud_type: :community, name: name, template_id: template.id] ++ opts
+             )
+
+    {:ok, pod} = ExAtlas.get_compute(compute.id, opts)
+    assert pod.raw["ports"] == ["8000/http"]
+    assert pod.raw["disk"] == 7
+  end
+
   defp wait_until(id, opts, done?, deadline \\ System.monotonic_time(:second) + 900) do
     observation = UpstreamStatus.observe(id, opts)
 
