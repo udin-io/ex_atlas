@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# The one place CI's steps live. .github/workflows/ci.yml calls this script;
+# you run it before every push. Stops at the first failing step.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export MIX_ENV=test
+
+step() {
+  printf '\n==> %s\n' "$1"
+  shift
+  "$@"
+}
+
+step "format"            mix format --check-formatted
+step "compile"           mix compile --force --warnings-as-errors
+step "hex.audit"         mix hex.audit
+step "sobelow"           mix sobelow --config
+step "test"              mix test
+
+printf '\nbin/ci: all steps passed\n'
