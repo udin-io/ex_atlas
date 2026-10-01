@@ -998,7 +998,8 @@ Seven things to know before you rely on it:
 - **A graceful deploy keeps the pod; your kill signal decides the rest.** On
   SIGTERM the BEAM stops the app and every tracker runs `terminate/2`. A
   `persist: true` task whose container has not reported an exit code keeps its
-  pod and its record; every other tracker deletes its pod. Fly's default
+  pod and its record; every other tracker deletes its pod, as does a persisted
+  task whose record is missing from the store. Fly's default
   `kill_signal` is SIGINT, which on OTP 27 halts the VM with no `terminate/2`
   at all: persisted pods survive and unpersisted ones are left to the Reaper.
   `fly launch` writes `kill_signal = "SIGTERM"` for Phoenix apps. Use it, with

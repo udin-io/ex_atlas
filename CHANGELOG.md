@@ -15,7 +15,8 @@ adopt.
 
 - A graceful node stop (SIGTERM, `System.stop/0`, `Application.stop(:ex_atlas)`)
   keeps a `persist: true` task's pod and record, so the next boot adopts it.
-  A task whose container already reported its exit code still deletes.
+  A task whose container already reported its exit code still deletes, and
+  so does one whose record is missing from the store.
 - Unpersisted tasks, interactive sessions, crashes, idle TTL,
   `:max_runtime_ms` and finished tasks delete as before.
 - `ExAtlas.Orchestrator.stop_tracked/1` still deletes the pod and the record.

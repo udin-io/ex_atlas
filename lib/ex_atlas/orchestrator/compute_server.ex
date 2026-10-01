@@ -74,7 +74,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   A graceful node stop leaves such a task's resource running and its record
   in place: its supervisor's `:shutdown` is the one reason `terminate/2` does
   not delete for. A task whose container already reported its exit code still
-  deletes, as does `ExAtlas.Orchestrator.stop_tracked/1`, whose reason is
+  deletes, as does one whose record is missing from the store (no boot could
+  adopt it) and `ExAtlas.Orchestrator.stop_tracked/1`, whose reason is
   `{:shutdown, :stopped}`.
 
   ## Why a task needs both a self-terminating container and a deadline

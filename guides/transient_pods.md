@@ -455,8 +455,8 @@ Five constraints worth knowing before you design around it:
   the README's "More than one node". A node adopts only what it recorded
   itself; taking over another node's pods needs leases and is out of scope.
 - A graceful stop (SIGTERM) keeps a persisted task's pod and record, unless
-  its container already reported an exit code; every other tracker deletes its
-  pod. On Fly set `kill_signal = "SIGTERM"` (`fly launch` does for Phoenix)
+  its container already reported an exit code or its record is missing from
+  the store; every other tracker deletes its pod. On Fly set `kill_signal = "SIGTERM"` (`fly launch` does for Phoenix)
   and a `kill_timeout` of at least 30 s. Fly's default SIGINT halts the VM
   with no `terminate/2`, which leaves unpersisted pods to the Reaper.
 - The app cannot tell a deploy from a machine removed for good: both send
