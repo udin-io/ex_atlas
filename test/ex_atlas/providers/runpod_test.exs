@@ -987,6 +987,150 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
+  describe "serverless endpoints" do
+    alias ExAtlas.Providers.RunPod
+    alias ExAtlas.Spec.Endpoint
+
+    @endpoint %{
+      "id" => "4m7x2k9q",
+      "name" => "image-generator",
+      "type" => "QUEUE",
+      "env" => %{"HF_TOKEN" => "s3cr3t-value"},
+      "gpu" => %{"pools" => ["ADA_24"], "count" => 1},
+      "workers" => %{"min" => 0, "max" => 3},
+      "dataCenterIds" => ["US-TX-3"],
+      "networkVolumes" => []
+    }
+
+    setup %{ctx_opts: opts}, do: {:ok, ctx: ExAtlas.Config.build_ctx(:runpod, opts)}
+
+    test "capabilities include :manage_endpoints" do
+      assert :manage_endpoints in RunPod.capabilities()
+    end
+
+    test "list returns the endpoints of every page", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect(bypass, "GET", "/serverless", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        case conn.query_params["cursor"] do
+          nil ->
+            json(conn, 200, %{
+              "endpoints" => [@endpoint],
+              "pagination" => %{"nextCursor" => "c2", "hasNextPage" => true}
+            })
+
+          "c2" ->
+            json(conn, 200, %{
+              "endpoints" => [%{@endpoint | "id" => "b", "type" => "LOAD_BALANCER"}],
+              "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
+            })
+        end
+      end)
+
+      assert {:ok,
+              [
+                %Endpoint{id: "4m7x2k9q", type: :queue, workers_max: 3},
+                %Endpoint{id: "b", type: :load_balancer}
+              ]} = RunPod.list_endpoints(ctx)
+    end
+
+    test "list fails whole when the second page fails", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect(bypass, "GET", "/serverless", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        case conn.query_params["cursor"] do
+          nil ->
+            json(conn, 200, %{
+              "endpoints" => [@endpoint],
+              "pagination" => %{"nextCursor" => "c2", "hasNextPage" => true}
+            })
+
+          "c2" ->
+            json(conn, 404, %{"error" => "bad cursor"})
+        end
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.list_endpoints(ctx)
+    end
+
+    test "get returns the endpoint", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/serverless/4m7x2k9q", fn conn ->
+        json(conn, 200, @endpoint)
+      end)
+
+      assert {:ok,
+              %Endpoint{
+                id: "4m7x2k9q",
+                provider: :runpod,
+                name: "image-generator",
+                gpu_pools: ["ADA_24"],
+                region_hints: ["US-TX-3"]
+              }} = RunPod.get_endpoint("4m7x2k9q", ctx)
+    end
+
+    test "get of a missing endpoint is :not_found", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/serverless/gone", fn conn ->
+        json(conn, 404, %{"error" => "not found"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.get_endpoint("gone", ctx)
+    end
+
+    test "get with a 200 body that is not an object is a :provider error without the body", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "GET", "/serverless/x", fn conn ->
+        json(conn, 200, [@endpoint])
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, raw: nil} = error} =
+               RunPod.get_endpoint("x", ctx)
+
+      refute inspect(error) =~ "s3cr3t-value"
+    end
+
+    test "inspect of a returned endpoint does not show an env value", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "GET", "/serverless/4m7x2k9q", fn conn ->
+        json(conn, 200, @endpoint)
+      end)
+
+      {:ok, endpoint} = RunPod.get_endpoint("4m7x2k9q", ctx)
+      assert endpoint.raw["env"]["HF_TOKEN"] == "s3cr3t-value"
+      refute inspect(endpoint) =~ "s3cr3t-value"
+    end
+
+    test "delete returns :ok on 204", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/serverless/4m7x2k9q", fn conn ->
+        Plug.Conn.resp(conn, 204, "")
+      end)
+
+      assert :ok = RunPod.delete_endpoint("4m7x2k9q", ctx)
+    end
+
+    test "delete of an endpoint RunPod refuses is an error, not :ok", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "DELETE", "/serverless/busy", fn conn ->
+        json(conn, 400, %{"error" => "endpoint has active workers"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = RunPod.delete_endpoint("busy", ctx)
+    end
+
+    test "delete of a missing endpoint is :not_found", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "DELETE", "/serverless/gone", fn conn ->
+        json(conn, 404, %{"error" => "not found"})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.delete_endpoint("gone", ctx)
+    end
+  end
+
   describe "compute_spend/3" do
     alias ExAtlas.Providers.RunPod
     alias ExAtlas.Spec.Spend
