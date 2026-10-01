@@ -1,13 +1,11 @@
 defmodule ExAtlas.Providers.RunPod.Client do
   @moduledoc """
-  Shared `Req` client factories for RunPod's three APIs:
+  Shared `Req` client factories for RunPod's two APIs:
 
     * REST management — `https://api.runpod.io/v2` — pods, serverless
       endpoints, templates, network volumes, billing.
     * Serverless runtime — `https://api.runpod.ai/v2/<endpoint>` — job submission,
       status polling, streaming.
-    * Legacy GraphQL — `https://api.runpod.io/graphql` — GPU pricing catalog
-      (not exposed in REST).
 
   Each factory returns a `Req.Request.t()` pre-configured with authentication,
   JSON codec, retry policy, and telemetry. Consumers compose further via
@@ -16,7 +14,6 @@ defmodule ExAtlas.Providers.RunPod.Client do
 
   @management_url "https://api.runpod.io/v2"
   @runtime_url "https://api.runpod.ai/v2"
-  @graphql_url "https://api.runpod.io/graphql"
 
   @telemetry_prefix [:ex_atlas, :runpod]
 
@@ -25,9 +22,6 @@ defmodule ExAtlas.Providers.RunPod.Client do
 
   @doc "Base URL for the serverless runtime API."
   def runtime_url, do: @runtime_url
-
-  @doc "GraphQL endpoint URL."
-  def graphql_url, do: @graphql_url
 
   @doc """
   Build a Req client for the REST management API.
@@ -71,27 +65,6 @@ defmodule ExAtlas.Providers.RunPod.Client do
       receive_timeout: 120_000
     )
     |> attach_telemetry(:runtime)
-    |> merge_user_options(ctx)
-  end
-
-  @doc """
-  Build a Req client for the legacy GraphQL API.
-
-  GraphQL uses `?api_key=` as a query param, not a header.
-  """
-  @spec graphql(ExAtlas.Provider.ctx()) :: Req.Request.t()
-  def graphql(ctx) do
-    api_key = fetch_key!(ctx)
-
-    Req.new(
-      base_url: @graphql_url,
-      params: [api_key: api_key],
-      headers: [{"content-type", "application/json"}, {"accept", "application/json"}],
-      retry: :transient,
-      max_retries: 2,
-      receive_timeout: 30_000
-    )
-    |> attach_telemetry(:graphql)
     |> merge_user_options(ctx)
   end
 
@@ -143,7 +116,7 @@ defmodule ExAtlas.Providers.RunPod.Client do
     ])
   end
 
-  # GraphQL sends the API key as `?api_key=`, so telemetry never sees a query.
+  # The query string carries request filters, so telemetry never logs it.
   defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
 
   defp merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do

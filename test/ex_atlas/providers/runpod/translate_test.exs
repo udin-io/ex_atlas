@@ -379,6 +379,90 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     "test/fixtures/runpod/v2/pod_#{name}.json" |> File.read!() |> Jason.decode!()
   end
 
+  describe "gpu_types/2" do
+    test "maps each recorded GPU from the two catalog reads" do
+      gpus = Translate.gpu_types(recorded("secure"), recorded("community"))
+      by_id = Map.new(gpus, &{&1.id, &1})
+
+      assert %Spec.GpuType{
+               provider: :runpod,
+               display_name: "RTX 4090",
+               memory_gb: 24,
+               lowest_price_per_hour: 0.34,
+               stock: :low,
+               cloud_type: :any
+             } = by_id["NVIDIA GeForce RTX 4090"]
+
+      assert %{
+               display_name: "H100 SXM",
+               memory_gb: 80,
+               lowest_price_per_hour: 2.69,
+               stock: :medium
+             } =
+               by_id["NVIDIA H100 80GB HBM3"]
+
+      assert Enum.all?(gpus, &(&1.spot_price_per_hour == nil))
+    end
+
+    test "a GPU on one cloud takes that cloud's price, never the zero on the other" do
+      by_id =
+        Map.new(Translate.gpu_types(recorded("secure"), recorded("community")), &{&1.id, &1})
+
+      assert %{cloud_type: :community, lowest_price_per_hour: 1, stock: :unavailable} =
+               by_id["NVIDIA A100-SXM4-40GB"]
+
+      assert %{cloud_type: :secure, lowest_price_per_hour: 2.39} =
+               by_id["AMD Instinct MI300X OAM"]
+    end
+
+    test "a GPU offered on neither cloud has no price and no stock" do
+      assert %{cloud_type: :any, lowest_price_per_hour: nil, stock: :unavailable} =
+               Translate.gpu_types(recorded("secure"), recorded("community"))
+               |> Enum.find(&(&1.id == "unknown"))
+    end
+
+    test "stock is the best level of the clouds the GPU is offered on" do
+      by_id = edge()
+
+      assert %{stock: :high, lowest_price_per_hour: 0.3, cloud_type: :any} = by_id["GPU A"]
+      # Control for the two below: A's secure LOW did not beat its community HIGH.
+      assert %{stock: :high, cloud_type: :secure} = by_id["GPU B"]
+      assert %{stock: :low, cloud_type: :community} = by_id["GPU C"]
+      assert %{stock: :medium} = by_id["GPU D"]
+      assert %{stock: :unavailable, lowest_price_per_hour: 1.1} = by_id["GPU E"]
+      assert %{stock: :unknown} = by_id["GPU F"]
+    end
+
+    test "a GPU listed in one read only still appears" do
+      assert %{stock: :medium, raw: %{"SECURE" => nil, "COMMUNITY" => %{"id" => "GPU G"}}} =
+               edge()["GPU G"]
+    end
+
+    test "raw holds each cloud's entry, so data centers stay reachable" do
+      %{raw: %{"SECURE" => secure, "COMMUNITY" => community}} = edge()["GPU A"]
+      assert [%{"id" => "US-KS-2"}] = secure["dataCenters"]
+      assert [%{"id" => "EU-RO-1"}] = community["dataCenters"]
+    end
+
+    test "entries with no cudaVersions, dataCenters, serverless price or pool map" do
+      assert %{display_name: "B", memory_gb: 192} = edge()["GPU B"]
+    end
+
+    defp recorded(cloud) do
+      "test/fixtures/runpod/v2/catalog_gpus_#{cloud}.json"
+      |> File.read!()
+      |> Jason.decode!()
+      |> Map.fetch!("gpus")
+    end
+
+    defp edge do
+      %{"secure" => secure, "community" => community} =
+        "test/fixtures/runpod/v2/catalog_gpus_edge.json" |> File.read!() |> Jason.decode!()
+
+      Translate.gpu_types(secure, community) |> Map.new(&{&1.id, &1})
+    end
+  end
+
   describe "job_response_to_job/2" do
     test "maps RunPod statuses" do
       assert %{status: :completed} =

@@ -142,7 +142,7 @@ defmodule ExAtlas.Providers.RunPodTest do
   def forward_url(_event, _measurements, meta, test_pid), do: send(test_pid, {:url, meta.url})
 
   describe "telemetry" do
-    test "the request event's url carries no query, so no GraphQL api_key", %{
+    test "the catalog request event hides the query and the key", %{
       bypass: bypass,
       ctx_opts: opts
     } do
@@ -158,17 +158,15 @@ defmodule ExAtlas.Providers.RunPodTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      Bypass.expect_once(bypass, "POST", "/", fn conn ->
-        json(conn, 200, %{"data" => %{"gpuTypes" => []}})
+      Bypass.expect(bypass, "GET", "/catalog/gpus", fn conn ->
+        json(conn, 200, %{"gpus" => []})
       end)
 
-      {:ok, []} =
-        ExAtlas.list_gpu_types(
-          opts ++ [req_options: [base_url: "http://localhost:#{bypass.port}/"]]
-        )
+      {:ok, []} = ExAtlas.list_gpu_types(opts)
 
       assert_receive {:url, url}
-      refute url =~ "api_key"
+      assert url =~ "/catalog/gpus"
+      refute url =~ "?"
       refute url =~ "test-key"
     end
   end
@@ -397,64 +395,103 @@ defmodule ExAtlas.Providers.RunPodTest do
     end
   end
 
-  describe "list_gpu_types/1 (GraphQL)" do
-    test "hits /graphql and normalizes", %{bypass: bypass, ctx_opts: opts} do
-      Bypass.expect_once(bypass, "POST", "/", fn conn ->
-        {:ok, raw, conn} = Plug.Conn.read_body(conn)
-        payload = Jason.decode!(raw)
-        assert payload["query"] =~ "gpuTypes"
+  describe "list_gpu_types/1" do
+    defp fixture_body(cloud),
+      do: File.read!("test/fixtures/runpod/v2/catalog_gpus_#{cloud}.json")
 
-        conn
-        |> Plug.Conn.put_resp_header("content-type", "application/json")
-        |> Plug.Conn.resp(
-          200,
-          Jason.encode!(%{
-            "data" => %{
-              "gpuTypes" => [
-                %{
-                  "id" => "NVIDIA H100 80GB HBM3",
-                  "displayName" => "H100 80GB",
-                  "memoryInGb" => 80,
-                  "secureCloud" => true,
-                  "communityCloud" => false,
-                  "lowestPrice" => %{
-                    "minimumBidPrice" => 1.2,
-                    "uninterruptablePrice" => 2.49
-                  },
-                  "stockStatus" => "High"
-                }
-              ]
-            }
-          })
-        )
+    defp expect_catalog(bypass, fun) do
+      Bypass.expect(bypass, "GET", "/catalog/gpus", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        assert ["Bearer test-key"] = Plug.Conn.get_req_header(conn, "authorization")
+        fun.(conn, conn.query_params)
+      end)
+    end
+
+    defp raw_json(conn, status, body) do
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(status, body)
+    end
+
+    test "reads SECURE then COMMUNITY from the v2 catalog and merges them", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      test_pid = self()
+
+      expect_catalog(bypass, fn conn, params ->
+        send(test_pid, {:params, params})
+        raw_json(conn, 200, fixture_body(String.downcase(params["cloud"])))
       end)
 
-      # Point the GraphQL client at the Bypass server too — Client.graphql/1 uses @graphql_url
-      # by default, but our test rig needs it routed to Bypass.
-      opts_with_req =
-        opts ++
-          [
-            req_options: [
-              base_url: "http://localhost:#{bypass.port}/",
-              params: [api_key: "test-key"]
-            ]
-          ]
+      assert {:ok, gpus} = ExAtlas.list_gpu_types(opts)
 
-      {:ok, [gpu]} = ExAtlas.list_gpu_types(opts_with_req)
+      assert_received {:params, secure}
+      assert_received {:params, community}
 
-      assert gpu.provider == :runpod
-      assert gpu.display_name == "H100 80GB"
-      assert gpu.memory_gb == 80
-      assert gpu.lowest_price_per_hour == 2.49
-      assert gpu.spot_price_per_hour == 1.2
-      assert gpu.stock == :high
+      assert secure == %{"include" => "AVAILABILITY", "product" => "POD", "cloud" => "SECURE"}
+      assert community == %{secure | "cloud" => "COMMUNITY"}
+
+      assert %{stock: :low, lowest_price_per_hour: 0.34, spot_price_per_hour: nil} =
+               Enum.find(gpus, &(&1.id == "NVIDIA GeForce RTX 4090"))
+    end
+
+    test "a 401 is unauthorized, and the same context lists on a 200", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "GET", "/catalog/gpus", &json(&1, 401, %{"title" => "no"}))
+
+      assert {:error, %ExAtlas.Error{kind: :unauthorized, status: 401}} =
+               ExAtlas.list_gpu_types(opts ++ [req_options: [retry: false]])
+
+      expect_catalog(bypass, fn conn, params ->
+        raw_json(conn, 200, fixture_body(String.downcase(params["cloud"])))
+      end)
+
+      assert {:ok, [_ | _]} = ExAtlas.list_gpu_types(opts)
+    end
+
+    test "a 403 is an error with its status", %{bypass: bypass, ctx_opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/catalog/gpus", &json(&1, 403, %{"title" => "no"}))
+
+      assert {:error, %ExAtlas.Error{status: 403}} = ExAtlas.list_gpu_types(opts)
+    end
+
+    test "a failed COMMUNITY read returns an error, never a partial list", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      expect_catalog(bypass, fn conn, params ->
+        case params["cloud"] do
+          "SECURE" -> raw_json(conn, 200, fixture_body("secure"))
+          "COMMUNITY" -> json(conn, 400, %{"title" => "bad"})
+        end
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 400}} = ExAtlas.list_gpu_types(opts)
+    end
+
+    test "a 200 with no gpus list is a provider error", %{bypass: bypass, ctx_opts: opts} do
+      expect_catalog(bypass, fn conn, _ -> json(conn, 200, %{"nope" => []}) end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_gpu_types(opts)
+    end
+
+    test "a gpus list holding a non-object entry is a provider error", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      expect_catalog(bypass, fn conn, _ -> json(conn, 200, %{"gpus" => [42]}) end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = ExAtlas.list_gpu_types(opts)
     end
   end
 
   describe "serverless jobs through the top-level API" do
     setup %{bypass: bypass, ctx_opts: opts} do
-      # `Client.runtime/2` always targets api.runpod.ai; route it at Bypass the
-      # same way the GraphQL test does.
+      # `Client.runtime/2` always targets api.runpod.ai; route it at Bypass with
+      # `req_options`.
       job_opts =
         Keyword.merge(opts,
           endpoint: "abc123",

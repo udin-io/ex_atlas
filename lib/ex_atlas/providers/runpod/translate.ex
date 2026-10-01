@@ -363,4 +363,70 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   defp drop_nils(map) when is_map(map),
     do: :maps.filter(fn _, v -> v != nil end, map)
+
+  @doc """
+  Merge the SECURE and COMMUNITY catalog reads into `[Spec.GpuType]`.
+
+  A GPU listed in one read only still appears. `lowest_price_per_hour` is the
+  lower list price of the clouds the GPU is offered on, `stock` the best level
+  of those clouds, and `nil` and `:unavailable` when it is offered on neither.
+  Runpod sells no spot pods, so `spot_price_per_hour` is always `nil`.
+  """
+  @spec gpu_types([map()], [map()]) :: [Spec.GpuType.t()]
+  def gpu_types(secure_entries, community_entries) do
+    secure = Map.new(secure_entries, &{&1["id"], &1})
+    community = Map.new(community_entries, &{&1["id"], &1})
+
+    ids =
+      Enum.uniq(Enum.map(secure_entries, & &1["id"]) ++ Enum.map(community_entries, & &1["id"]))
+
+    Enum.map(ids, &gpu_type(secure[&1], community[&1]))
+  end
+
+  defp gpu_type(secure, community) do
+    entry = secure || community
+    secure? = entry["secure"] == true
+    community? = entry["community"] == true
+
+    offered =
+      [{secure?, secure, "secure"}, {community?, community, "community"}]
+      |> Enum.filter(&elem(&1, 0))
+
+    %Spec.GpuType{
+      id: entry["id"],
+      provider: :runpod,
+      display_name: entry["name"],
+      memory_gb: entry["memory"],
+      lowest_price_per_hour:
+        offered |> Enum.map(fn {_, _, cloud} -> get_in(entry, ["price", cloud]) end) |> lowest(),
+      spot_price_per_hour: nil,
+      stock: offered |> Enum.map(fn {_, e, _} -> e && e["availability"] end) |> best_stock(),
+      cloud_type: gpu_cloud_type(secure?, community?),
+      raw: %{"SECURE" => secure, "COMMUNITY" => community}
+    }
+  end
+
+  defp lowest(prices), do: prices |> Enum.filter(&is_number/1) |> Enum.min(fn -> nil end)
+
+  defp best_stock([]), do: :unavailable
+
+  defp best_stock(levels) do
+    levels |> Enum.map(&stock_atom/1) |> Enum.max_by(&stock_rank/1)
+  end
+
+  defp stock_atom("HIGH"), do: :high
+  defp stock_atom("MEDIUM"), do: :medium
+  defp stock_atom("LOW"), do: :low
+  defp stock_atom("NONE"), do: :unavailable
+  defp stock_atom(_), do: :unknown
+
+  defp stock_rank(:high), do: 4
+  defp stock_rank(:medium), do: 3
+  defp stock_rank(:low), do: 2
+  defp stock_rank(:unavailable), do: 1
+  defp stock_rank(:unknown), do: 0
+
+  defp gpu_cloud_type(true, false), do: :secure
+  defp gpu_cloud_type(false, true), do: :community
+  defp gpu_cloud_type(_, _), do: :any
 end

@@ -972,8 +972,6 @@ in ExAtlas, so library-only users pay nothing).
 Every provider uses `Req` under the hood:
 
 - `Authorization: Bearer <api_key>` for REST and serverless runtime endpoints.
-- `?api_key=<key>` query param for RunPod's legacy GraphQL (used only for
-  the pricing catalog).
 - `:retry :transient` with 3 retries by default.
 - Connection pooling via `Finch` (Req's default adapter).
 
@@ -987,7 +985,7 @@ Every request emits `[:ex_atlas, <provider>, :request]`:
 
 | Metadata   | Value                                                                   |
 | ---------- | ----------------------------------------------------------------------- |
-| `api`      | `:management` / `:runtime` / `:graphql`                                 |
+| `api`      | `:management` / `:runtime`                                              |
 | `method`   | `:get` / `:post` / `:delete` / ...                                      |
 | `url`      | Full request URL                                                        |
 
