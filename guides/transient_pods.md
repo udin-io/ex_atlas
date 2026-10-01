@@ -438,7 +438,7 @@ down for seven hours ends the moment it is adopted; it does not quietly start a
 second six hours. `:respawns` and any landed `finish` report carry across for
 the same reason.
 
-Three constraints worth knowing before you design around it:
+Five constraints worth knowing before you design around it:
 
 - It is **tasks only**. `persist: true` with `mode: :interactive` is refused —
   the session's bearer token is never written to disk, so an adopted session
@@ -454,6 +454,16 @@ Three constraints worth knowing before you design around it:
   machine. Without it, one machine's Reaper deletes another's live pods. See
   the README's "More than one node". A node adopts only what it recorded
   itself; taking over another node's pods needs leases and is out of scope.
+- A graceful stop (SIGTERM) keeps a persisted task's pod and record, unless
+  its container already reported an exit code; every other tracker deletes its
+  pod. On Fly set `kill_signal = "SIGTERM"` (`fly launch` does for Phoenix)
+  and a `kill_timeout` of at least 30 s. Fly's default SIGINT halts the VM
+  with no `terminate/2`, which leaves unpersisted pods to the Reaper.
+- The app cannot tell a deploy from a machine removed for good: both send
+  SIGTERM, and both keep the persisted pod. On a machine that never comes
+  back it runs untracked, with no `:max_runtime_ms` cap, until its container
+  exits or you delete it. `ExAtlas.Orchestrator.stop_tracked/1` deletes a pod
+  and its record, persisted or not.
 
 ## Pitfalls
 
