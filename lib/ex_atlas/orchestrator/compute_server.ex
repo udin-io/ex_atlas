@@ -80,7 +80,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   so the deadline is recomputed from the record's **wall-clock**
   `:spawned_at_ms` — a 90-minute task that was down for two hours fires
   `:max_runtime` at once rather than starting a second 90 minutes — and the
-  `on_failure` budget and any landed report are carried across as well. The
+  `on_failure` budget and any landed report are carried across as well. A
+  `max_cost` meter resumes from the record's spend and counts the downtime at
+  the record's last known price, since the pod billed while the node was
+  down; the tracker rewrites those fields at every new price. The
   first status poll runs immediately, since nothing has watched the resource
   since the node went down.
 
@@ -317,9 +320,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema),
-         {:ok, tracking} <- validate_persist_mode(tracking) do
-      validate_persisted_cap(tracking)
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
+      validate_persist_mode(tracking)
     end
   end
 
@@ -328,24 +330,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   def validate_max_cost(other),
     do: {:error, "expected a positive number of US dollars, got: #{inspect(other)}"}
-
-  # An adopted task rebuilds its tracker from the record, which does not carry
-  # the spend yet, so its budget would refill on every restart. Slice 2 of the
-  # cost-cap feature stores the spend and lifts this.
-  defp validate_persisted_cap(tracking) do
-    if tracking[:persist] and tracking[:max_cost] do
-      {:error,
-       %NimbleOptions.ValidationError{
-         key: :max_cost,
-         value: tracking[:max_cost],
-         message:
-           "invalid value for :max_cost option: a persisted task cannot carry a cost cap yet. " <>
-             "Its spend is not recorded, so an adopted task would start a fresh budget."
-       }}
-    else
-      {:ok, tracking}
-    end
-  end
 
   # `persist: true` is a promise that the resource can be rebuilt at boot, and
   # for an interactive session it cannot: `compute.auth.token` is a bearer

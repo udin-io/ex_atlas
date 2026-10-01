@@ -1125,25 +1125,13 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
     end
 
-    test "a cap on a persisted task is refused before anything is rented" do
-      # An adopted task would start a fresh budget, so slice 2 of issue 28 must
-      # carry the spend in the record before the two can be combined.
-      assert {:error, %NimbleOptions.ValidationError{key: :max_cost}} =
-               ExAtlas.Orchestrator.run_task(
-                 provider: :mock,
-                 gpu: :h100,
-                 image: "x",
-                 command: ["/app/train.sh"],
-                 persist: true,
-                 max_cost: 2.5
-               )
-
-      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
-    end
-
-    test "a persisted task without a cap is still accepted" do
-      assert {:ok, _tracking} =
-               ComputeServer.validate_opts(mode: :task, persist: true, max_cost: false)
+    test "a persisted task is accepted with a cap and without one" do
+      # The tracking record carries the spend, so an adopted task resumes its
+      # budget instead of starting a fresh one.
+      for max_cost <- [2.5, false] do
+        assert {:ok, _tracking} =
+                 ComputeServer.validate_opts(mode: :task, persist: true, max_cost: max_cost)
+      end
     end
   end
 

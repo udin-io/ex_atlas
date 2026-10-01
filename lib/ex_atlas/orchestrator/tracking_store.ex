@@ -273,12 +273,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       callback_task_id: callback_task_id(Keyword.get(tracking, :callback)),
       report: nil,
       mode: Keyword.get(tracking, :mode, :interactive),
-      user_id: Keyword.get(tracking, :user_id),
-      max_cost: false,
-      spent_usd: 0.0,
-      cost_rate: nil,
-      cost_since_ms: nil
+      user_id: Keyword.get(tracking, :user_id)
     }
+    |> Map.merge(initial_cost(Keyword.get(tracking, :max_cost, false), compute))
+  end
+
+  defp initial_cost(false, _compute),
+    do: %{max_cost: false, spent_usd: 0.0, cost_rate: nil, cost_since_ms: nil}
+
+  defp initial_cost(max_cost, compute) do
+    now = System.system_time(:millisecond)
+    meter = CostMeter.new(max_cost, compute.cost_per_hour, now)
+    Map.put(cost_fields(meter, now), :max_cost, max_cost)
   end
 
   @doc """

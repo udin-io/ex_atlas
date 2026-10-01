@@ -67,6 +67,34 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
                Memory.get(compute.id)
     end
 
+    test "a capped task records its cap and opens its meter at the pod's price" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(task_opts(max_cost: 2.5, provider_opts: %{cost_per_hour: 1.5}))
+
+      assert {:ok, %{max_cost: 2.5, spent_usd: +0.0, cost_rate: 1.5, cost_since_ms: since}} =
+               Memory.get(compute.id)
+
+      # Wall clock, like `spawned_at_ms`, so a new VM can count the downtime.
+      assert_in_delta since, System.system_time(:millisecond), 5_000
+    end
+
+    test "a price change on a capped task rewrites the record's spend and price" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            max_cost: 100,
+            status_poll_ms: 10,
+            provider_opts: %{cost_per_hour: 3600.0}
+          )
+        )
+
+      :ok = Mock.set_cost_per_hour(compute.id, 7200.0)
+
+      # The spend at $1 a second up to the change is closed into `spent_usd`.
+      assert %{spent_usd: spent} = Memory.await(compute.id, &(&1.cost_rate == 7200.0))
+      assert spent > 0.0
+    end
+
     test "stamps the spawning node's owner into the record" do
       ExAtlas.Test.Orchestrator.put_env(reap_owner: "a")
 
