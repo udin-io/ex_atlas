@@ -49,9 +49,9 @@ defmodule ExAtlas.Providers.RunPod.Translate do
         "image" => req.image,
         "gpu" => %{"id" => gpu_type_id!(req.gpu), "count" => req.gpu_count},
         "cloud" => cloud(req.cloud_type),
-        "ports" => Enum.map(req.ports, &format_port/1),
+        "ports" => pod_ports_field(req),
         "env" => env,
-        "disk" => req.container_disk_gb || @default_disk_gb,
+        "disk" => pod_disk(req),
         "mounts" => mounts(req),
         "templateId" => req.template_id,
         "dataCenterIds" => if(req.region_hints == [], do: nil, else: req.region_hints),
@@ -120,6 +120,19 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # v2 has no "any cloud" value. Omitting the field takes Runpod's default,
   # SECURE.
+  # With a `template_id`, v2 applies body fields over the template's own. An
+  # empty `ports` list or the default `disk` would replace the template's, so
+  # both stay out of the body until the caller sets them.
+  defp pod_ports_field(%Spec.ComputeRequest{template_id: id, ports: []}) when is_binary(id),
+    do: nil
+
+  defp pod_ports_field(%Spec.ComputeRequest{ports: ports}), do: Enum.map(ports, &format_port/1)
+
+  defp pod_disk(%Spec.ComputeRequest{template_id: id, container_disk_gb: nil}) when is_binary(id),
+    do: nil
+
+  defp pod_disk(%Spec.ComputeRequest{container_disk_gb: gb}), do: gb || @default_disk_gb
+
   defp cloud(:any), do: nil
   defp cloud(:secure), do: "SECURE"
   defp cloud(:community), do: "COMMUNITY"

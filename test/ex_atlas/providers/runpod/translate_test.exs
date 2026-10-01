@@ -146,6 +146,43 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert body["disk"] == 50
     end
 
+    # REST v2 applies body fields over the template's own, so an empty `ports`
+    # list or a default `disk` would replace the template's.
+    test "template_id with no ports and no container_disk_gb sends neither ports nor disk" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, template_id: "9x4m2p7v")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["templateId"] == "9x4m2p7v"
+      refute Map.has_key?(body, "ports")
+      refute Map.has_key?(body, "disk")
+    end
+
+    test "template_id with ports and container_disk_gb still sends both" do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          template_id: "9x4m2p7v",
+          ports: [{8000, :http}],
+          container_disk_gb: 20
+        )
+
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["ports"] == ["8000/http"]
+      assert body["disk"] == 20
+    end
+
+    test "template_id with only container_disk_gb sends the disk and no ports" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, template_id: "t", container_disk_gb: 20)
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["disk"] == 20
+      refute Map.has_key?(body, "ports")
+    end
+
+    test "without template_id an empty ports list is still sent" do
+      req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+      {body, _} = Translate.compute_request_to_pod_create(req)
+      assert body["ports"] == []
+    end
+
     test "no volume_gb and no network_volume_id sends no mounts, so no /workspace volume" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x")
       {body, _} = Translate.compute_request_to_pod_create(req)
