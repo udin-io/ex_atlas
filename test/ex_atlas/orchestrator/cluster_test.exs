@@ -156,6 +156,30 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
 
+    test "a peer that cannot report its owner is warned about once, and reaping goes on",
+         %{reaper: reaper, node_b: node_b} do
+      :ok = Cluster.unload_ownership!(node_b)
+      {:ok, compute} = spawn_untracked("atlas-a-orphan")
+
+      log =
+        capture_log(fn ->
+          :ok = tick(reaper)
+          :ok = tick(reaper)
+        end)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert [_once] = Regex.scan(~r/\[warning\].*#{node_b} cannot report its :reap_owner/, log)
+    end
+
+    test "a peer that reports another owner is not warned about",
+         %{reaper: reaper, node_b: node_b} do
+      Cluster.put_orchestrator_env(node_b, reap_owner: "b")
+
+      log = capture_log(fn -> :ok = tick(reaper) end)
+
+      refute log =~ "cannot report its :reap_owner"
+    end
+
     test "a peer with a different owner leaves reaping on", %{reaper: reaper, node_b: node_b} do
       Cluster.put_orchestrator_env(node_b, reap_owner: "b")
       {:ok, compute} = spawn_untracked("atlas-a-orphan")

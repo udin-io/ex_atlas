@@ -53,6 +53,24 @@ defmodule ExAtlas.Test.Cluster do
     :ok = :net_kernel.monitor_nodes(false)
   end
 
+  @doc """
+  Make the peer answer like a v0.7.0 node: `ExAtlas.Orchestrator.Ownership`
+  is unloaded and its directory leaves the code path, so an `:erpc` call to it
+  raises `:undef` on the peer. Use it only on a peer that runs nothing else
+  from ex_atlas afterwards.
+  """
+  @spec unload_ownership!(node()) :: :ok
+  def unload_ownership!(node) do
+    module = ExAtlas.Orchestrator.Ownership
+    ebin = :erpc.call(node, :code, :which, [module]) |> Path.dirname() |> String.to_charlist()
+    true = :erpc.call(node, :code, :del_path, [ebin])
+    _ = :erpc.call(node, :code, :purge, [module])
+    _ = :erpc.call(node, :code, :delete, [module])
+    _ = :erpc.call(node, :code, :purge, [module])
+    false = :erpc.call(node, Code, :ensure_loaded?, [module])
+    :ok
+  end
+
   @doc "Merge `values` into the peer's `config :ex_atlas, :orchestrator`."
   @spec put_orchestrator_env(node(), keyword()) :: :ok
   def put_orchestrator_env(node, values) do

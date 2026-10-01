@@ -129,7 +129,12 @@ defmodule ExAtlas.Orchestrator.Reaper do
     schedule(config.interval)
 
     {:ok,
-     Map.merge(config, %{adoption: initial_adoption(), announced: nil, left_alone: MapSet.new()})}
+     Map.merge(config, %{
+       adoption: initial_adoption(),
+       announced: nil,
+       left_alone: MapSet.new(),
+       silent_peers: MapSet.new()
+     })}
   end
 
   # With no tracking store there is nothing to adopt and nothing to wait for,
@@ -141,8 +146,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
   @impl true
   def handle_info(:reap, state) do
     schedule(state.interval)
+    {result, silent} = gate(state)
+    state = warn_silent_once(state, silent)
 
-    case gate(state) do
+    case result do
       {:ok, owner} ->
         left_alone =
           Enum.reduce(state.providers, state.left_alone, fn provider, seen ->
@@ -168,36 +175,60 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # Adoption has not run yet, or could not: every adoptable resource looks
   # like an orphan. Then the owner: a node that cannot tell its own pods from
   # another node's must not delete any.
-  defp gate(%{adoption: :pending}), do: {:closed, :adoption_pending}
-  defp gate(%{adoption: :failed}), do: {:closed, :adoption_failed}
+  #
+  # Each gate returns its result and the connected nodes that could not report
+  # their owner, which are warned about but never stop reaping.
+  defp gate(%{adoption: :pending}), do: {{:closed, :adoption_pending}, []}
+  defp gate(%{adoption: :failed}), do: {{:closed, :adoption_failed}, []}
   defp gate(_state), do: ownership_gate(Ownership.owner())
 
-  defp ownership_gate({:error, error}), do: {:closed, {:invalid_owner, error}}
+  defp ownership_gate({:error, error}), do: {{:closed, {:invalid_owner, error}}, []}
 
   defp ownership_gate({:ok, nil}) do
-    if Node.list() == [], do: {:ok, nil}, else: {:closed, :clustered_without_owner}
+    if Node.list() == [],
+      do: {{:ok, nil}, []},
+      else: {{:closed, :clustered_without_owner}, []}
   end
 
   defp ownership_gate({:ok, owner}) do
-    case peers_with_owner(owner) do
-      [] -> {:ok, owner}
-      nodes -> {:closed, {:duplicate_owner, owner, nodes}}
+    %{same: same, silent: silent} = ask_peers(owner)
+
+    case same do
+      [] -> {{:ok, owner}, silent}
+      nodes -> {{:closed, {:duplicate_owner, owner, nodes}}, silent}
     end
   end
 
-  # Two nodes with one owner each read the other's pods as their own. A peer
-  # that cannot answer (an older ex_atlas, a timeout) is not counted: only a
-  # reported match stops reaping.
-  defp peers_with_owner(owner) do
+  # Two nodes with one owner each read the other's pods as their own. Only a
+  # reported match stops reaping. A peer that cannot answer (an ex_atlas older
+  # than v0.8.0, a timeout) is `:silent`: it cannot be checked, and a v0.7.0
+  # node is exactly the one that deletes this node's pods.
+  defp ask_peers(owner) do
     peers = Enum.sort(Node.list())
 
     peers
     |> :erpc.multicall(Ownership, :owner, [], @peer_owner_timeout_ms)
     |> Enum.zip(peers)
-    |> Enum.flat_map(fn
-      {{:ok, {:ok, ^owner}}, node} -> [node]
-      _other -> []
+    |> Enum.reduce(%{same: [], silent: []}, fn
+      {{:ok, {:ok, ^owner}}, node}, acc -> %{acc | same: acc.same ++ [node]}
+      {{:error, _reason}, node}, acc -> %{acc | silent: acc.silent ++ [node]}
+      _answered, acc -> acc
     end)
+  end
+
+  defp warn_silent_once(state, silent) do
+    new = Enum.reject(silent, &MapSet.member?(state.silent_peers, &1))
+    Enum.each(new, &warn_silent/1)
+    %{state | silent_peers: MapSet.union(state.silent_peers, MapSet.new(new))}
+  end
+
+  defp warn_silent(node) do
+    Logger.warning(
+      "[ExAtlas.Orchestrator.Reaper] connected node #{node} cannot report its :reap_owner " <>
+        "(an ex_atlas older than v0.8.0, or no answer within #{@peer_owner_timeout_ms} ms), " <>
+        "so it cannot be checked for a duplicate owner. A v0.7.0 node deletes this node's " <>
+        "pods: finish the two-deploy upgrade in the CHANGELOG."
+    )
   end
 
   # Once per state change, not once per tick: an operator needs to know the
@@ -258,7 +289,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
   def reap_now(prefix \\ "atlas-", providers \\ [:runpod]) do
     grace_ms = config().grace_ms
 
-    case ownership_gate(Ownership.owner()) do
+    {result, silent} = ownership_gate(Ownership.owner())
+    Enum.each(silent, &warn_silent/1)
+
+    case result do
       {:ok, owner} ->
         Enum.each(providers, &reap_provider(&1, prefix, grace_ms, owner, MapSet.new()))
 
