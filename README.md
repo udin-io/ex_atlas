@@ -89,7 +89,9 @@ end
 ```
 
 …then run `mix ex_atlas.install` once to wire config defaults, or configure
-things yourself (see [Configuration](#configuration)).
+things yourself (see [Configuration](#configuration)). Add
+`--tracking-store ecto` to keep `persist: true` tasks in your Ecto repo (see
+"In your own database").
 
 For the optional orchestrator + LiveDashboard features, also include:
 
@@ -1331,8 +1333,8 @@ Seven things to know before you rely on it:
   is five callbacks; implement it against Postgres or anything else you already
   trust to survive a deploy, and set
   `config :ex_atlas, :orchestrator, tracking_store: MyApp.AtlasStore`. The
-  shared conformance suite in `test/support` gives your implementation the
-  contract tests for free.
+  shared conformance suite, `ExAtlas.Orchestrator.TrackingStoreConformance`,
+  gives your implementation the contract tests for free.
 - **A shared store needs a `:reap_owner` on every node.** Each record carries
   its spawning node's owner, and a node adopts only its own records. A record
   of another owner stays untouched and the boot logs its id. The first node to
@@ -1375,13 +1377,25 @@ it at boot, so the orchestrator must start after the repo: you start
 `ExAtlas.Orchestrator.Supervisor` yourself instead of setting
 `start_orchestrator: true`.
 
+The installer writes all three pieces below; with several repos, name one
+with `--repo MyApp.Repo`. Run it again and it changes nothing.
+
+```sh
+mix ex_atlas.install --tracking-store ecto
+mix ecto.migrate
+```
+
+By hand, it is:
+
 ```elixir
-# config/runtime.exs
+# config/config.exs
 config :ex_atlas, start_orchestrator: false
 config :ex_atlas, :orchestrator,
   tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto,
-  repo: MyApp.Repo,
-  reap_owner: "web-1"
+  repo: MyApp.Repo
+
+# config/runtime.exs, when more than one machine shares the provider account
+config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
 
 # priv/repo/migrations/20261002000000_add_atlas_tracking.exs
 defmodule MyApp.Repo.Migrations.AddAtlasTracking do
@@ -1681,7 +1695,7 @@ mix docs              # verify docstrings render
 ```
 
 For new providers, the shared conformance suite
-(`test/support/provider_conformance.ex`) must pass against your module.
+(`lib/ex_atlas/test/provider_conformance.ex`) must pass against your module.
 
 ## License
 

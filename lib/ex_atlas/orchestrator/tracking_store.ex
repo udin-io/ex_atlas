@@ -39,8 +39,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       def delete(id),       do: ...   # :ok
       def all,              do: ...   # {:ok, [record]} | {:error, term}
 
-  `test/support`'s `ExAtlas.Orchestrator.TrackingStoreConformance` is a shared
-  ExUnit suite your implementation can `use` to inherit the contract tests.
+  `ExAtlas.Orchestrator.TrackingStoreConformance` is a shared ExUnit suite
+  your implementation can `use` to inherit the contract tests.
+
+  `mix ex_atlas.install --tracking-store ecto` sets up the Ecto store: the
+  migration, the config, and the supervisor after the repo.
 
   Set `tracking_store: false` to disable persistence entirely; the orchestrator
   then behaves exactly as it did before this feature existed.

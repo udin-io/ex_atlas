@@ -182,6 +182,7 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.RespawnCredentials,
           ExAtlas.Orchestrator.TaskOutcome
         ],
+        Testing: [ExAtlas.Test.ProviderConformance, ExAtlas.Orchestrator.TrackingStoreConformance],
         "Mix tasks": [Mix.Tasks.ExAtlas.Install, Mix.Tasks.ExAtlas.Upgrade]
       ]
     ]

@@ -522,10 +522,15 @@ Six constraints worth knowing before you design around it:
 - A task with a non-empty `env:` adopts, but cannot respawn after the
   restart either. The record keeps the variable names, never the values.
 - The zero-config DETS store writes to the machine's own filesystem, which on
-  Fly **is not preserved across a deploy unless you attach a volume**. Point
+  Fly **is not preserved across a deploy unless you attach a volume**. Keep
+  the records in your Ecto repo instead: `mix ex_atlas.install
+  --tracking-store ecto` writes the migration, the config and
+  `ExAtlas.Orchestrator.Supervisor` after your repo (see the README's "In your
+  own database"). Or point
   `config :ex_atlas, :orchestrator, storage_path: "/data/ex_atlas"` at a mount,
-  or implement `ExAtlas.Orchestrator.TrackingStore` against your database — it
-  is five callbacks, and `test/support`'s conformance suite tests it for you.
+  or implement `ExAtlas.Orchestrator.TrackingStore` yourself: it is five
+  callbacks, and `ExAtlas.Orchestrator.TrackingStoreConformance` tests it for
+  you.
 - More than one machine on one provider account needs
   `config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")`
   (or another id unique per machine and stable across its restarts) on every
