@@ -127,6 +127,26 @@ defmodule ExAtlas.Test.FakeVast do
       json(conn, 200, %{"instances" => Agent.get(store, &Map.values/1), "next_token" => nil})
     end)
 
+    # `PUT {"state": "stopped" | "running"}`: a stopped instance reads
+    # `exited`, as Vast's docs say.
+    Bypass.stub(bypass, "PUT", "/api/v0/instances/:id", fn conn ->
+      id = List.last(conn.path_info)
+      {body, conn} = read_json(conn)
+
+      status =
+        case body["state"] do
+          "stopped" -> "exited"
+          "running" -> "running"
+        end
+
+      if Agent.get(store, &Map.has_key?(&1, id)) do
+        Agent.update(store, &update_in(&1[id], fn i -> Map.put(i, "actual_status", status) end))
+        json(conn, 200, %{"success" => true})
+      else
+        json(conn, 404, refused("not_found", "Instance not found"))
+      end
+    end)
+
     Bypass.stub(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
       id = List.last(conn.path_info)
 

@@ -14,4 +14,20 @@ defmodule ExAtlas.Providers.VastConformanceTest do
     assert {:error, %ExAtlas.Error{kind: :not_found}} =
              ExAtlas.get_compute(compute.id, [provider: :vast] ++ opts)
   end
+
+  test "stop reads :stopped, start reads :running, and an unknown id is :not_found", %{
+    call_opts: opts
+  } do
+    opts = [provider: :vast] ++ opts
+    {:ok, compute} = ExAtlas.spawn_compute([gpu: :rtx_4090, image: "test/image"] ++ opts)
+
+    assert :ok = ExAtlas.stop(compute.id, opts)
+    assert {:ok, %{status: :stopped}} = ExAtlas.get_compute(compute.id, opts)
+
+    assert :ok = ExAtlas.start(compute.id, opts)
+    assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, opts)
+
+    assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.stop("1", opts)
+    assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.start("1", opts)
+  end
 end

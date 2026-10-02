@@ -278,9 +278,127 @@ defmodule ExAtlas.Providers.VastTest do
   end
 
   describe "stop/2 and start/2" do
-    test "are :unsupported, with no request", %{opts: opts} do
-      assert {:error, %ExAtlas.Error{kind: :unsupported}} = ExAtlas.stop("1", opts)
-      assert {:error, %ExAtlas.Error{kind: :unsupported}} = ExAtlas.start("1", opts)
+    @echo "echo-probe-7c1d"
+
+    defp expect_state(bypass, respond) do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "PUT", "/api/v0/instances/28411907", fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:state_body, body})
+        respond.(conn)
+      end)
+    end
+
+    test "stop sends state: stopped to PUT /api/v0/instances/{id}/", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 200, %{"success" => true}))
+
+      assert :ok = ExAtlas.stop("28411907", opts)
+      assert_received {:state_body, %{"state" => "stopped"} = body}
+      assert map_size(body) == 1
+    end
+
+    test "start sends state: running", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 200, %{"success" => true}))
+
+      assert :ok = ExAtlas.start("28411907", opts)
+      assert_received {:state_body, %{"state" => "running"}}
+    end
+
+    test "a 2xx body without success: false is :ok", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 200, %{}))
+
+      assert :ok = ExAtlas.stop("28411907", opts)
+    end
+
+    test "an id is sent path-encoded", %{bypass: bypass, opts: opts} do
+      Bypass.expect_once(bypass, "PUT", "/api/v0/instances/a%2Fb", fn conn ->
+        json(conn, 200, %{"success" => true})
+      end)
+
+      assert :ok = ExAtlas.stop("a/b", opts)
+    end
+
+    test "a start the host cannot honor is :provider with Vast's code and no msg", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_state(bypass, fn conn ->
+        json(conn, 200, refused("resources_unavailable", "GPU rented out #{@echo}"))
+      end)
+
+      assert {:error,
+              %ExAtlas.Error{kind: :provider, raw: %{"error" => "resources_unavailable"}} = error} =
+               ExAtlas.start("28411907", opts)
+
+      assert error.message =~ "Vast refused the start (resources_unavailable)"
+      refute inspect(error) =~ @echo
+    end
+
+    test "a 4xx start refusal keeps its status and withholds msg", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 400, refused("invalid_args", "bad #{@echo}")))
+
+      assert {:error, %ExAtlas.Error{kind: :provider, status: 400} = error} =
+               ExAtlas.start("28411907", opts)
+
+      assert error.raw == %{"error" => "invalid_args"}
+      refute inspect(error, structs: false) =~ @echo
+    end
+
+    test "a stop refusal says stop, not start", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 400, refused("invalid_args", "x")))
+
+      assert {:error, %ExAtlas.Error{message: message}} = ExAtlas.stop("28411907", opts)
+      assert message =~ "Vast refused the stop"
+    end
+
+    test "a 404 is :not_found, with msg withheld", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 404, refused("not_found", "no #{@echo}")))
+
+      assert {:error, %ExAtlas.Error{kind: :not_found} = error} = ExAtlas.stop("28411907", opts)
+      refute inspect(error, structs: false) =~ @echo
+    end
+
+    test "a 401 keeps its kind", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 401, refused("auth_error", "key #{@echo}")))
+
+      assert {:error, %ExAtlas.Error{kind: :unauthorized} = error} =
+               ExAtlas.start("28411907", opts)
+
+      refute inspect(error, structs: false) =~ @echo
+    end
+
+    test "a 5xx withholds msg and is sent once", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, &json(&1, 500, refused(@echo, "boom #{@echo}")))
+
+      assert {:error, %ExAtlas.Error{kind: :provider, status: 500} = error} =
+               ExAtlas.stop("28411907", opts)
+
+      refute inspect(error, structs: false) =~ @echo
+    end
+
+    test "a body that is not JSON prints no echo", %{bypass: bypass, opts: opts} do
+      expect_state(bypass, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(200, ~s({"msg":"#{@echo}))
+      end)
+
+      assert {:error, %ExAtlas.Error{} = error} = ExAtlas.stop("28411907", opts)
+      refute inspect(error, structs: false) =~ @echo
+    end
+
+    test "a redirect is not followed", %{bypass: bypass, opts: opts} do
+      elsewhere = Bypass.open()
+      Bypass.down(elsewhere)
+
+      expect_state(bypass, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.resp(307, "")
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 307}} = ExAtlas.stop("28411907", opts)
     end
   end
 

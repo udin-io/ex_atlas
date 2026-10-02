@@ -52,8 +52,14 @@ defmodule ExAtlas.Providers.Vast do
   task also vanishes, which reads the same on spot capacity, so pass a
   `:callback` to a spot task you respawn (see `ExAtlas.Orchestrator.TaskOutcome`).
 
-  Not yet on Vast: `:template_id` and `:network_volume_id` are `:unsupported`,
-  and so are `stop/2` and `start/2`.
+  `stop/2` and `start/2` pause and resume an instance (`PUT` with
+  `state: "stopped"` or `"running"`). Both return `:ok` once Vast takes the
+  request; the instance reads `:stopped` or `:running` on the next
+  `get_compute/2`. A stopped instance still bills its disk. A `start` fails
+  when the host rented the GPU to someone else; the error carries Vast's
+  `error` code and never its `msg`, as for a refused rent.
+
+  Not yet on Vast: `:template_id` and `:network_volume_id` are `:unsupported`.
   """
 
   @behaviour ExAtlas.Provider
@@ -120,10 +126,10 @@ defmodule ExAtlas.Providers.Vast do
   end
 
   @impl true
-  def stop(_id, _ctx), do: unsupported("Vast stop/2 is not in this ExAtlas release")
+  def stop(id, ctx), do: set_state(ctx, id, :stopped, "stop")
 
   @impl true
-  def start(_id, _ctx), do: unsupported("Vast start/2 is not in this ExAtlas release")
+  def start(id, ctx), do: set_state(ctx, id, :running, "start")
 
   @impl true
   # Two searches per catalog GPU, on-demand and interruptible, four at a
@@ -161,6 +167,30 @@ defmodule ExAtlas.Providers.Vast do
       {^type, _canonical, {:error, _} = err}, _acc when on_error == :fail -> {:halt, err}
       _other, acc -> {:cont, acc}
     end)
+  end
+
+  # Idempotent, so a 429 retries; anything else answered or lost returns its
+  # error and the caller asks again. `:ok` means Vast took the request: the
+  # instance reads `exited` or `running` on the tracker's next poll.
+  defp set_state(ctx, id, state, verb) do
+    path = "/api/v0/instances/#{encode(id)}/"
+
+    case Client.put(ctx, path, Translate.state_body(state),
+           retry: &HTTP.retry_rate_limited/2,
+           redirect: false
+         ) do
+      {:ok, %{"success" => false} = body} ->
+        {:error, refused(body, 200, "Vast refused the #{verb}")}
+
+      {:ok, _} ->
+        :ok
+
+      {:error, %Error{status: status} = error} when is_integer(status) ->
+        {:error, withhold(error, "Vast refused the #{verb}", [:not_found])}
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   # --- spawn ---
@@ -287,7 +317,7 @@ defmodule ExAtlas.Providers.Vast do
          refused(other, 200, "Vast answered the rent with no instance id, and may have rented")}
 
       {:error, %Error{status: status} = error} when is_integer(status) ->
-        {:error, withhold(error)}
+        {:error, withhold(error, "Vast refused the rent", [])}
 
       {:error, _} = err ->
         err
@@ -296,12 +326,13 @@ defmodule ExAtlas.Providers.Vast do
 
   # Vast's `msg` can echo the request, `env` values included, as Lambda's
   # error text did (issue 84). An answered error keeps only Vast's `error`
-  # code. A 401, 403 or 429 keeps its kind; a 404 names the offer, not an
-  # instance, so it reads `:provider`.
-  defp withhold(%Error{kind: kind} = error) do
-    refused = refused(error.raw, error.status, "Vast refused the rent")
+  # code. A 401, 403 or 429 keeps its kind, and so does any kind in `keep`: a
+  # rent's 404 names the offer, not an instance, so it reads `:provider`, while
+  # a stop's 404 is `:not_found`.
+  defp withhold(%Error{kind: kind} = error, lead, keep) do
+    refused = refused(error.raw, error.status, lead)
 
-    if kind in [:unauthorized, :forbidden, :rate_limited],
+    if kind in [:unauthorized, :forbidden, :rate_limited | keep],
       do: %{refused | kind: kind},
       else: refused
   end

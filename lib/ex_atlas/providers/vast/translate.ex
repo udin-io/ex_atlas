@@ -171,6 +171,11 @@ defmodule ExAtlas.Providers.Vast.Translate do
 
   def priced(body, _request, _offer), do: body
 
+  @doc "The `PUT /api/v0/instances/{id}/` body that pauses or resumes an instance."
+  @spec state_body(:stopped | :running) :: map()
+  def state_body(state) when state in [:stopped, :running],
+    do: %{"state" => Atom.to_string(state)}
+
   @doc """
   The `PUT /api/v0/asks/{id}/` body. `env` values stay `ExAtlas.Secret`s
   until `Vast.Client.put/4` encodes them.
