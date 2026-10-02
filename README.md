@@ -502,8 +502,6 @@ ExAtlas.stream_job(job.id, provider: :runpod, endpoint: "abc123")
 # Today
 ExAtlas.spawn_compute(provider: :runpod,      gpu: :h100, image: "...")
 ExAtlas.spawn_compute(provider: :lambda_labs, gpu: :h100, image: "...")
-
-# Planned
 ExAtlas.spawn_compute(provider: :vast,        gpu: :rtx_4090, image: "...")
 
 # Your in-house cloud, today:
@@ -565,12 +563,12 @@ config :ex_atlas, :orchestrator,
 | `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
 | `:fly`        | `ExAtlas.Providers.Fly`            | stub            | `:http_proxy, :raw_tcp, :global_networking`                                         |
 | `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.8 (compute)  | `:raw_tcp`                                                                          |
-| `:vast`       | `ExAtlas.Providers.Vast`           | stub            | `:spot, :raw_tcp`                                                                   |
+| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:raw_tcp`                                                                     |
 | `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
-Stub modules return `{:error, %ExAtlas.Error{kind: :unsupported}}` from every
-non-`capabilities/0` callback so the name is reserved and callers get a clear
-error — no `FunctionClauseError`s.
+The `:fly` stub returns `{:error, %ExAtlas.Error{kind: :unsupported}}` from
+every non-`capabilities/0` callback so the name is reserved and callers get a
+clear error — no `FunctionClauseError`s.
 
 ### Lambda Labs
 
@@ -622,6 +620,44 @@ compute.ports
   each value for `docker run` on the host, where docker and the loader read
   them. So are names bash keeps for itself (`UID`, `RANDOM`, `BASH_*`).
 
+### Vast.ai
+
+Vast is a marketplace of hosts. A spawn searches Vast's on-demand offers for
+`gpu:`, `gpu_count:`, `container_disk_gb:` (default 20) and enough open ports,
+rents the cheapest, and runs your `image` with its own entrypoint, passing
+`env:`, `s3:`, `auth:` and `ports:`.
+
+```elixir
+{:ok, compute} =
+  ExAtlas.spawn_compute(
+    provider: :vast,
+    gpu: :rtx_4090,          # "RTX 4090"; :h100 matches H100 SXM, PCIE and NVL
+    image: "vllm/vllm-openai:latest",
+    ports: [{8000, :http}],
+    region_hints: ["US"],    # country codes
+    auth: :bearer
+  )
+# => %Compute{status: :provisioning, cost_per_hour: 0.42, region: "Texas, US"}
+
+{:ok, compute} = ExAtlas.get_compute(compute.id, provider: :vast)
+compute.ports
+# => [%{internal: 8000, external: 41234, protocol: :http, url: "http://203.0.113.7:41234"}]
+```
+
+- Vast maps each container port to a random host port. The URL is `nil`
+  until Vast reports the mapping.
+- The spawn rents in the first of `region_hints` that has an offer, else the
+  cheapest anywhere. `cloud_type: :secure` rents datacenter hosts only.
+  `provider_opts: %{offer_id: id}` rents that offer with no search.
+- A refused rent tries the next of the three cheapest offers. A rent that
+  answers 5xx or times out may have rented, so the spawn returns its error
+  and tries nothing else: check `list_compute(name: ...)`.
+- `env:` names must match `[A-Za-z_][A-Za-z0-9_]*`: Vast reads other names
+  as Docker flags. `ATLAS_PORTS` is ExAtlas's own.
+- `command:`, `spot: true`, `template_id:`, `network_volume_id:`, `stop/2`
+  and `start/2` return `:unsupported` for now; the Reaper does not cover
+  Vast yet.
+
 ### Canonical GPU atoms
 
 ExAtlas refers to GPUs by stable atoms. `ExAtlas.Spec.GpuCatalog` maps each atom
@@ -629,15 +665,15 @@ to each provider's native identifier.
 
 | Canonical           | RunPod                           | Lambda Labs              | Fly.io            | Vast.ai        |
 | ------------------- | -------------------------------- | ------------------------ | ----------------- | -------------- |
-| `:h200`             | `"NVIDIA H200"`                  | —                        | —                 | `"H200"`       |
-| `:h100`             | `"NVIDIA H100 80GB HBM3"`        | `"gpu_1x_h100_pcie"`     | —                 | `"H100"`       |
-| `:a100_80g`         | `"NVIDIA A100 80GB PCIe"`        | `"gpu_1x_a100_80gb_sxm4"`| `"a100-80gb"`     | `"A100_80GB"`  |
-| `:a100_40g`         | `"NVIDIA A100-SXM4-40GB"`        | `"gpu_1x_a100_sxm4"`     | `"a100-pcie-40gb"`| `"A100"`       |
-| `:l40s`             | `"NVIDIA L40S"`                  | —                        | `"l40s"`          | —              |
-| `:l4`               | `"NVIDIA L4"`                    | —                        | —                 | —              |
-| `:a6000`            | `"NVIDIA RTX A6000"`             | `"gpu_1x_a6000"`         | —                 | `"RTX_A6000"`  |
-| `:rtx_4090`         | `"NVIDIA GeForce RTX 4090"`      | —                        | —                 | `"RTX_4090"`   |
-| `:rtx_3090`         | `"NVIDIA GeForce RTX 3090"`      | —                        | —                 | `"RTX_3090"`   |
+| `:h200`             | `"NVIDIA H200"`                  | —                        | —                 | `"H200"`, `"H200 NVL"` |
+| `:h100`             | `"NVIDIA H100 80GB HBM3"`        | `"gpu_1x_h100_pcie"`     | —                 | `"H100 SXM"`, `"H100 PCIE"`, `"H100 NVL"` |
+| `:a100_80g`         | `"NVIDIA A100 80GB PCIe"`        | `"gpu_1x_a100_80gb_sxm4"`| `"a100-80gb"`     | `"A100 SXM4"`, `"A100 PCIE"`, 70 GB or more |
+| `:a100_40g`         | `"NVIDIA A100-SXM4-40GB"`        | `"gpu_1x_a100_sxm4"`     | `"a100-pcie-40gb"`| `"A100 SXM4"`, `"A100 PCIE"`, under 70 GB |
+| `:l40s`             | `"NVIDIA L40S"`                  | —                        | `"l40s"`          | `"L40S"`       |
+| `:l4`               | `"NVIDIA L4"`                    | —                        | —                 | `"L4"`         |
+| `:a6000`            | `"NVIDIA RTX A6000"`             | `"gpu_1x_a6000"`         | —                 | `"RTX A6000"`  |
+| `:rtx_4090`         | `"NVIDIA GeForce RTX 4090"`      | —                        | —                 | `"RTX 4090"`   |
+| `:rtx_3090`         | `"NVIDIA GeForce RTX 3090"`      | —                        | —                 | `"RTX 3090"`   |
 | `:mi300x`           | `"AMD Instinct MI300X OAM"`      | —                        | —                 | —              |
 
 See `ExAtlas.Spec.GpuCatalog` for the full mapping.
@@ -1539,7 +1575,10 @@ mandate Req — it's an implementation choice of the bundled providers.
   [Upgrading](guides/upgrading.md).
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
-- Vast.ai.
+- **Unreleased** — Vast.ai compute: spawn, get, list, terminate and GPU types
+  for on-demand offers (#99). Next on Vast: `command:` and `run_task/1`,
+  interruptible offers with `spot: true`, then `stop/2`, `start/2` and the
+  bill (#98).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.

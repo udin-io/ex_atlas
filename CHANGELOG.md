@@ -7,6 +7,35 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: Vast.ai compute provider, on-demand (#99)
+
+`provider: :vast` spawns, reads, lists and terminates Vast.ai on-demand
+instances, and `list_gpu_types/1` reads Vast's offers.
+
+- A spawn searches Vast's on-demand offers (`POST /api/v0/bundles/`) for the
+  GPU, count, disk (`container_disk_gb:`, default 20) and port count, and
+  rents the cheapest (`PUT /api/v0/asks/{id}/`) in the first of
+  `region_hints` (country codes) that has one. It runs `image:` with its own
+  entrypoint, with `env:`, `s3:`, `auth:` and `ports:` in Vast's `env`
+  object. `cloud_type: :secure` rents datacenter hosts only.
+  `provider_opts: %{offer_id: id}` rents one offer with no search.
+- A refused rent tries the next of the three cheapest offers. A rent that
+  answers 5xx or times out is never retried: Vast may have rented.
+- `get_compute/2` builds `http://ip:host_port` URLs from Vast's port map.
+  `exited` reads `:stopped`; `offline` and `unknown` read `:failed`; a missing
+  instance is `:not_found`. `list_compute/1` follows Vast's `next_token`.
+- `raw` keeps only instance fields that hold no secret: Vast's body echoes
+  the env (`extra_env`, `onstart`), the container's arguments and the Jupyter
+  token. A refused rent keeps Vast's `error` code, when it is one, and
+  withholds its `msg`, which can echo the request. The rent follows no
+  redirect, which would resend the env to another host.
+- An `env:` name that is not `[A-Za-z_][A-Za-z0-9_]*`, or a value that holds
+  a NUL byte or is not UTF-8, is `:validation`: Vast reads other names as
+  Docker flags.
+- `command:`, `spot: true`, `template_id:`, `network_volume_id:`, `stop/2`
+  and `start/2` return `:unsupported`. `capabilities/0` drops `:spot` until
+  interruptible offers land.
+
 ### Fixed: a late report from a replaced pod no longer ends the replacement (#100)
 
 Each pod's callback token now signs its attempt: 0 for the first pod, `n` for
@@ -26,6 +55,17 @@ nothing; move a hand-rolled controller to the claims form:
 A pod rented by 0.8.0 holds a token with no attempt. It is accepted
 unchecked, so its late report after a respawn still ends the replacement,
 until those pods end.
+
+### Fixed: provider responses and the Vast GPU names (#99)
+
+- `Spec.GpuCatalog`'s `:vast` names are Vast's spaced names, one list per
+  family (`:h100` is `H100 SXM`, `H100 PCIE` and `H100 NVL`).
+  `for_provider(gpu, :vast)` returns that list. The old underscore names
+  (`RTX_4090`) matched no offer.
+- A response body Req cannot decode as JSON no longer reaches the error's
+  `raw`, on every provider: it can echo the request.
+- A Lambda launch follows no redirect, which would resend `user_data`, env
+  values included, to another host.
 
 ## v0.8.0 — 2026-10-02
 

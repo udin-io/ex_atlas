@@ -5,6 +5,21 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Vast.ai provider (feature #98)
+
+| Decision | Alternative not taken | Where |
+|---|---|---|
+| Rent the cheapest of the first 3 matching offers, the next on a refusing 4xx | Rent only the first: offers are taken within seconds | #99 |
+| Never retry a rent after a 5xx or a timeout | Retry as a read does: a second GPU nothing tracks | #99 |
+| A refused rent keeps Vast's `error` code and withholds `msg` | Pass the message through: it can echo `env` | #99 |
+| `raw` keeps an allow-list of instance fields | Drop `extra_env`, `onstart` and `jupyter_token`: `image_args` and any field Vast adds later would pass, on instances ExAtlas did not start too | #99 |
+| A rent and a Lambda launch follow no redirect | Req's default, which resends the body to the `Location` host | #99 |
+| `runtype: "args"` with no `args` | `ssh`, vast-cli's default, which replaces the image's entrypoint | #99 |
+| `env` as a JSON object, names limited to `[A-Za-z_][A-Za-z0-9_]*` | The Docker-flag string the reference shows; a free name is a Docker flag | #99 |
+| `cancel_unavail: true` on every rent | Vast's default, which can create a stopped instance that bills its disk | #99 |
+| `ATLAS_PORTS` in the container env records each port's protocol | Read every port as `:tcp`: Vast's port map holds numbers only | #99 |
+| `list_gpu_types/1` searches once per catalog GPU | One search: Vast returns at most 64 offers, the cheapest few GPUs | #99 |
+
 ## Docs build (#92)
 
 | Decision | Alternative not taken | Where |
