@@ -17,7 +17,9 @@ defmodule ExAtlas.Provider do
 
   `ctx.api_key` is an `ExAtlas.Secret` or `nil`. Call `ExAtlas.Secret.reveal/1`
   only where the HTTP client reads the key: a crash in any frame that holds
-  the ctx then prints `#ExAtlas.Secret<redacted>`.
+  the ctx then prints `#ExAtlas.Secret<redacted>`. The `:auth`, `:headers`
+  and `:aws_sigv4` entries of `ctx.req_options` are Secrets too;
+  `ExAtlas.Config.reveal_req_options/1` unwraps them.
 
   ## Capabilities
 

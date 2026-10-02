@@ -294,6 +294,22 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute log =~ @api_key
     end
 
+    test "a function clause crash prints no req_options :auth or :headers" do
+      header_secret = "hdr-tracker-probe-2b9d"
+
+      {:ok, pid, compute} =
+        spawn_tracked(
+          req_options: [auth: {:bearer, @api_key}, headers: [{"x-api-key", header_secret}]]
+        )
+
+      log = clause_crash_log(pid)
+
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute log =~ @api_key
+      refute log =~ header_secret
+    end
+
     test "control: the tracker's polls still hand the per-call key to the provider" do
       Application.put_env(:ex_atlas, :key_echo_pid, self())
       on_exit(fn -> Application.delete_env(:ex_atlas, :key_echo_pid) end)

@@ -71,6 +71,41 @@ defmodule ExAtlas.CredentialRedactionTest do
       refute text =~ @key
     end
 
+    test "prints no req_options :auth or :headers" do
+      header_secret = "hdr-redaction-probe-8e2a"
+
+      text =
+        crash_text(fn ->
+          ExAtlas.get_compute("pod-1",
+            provider: ClauseProvider,
+            req_options: [
+              auth: {:bearer, @key},
+              headers: [{"x-api-key", header_secret}],
+              aws_sigv4: [access_key_id: "AKIDPROBE", secret_access_key: "sigv4-probe-61aa"]
+            ]
+          )
+        end)
+
+      assert text =~ "lookup(\"pod-1\""
+      refute text =~ @key
+      refute text =~ header_secret
+      refute text =~ "sigv4-probe-61aa"
+    end
+
+    test "a req_options that is not a keyword list is refused by name, unprinted" do
+      text =
+        crash_text(fn ->
+          ExAtlas.get_compute("pod-1",
+            provider: ClauseProvider,
+            req_options: %{auth: {:bearer, @key}}
+          )
+        end)
+
+      assert text =~ "NimbleOptions.ValidationError"
+      assert text =~ ":req_options"
+      refute text =~ @key
+    end
+
     test "control: the provider still receives the per-call key" do
       ExAtlas.get_compute("echo", provider: ClauseProvider, api_key: @key)
 
@@ -115,6 +150,35 @@ defmodule ExAtlas.CredentialRedactionTest do
       refute Exception.message(error) =~ "sk-charlist-probe-41b0"
       {:ok, computes} = ExAtlas.list_compute(provider: :mock)
       refute Enum.any?(computes, &(&1.image == "x-api-key-invalid"))
+    end
+  end
+
+  describe "the RunPod client" do
+    setup do
+      bypass = Bypass.open()
+      {:ok, bypass: bypass, base_url: "http://localhost:#{bypass.port}"}
+    end
+
+    test "control: sends req_options :headers and :auth as given", %{
+      bypass: bypass,
+      base_url: base_url
+    } do
+      Bypass.expect_once(bypass, "GET", "/pods/pod-1", fn conn ->
+        assert ["Bearer from-req-options"] = Plug.Conn.get_req_header(conn, "authorization")
+        assert ["probe-value"] = Plug.Conn.get_req_header(conn, "x-probe")
+        Plug.Conn.resp(conn, 404, "")
+      end)
+
+      ExAtlas.get_compute("pod-1",
+        provider: :runpod,
+        api_key: @key,
+        base_url: base_url,
+        req_options: [
+          retry: false,
+          auth: {:bearer, "from-req-options"},
+          headers: [{"x-probe", "probe-value"}]
+        ]
+      )
     end
   end
 end

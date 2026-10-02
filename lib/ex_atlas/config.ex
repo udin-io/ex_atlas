@@ -56,25 +56,51 @@ defmodule ExAtlas.Config do
   # passed through to the ctx verbatim.
   @resolved_opts [:provider, :api_key, :base_url, :req_options]
 
+  # Req options that carry a credential: the `authorization` header, any
+  # hand-rolled header, and AWS signing keys.
+  @secret_req_options [:auth, :headers, :aws_sigv4]
+
   @type opts :: keyword()
 
   @doc """
   Wrap the credentials in `opts` in `ExAtlas.Secret`, so no stacktrace that
-  carries `opts` prints them.
+  carries `opts` prints them: `:api_key`, and the
+  `#{inspect(@secret_req_options)}` entries of `:req_options`.
 
   `ExAtlas.Orchestrator.spawn/1` runs this before anything else reads its
   opts; `build_ctx/2` runs it for every provider call. An `:api_key` that is
-  not a string, or an `ExAtlas.Secret` of one, is an error with `key: :api_key`
-  and `value: nil`, so no message prints it.
+  not a string or an `ExAtlas.Secret` of one, or a `:req_options` that is not
+  a keyword list, is a `NimbleOptions.ValidationError` with `value: nil`, so
+  no message prints it.
   """
   @spec seal_credentials(opts()) :: {:ok, opts()} | {:error, NimbleOptions.ValidationError.t()}
   def seal_credentials(opts) do
-    case Keyword.fetch(opts, :api_key) do
+    with {:ok, opts} <- seal(opts, :api_key, &seal_api_key/1) do
+      seal(opts, :req_options, &seal_req_options/1)
+    end
+  end
+
+  @doc """
+  `req_options` with its `#{inspect(@secret_req_options)}` entries unwrapped,
+  for the HTTP client to read. A provider calls this where it builds the
+  request, and nowhere else.
+  """
+  @spec reveal_req_options(keyword()) :: keyword()
+  def reveal_req_options(req_options) do
+    Enum.map(req_options, fn {key, value} -> {key, Secret.reveal(value)} end)
+  end
+
+  @doc "The `req_options` entries that can carry a credential."
+  @spec secret_req_options() :: [atom()]
+  def secret_req_options, do: @secret_req_options
+
+  defp seal(opts, key, seal_fun) do
+    case Keyword.fetch(opts, key) do
       :error ->
         {:ok, opts}
 
-      {:ok, key} ->
-        with {:ok, secret} <- seal_api_key(key), do: {:ok, Keyword.put(opts, :api_key, secret)}
+      {:ok, value} ->
+        with {:ok, sealed} <- seal_fun.(value), do: {:ok, Keyword.put(opts, key, sealed)}
     end
   end
 
@@ -82,18 +108,31 @@ defmodule ExAtlas.Config do
     secret = Secret.wrap(key)
 
     case Secret.reveal(secret) do
-      value when is_binary(value) or is_nil(value) ->
-        {:ok, secret}
-
-      _other ->
-        {:error,
-         %NimbleOptions.ValidationError{
-           key: :api_key,
-           value: nil,
-           message:
-             "invalid value for :api_key option: expected a string or an ExAtlas.Secret of one"
-         }}
+      value when is_binary(value) or is_nil(value) -> {:ok, secret}
+      _other -> invalid(:api_key, "expected a string or an ExAtlas.Secret of one")
     end
+  end
+
+  defp seal_req_options(req_options) do
+    if is_list(req_options) and Keyword.keyword?(req_options) do
+      {:ok, Enum.map(req_options, &seal_req_option/1)}
+    else
+      invalid(:req_options, "expected a keyword list")
+    end
+  end
+
+  defp seal_req_option({key, value}) when key in @secret_req_options,
+    do: {key, Secret.wrap(value)}
+
+  defp seal_req_option(pair), do: pair
+
+  defp invalid(key, detail) do
+    {:error,
+     %NimbleOptions.ValidationError{
+       key: key,
+       value: nil,
+       message: "invalid value for #{inspect(key)} option: #{detail}"
+     }}
   end
 
   @doc "Pop `:provider` from opts and return `{provider_atom_or_module, remaining_opts}`."

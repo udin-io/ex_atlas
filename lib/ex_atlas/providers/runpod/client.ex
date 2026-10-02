@@ -182,7 +182,7 @@ defmodule ExAtlas.Providers.RunPod.Client do
   defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
 
   defp merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
-    Req.merge(req, opts)
+    Req.merge(req, ExAtlas.Config.reveal_req_options(opts))
   end
 
   defp merge_user_options(req, _ctx), do: req
