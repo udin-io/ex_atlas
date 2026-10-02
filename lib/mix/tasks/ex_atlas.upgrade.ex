@@ -39,13 +39,10 @@ if Code.ensure_loaded?(Igniter) do
     use Igniter.Mix.Task
 
     alias Igniter.Code.Common
-    alias Igniter.Code.Function
-    alias Igniter.Code.Keyword, as: IgniterKeyword
-    alias Igniter.Project.Config
+    alias Mix.ExAtlas.OrchestratorConfig
     alias Sourceror.Zipper
 
     @guide_url "https://hexdocs.pm/ex_atlas/upgrading.html"
-    @config_files ["config.exs", "runtime.exs", "prod.exs"]
 
     # The version of the installed dep, read from its own mix.exs when it
     # compiles. `Application.spec/2` returns nothing while the app is not loaded.
@@ -109,7 +106,7 @@ if Code.ensure_loaded?(Igniter) do
     defp upgrade_0_7_to_0_8(igniter, _opts) do
       igniter
       |> warn_provider_modules()
-      |> notice_reap_owner()
+      |> OrchestratorConfig.notice_reap_owner()
       |> Igniter.add_notice("Upgrading to 0.8.0: #{@guide_url}")
     end
 
@@ -152,60 +149,6 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp behaviour_equals?(_zipper, _expected), do: false
-
-    defp notice_reap_owner(igniter) do
-      igniter = Enum.reduce(@config_files, igniter, &include_config/2)
-
-      if Enum.any?(@config_files, &starts_orchestrator?(igniter, &1)) and
-           not Enum.any?(@config_files, &sets_reap_owner?(igniter, &1)) do
-        Igniter.add_notice(igniter, """
-        Your config sets `start_orchestrator: true` and no `:reap_owner`. One machine \
-        on the account needs nothing. In a cluster, set \
-        `config :ex_atlas, :orchestrator, reap_owner: ...` on every node, or no node \
-        reaps pods the others spawned. See #{@guide_url}
-        """)
-      else
-        igniter
-      end
-    end
-
-    defp include_config(file, igniter) do
-      Igniter.include_existing_file(igniter, Path.join("config", file), required?: false)
-    end
-
-    defp sets_reap_owner?(igniter, file) do
-      Config.configures_key?(igniter, file, :ex_atlas, [:orchestrator, :reap_owner])
-    end
-
-    defp starts_orchestrator?(igniter, file) do
-      case Rewrite.source(igniter.rewrite, Path.join("config", file)) do
-        {:ok, source} ->
-          zipper = source |> Rewrite.Source.get(:quoted) |> Zipper.zip()
-
-          case Function.move_to_function_call_in_current_scope(
-                 zipper,
-                 :config,
-                 2,
-                 &start_orchestrator?/1
-               ) do
-            {:ok, _call} -> true
-            :error -> false
-          end
-
-        _ ->
-          false
-      end
-    end
-
-    defp start_orchestrator?(call) do
-      Function.argument_equals?(call, 0, :ex_atlas) and
-        Function.argument_matches_predicate?(call, 1, fn options ->
-          case IgniterKeyword.get_key(options, :start_orchestrator) do
-            {:ok, value} -> Common.nodes_equal?(Zipper.node(value), true)
-            :error -> false
-          end
-        end)
-    end
   end
 else
   defmodule Mix.Tasks.ExAtlas.Upgrade do
