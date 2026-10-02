@@ -45,8 +45,10 @@ so `ci` stays red until cowlib ships a fix.
 - **Symptom:** every PR's `ci` check fails at `hex.audit`, and CI never runs
   sobelow or `mix test`. The local `bin/ci` is then the only full run: report
   its test count and exit code, and say CI never reached the later steps.
-- **Local runs differ:** Hex 2.4 prints retirements only (#55), so local
-  `hex.audit` passes. A local pass does not cover that step.
+- **Local `bin/ci` stops there too** with Hex 2.5 (Hex 2.4 printed
+  retirements only, #55). Run every step after `hex.audit` by hand: `mix
+  sobelow --config`, the sobelow callback gate, `mix test`. Report each with
+  its count and exit code.
 - Never add `--ignore-advisory-ids`, an ignore file or a skip to make it
   green.
 
