@@ -515,6 +515,8 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
 
     test "scrub_keys: [:env] stores the bare marker, never nothing" do
+      # `start!/1` clears the orchestrator config when the test exits.
+      ExAtlas.Test.Orchestrator.start!()
       ExAtlas.Test.Orchestrator.put_env(scrub_keys: [:env])
 
       scrubbed = TrackingStore.scrub_opts(env: %{"HF_TOKEN" => "hf-scrub-probe-1a7c"}, image: "x")
