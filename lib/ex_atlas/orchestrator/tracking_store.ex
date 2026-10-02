@@ -198,9 +198,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     * A record with no owner (version 1, or written by a node with no
       `:reap_owner`) is claimed by the first node that adopts it, which writes
       its own owner into it.
-    * A dead owner's pods and records stay until an operator deletes them. "Node
-      A died, node B takes over" needs leases with expiry and is not solved
-      here.
+    * A dead owner's records stay until another node takes them over. A store
+      that implements `c:renew_lease/2` and `c:claim_expired/3` (the Ecto
+      store does) lets a live node adopt the signed records of an owner whose
+      lease expired; see `ExAtlas.Orchestrator.Lease`. With any other store,
+      a dead owner's pods and records stay until an operator deletes them.
 
   A store that maps record fields to columns needs a nullable `owner` column.
   Without it every record comes back unowned, and every node adopts it. It

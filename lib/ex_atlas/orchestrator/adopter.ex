@@ -61,7 +61,9 @@ defmodule ExAtlas.Orchestrator.Adopter do
       sent to the provider: a node with a wrong key sees 404 for every pod, and
       deleting the record of a live pod would let its owner's Reaper delete the
       pod after that owner's next restart. One info line per other owner lists
-      its ids. A dead owner's pods and records stay until an operator deletes
+      its ids. When that owner's lease expires, `ExAtlas.Orchestrator.Lease`
+      takes its signed records over and adopts them through `adopt_claimed/3`;
+      with a store that has no leases, they stay until an operator deletes
       them.
     * **An unowned record** (version 1, or a node that had no `:reap_owner`) is
       claimed by the first node to adopt it, which writes its own owner into the
@@ -158,7 +160,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
     Logger.info(
       "[ExAtlas.Orchestrator.Adopter] leaving #{length(ids)} record(s) of owner #{inspect(owner)} " <>
         "in the store, untracked on this node: #{Enum.map_join(ids, ", ", &inspect/1)}. Their owner adopts them. " <>
-        "If that node is gone, delete the pods and records by hand."
+        "If that node is gone, a node with leases (the Ecto store) takes them over once its " <>
+        "lease expires; otherwise delete the pods and records by hand."
     )
   end
 

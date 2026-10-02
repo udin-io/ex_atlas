@@ -62,6 +62,17 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     Postgres and SQLite work; MySQL does not, since its upsert takes no
     conflict target.
 
+    ## Owner leases
+
+    Migration step 2 adds `atlas_owner_leases`, one row per `:reap_owner`.
+    With `:reap_owner` set, `ExAtlas.Orchestrator.Lease` renews this node's
+    row every `lease_ttl_ms / 3` (90 s by default) and takes over the signed
+    records of an owner whose lease expired. Each record is claimed by one
+    conditional `UPDATE` that re-checks the old owner and its expired lease,
+    so two live nodes never both adopt it. A host that ran step 1 adds a
+    migration calling `Migration.up(version: 2)`; until then the lease
+    renewal logs a warning every tick and claims nothing.
+
     ## What a row holds
 
     The whole record is one `:erlang.term_to_binary/1` blob in `record`, so

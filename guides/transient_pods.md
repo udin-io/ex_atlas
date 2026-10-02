@@ -537,9 +537,10 @@ Six constraints worth knowing before you design around it:
   machine. Without it, one machine's Reaper deletes another's live pods. See
   the README's "More than one node". A node adopts only the records that carry
   its own owner, so machines can share one database-backed store. Each boot
-  logs the ids of the other owners' records it leaves alone. A record from a
-  machine that never comes back stays, with its pod, until you delete both;
-  taking over another node's pods needs leases and is out of scope.
+  logs the ids of the other owners' records it leaves alone. With the Ecto
+  store, a live machine takes over the records of a machine that never comes
+  back once its lease expires (`lease_ttl_ms`, 90 s by default). With any
+  other store, such a record stays, with its pod, until you delete both.
 - A graceful stop (SIGTERM) keeps a persisted task's pod and record, unless
   its container already reported an exit code or its record is missing from
   the store; every other tracker deletes its pod. On Fly set `kill_signal = "SIGTERM"` (`fly launch` does for Phoenix)

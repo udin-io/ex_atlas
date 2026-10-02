@@ -15,7 +15,8 @@ defmodule ExAtlas.Application do
       `ExAtlas.Orchestrator.TrackingStore` — first, so it outlives the trackers
       that write to it from `terminate/2` — and, last, the
       `ExAtlas.Orchestrator.Adopter` that re-adopts persisted compute at boot
-      and releases the Reaper's gate.
+      and releases the Reaper's gate. A store with owner leases and a
+      `:reap_owner` add `ExAtlas.Orchestrator.Lease` after it.
 
       A host whose tracking store lives in its own repo starts the same tree
       itself, after the repo, with `ExAtlas.Orchestrator.Supervisor` and

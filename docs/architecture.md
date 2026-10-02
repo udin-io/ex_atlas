@@ -46,10 +46,11 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.UpstreamStatus` | Pure | Classifies a provider answer: `{:alive, _}`, `{:dead, reason, _}`, `{:poll_failed, _}` |
 | `Orchestrator.Timer` | Constants | `max_ms/0` (4,294,967,295) and `option_type/0` for every timer option |
 | `Orchestrator.Events` | Functions | PubSub broadcasts `{:atlas_compute, id, event}` |
-| `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`. Default `TrackingStore.Dets` |
-| `Orchestrator.TrackingStore.Ecto` | Functions, no process | Records as `term_to_binary` blobs in the host repo's `atlas_tracking_records`, decoded with `[:safe]`. `Ecto.Migration` creates the table |
+| `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`; optional `renew_lease/2` and `claim_expired/3`. Default `TrackingStore.Dets` |
+| `Orchestrator.TrackingStore.Ecto` | Functions, no process | Records as `term_to_binary` blobs in the host repo's `atlas_tracking_records`, decoded with `[:safe]`; owner leases in `atlas_owner_leases`. `Ecto.Migration` step 1 creates the records table, step 2 the lease table |
 | `Orchestrator.Supervisor` | `Supervisor` | The orchestrator's tree for a host to start after its repo; `children/0` is the one child list |
-| `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper |
+| `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper. `adopt_claimed/3` adopts records a Lease claimed, the same way |
+| `Orchestrator.Lease` | `GenServer`, only with a lease store and `:reap_owner` | Every `lease_ttl_ms / 3`, renews this node's lease, then claims and adopts the signed records of owners whose lease expired |
 | `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
 | `Orchestrator.Ownership` | Functions | Reads and validates `reap_owner`; stamps it into pod names |
@@ -58,7 +59,8 @@ database and no web UI. It runs inside the host application's VM.
 
 Start order (`ExAtlas.Orchestrator.Supervisor.children/0`): the tracking
 store, `ComputeRegistry`, the `Task.Supervisor` for polls, `ComputeSupervisor`,
-`Callback.Limiter`, `Phoenix.PubSub` (when loaded), `Reaper`, `Adopter`.
+`Callback.Limiter`, `Phoenix.PubSub` (when loaded), `Reaper`, `Adopter`, and
+`Lease` when the store implements leases and `:reap_owner` is valid.
 `start_orchestrator: true` starts that list in ExAtlas's own application;
 `ExAtlas.Orchestrator.Supervisor` starts it in the host's tree instead.
 
@@ -105,11 +107,18 @@ classDiagram
     start_link(opts) ignore
     get(id) raises on a row that will not decode
     record column holds term_to_binary
+    renew_lease(owner, expires_at_ms)
+    claim_expired(claimer, now_ms, rewrite)
   }
   class Migration {
     up(opts)
     down(opts)
-    creates atlas_tracking_records
+    step 1 creates atlas_tracking_records
+    step 2 creates atlas_owner_leases
+  }
+  class Lease {
+    GenServer after the Adopter
+    renews, then claims expired owners
   }
   class Supervisor {
     start_link(opts)
@@ -123,11 +132,44 @@ classDiagram
   TrackingStore <|.. Dets
   Ecto ..> Migration : reads the table it creates
   Application ..> Supervisor : children() when start_orchestrator is true
+  Supervisor ..> Lease : starts with a lease store and reap_owner
+  Lease ..> Ecto : renew_lease and claim_expired
 ```
 
 When the store cannot answer, nothing is reaped: `all/0` returns an error and
 the Adopter sends `adoption_failed`; `get/1` raises and the Reaper treats the
 pod as ours; a tracker logs the raise and keeps its pod.
+
+## A dead node's records, taken over by lease
+
+With `TrackingStore.Ecto` and `:reap_owner` set, each node runs a `Lease`
+(#132). Machine m1 is destroyed; m2 takes its tasks over once m1's lease
+expires:
+
+```mermaid
+sequenceDiagram
+  participant L2 as Lease on m2
+  participant Store as TrackingStore.Ecto
+  participant DB as atlas_owner_leases and atlas_tracking_records
+  participant Adopter as Adopter.adopt_claimed
+  L2->>Store: renew_lease(m2, now + ttl), every ttl / 3
+  Store->>DB: upsert lease row of m2
+  Note over L2: renewal failed, so claim nothing this tick
+  L2->>Store: claim_expired(m2, now, rewrite)
+  Store->>DB: SELECT records of owners whose expires_at is past
+  Store->>L2: rewrite(record), per row
+  L2-->>Store: record owned by m2, re-signed, or skip when unsigned
+  Store->>DB: UPDATE row SET owner, record WHERE owner = m1 AND m1 lease expired
+  DB-->>Store: 1 row claimed, or 0 when another node won or m1 renewed
+  Store-->>L2: claimed records
+  L2->>Adopter: adopt_claimed(records, m2, store)
+  Adopter-->>L2: trackers started, or the record deleted when its pod is gone
+```
+
+A node whose renewal lands after its own lease expired stops its trackers of
+records another node claimed meanwhile, with `:shutdown`, which keeps the pod
+and writes nothing. The Reaper does not change: a claimed pod is in m2's
+Registry, and pods named with a dead owner are still only logged.
 
 ## The orchestrator at runtime
 
