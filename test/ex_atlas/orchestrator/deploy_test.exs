@@ -232,7 +232,9 @@ defmodule ExAtlas.Orchestrator.DeployTest do
   # take it from an earlier tree.
   describe "a Reaper that restarts within a boot" do
     test "reaps an orphan on its next tick once adoption has settled" do
-      sup = boot()
+      # Registered, as `ExAtlas.Supervisor` is: the Reaper then knows its
+      # supervisor by name, the Adopter by pid.
+      sup = boot(name: :atlas_test_tree)
       {:ok, orphan} = spawn_orphan()
 
       crash_reaper(sup)
@@ -355,16 +357,16 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     )
   end
 
-  defp boot do
-    sup = start_tree(ExAtlas.Application.orchestrator_children())
+  defp boot(opts \\ []) do
+    sup = start_tree(ExAtlas.Application.orchestrator_children(), opts)
     await_adoption(sup)
     sup
   end
 
-  defp start_tree(children) do
+  defp start_tree(children, opts \\ []) do
     start_supervised!(%{
       id: :atlas_orchestrator_tree,
-      start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]},
+      start: {Supervisor, :start_link, [children, [strategy: :one_for_one] ++ opts]},
       type: :supervisor
     })
   end
