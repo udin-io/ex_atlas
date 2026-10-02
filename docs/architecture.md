@@ -166,6 +166,8 @@ A token minted by 0.8.0 has no attempt (#110). `ComputeServer` registers
 task adopted from a 0.8.0 record, not respawned since), and `ingest/3` accepts
 a claim-less token only against that value. The first respawn this version makes
 registers the attempt, so the replaced pod's claim-less token gets 410. The
+respawn also writes the attempt into the stored record's callback descriptor,
+so a restart adopts the task as claim-bearing. The
 tracker repeats the test for a claim-less report already in its mailbox. A task
 that 0.8.0 itself respawned keeps two claim-less pods, which risk 49 records.
 

@@ -65,6 +65,11 @@ or one 0.8.0 itself respawned. The first respawn this version makes gives the
 replacement a token that signs its attempt, and from then on a claim-less
 token gets `410`.
 
+The respawn also writes the attempt into the stored record, so a restart
+after it keeps refusing the replaced pod. A host `TrackingStore` must return
+`opts[:callback]` with its `:attempt`; without it the adopted task reads as
+0.8.0's and refuses the current pod's reports.
+
 No setting changes: a running 0.8.0 pod reports as before until the task
 respawns. A bare `task_id` passed to `ingest/3` still checks nothing.
 
