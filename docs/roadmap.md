@@ -9,6 +9,7 @@ respawn after adoption). It feeds the choice of the next feature. Dates are merg
 | Item | Ticket | State |
 |---|---|---|
 | Release 0.8.0 (owner ids, cost caps, `Timer` bound) | none filed | `CHANGELOG.md` lists it as Unreleased; `mix.exs` says 0.7.0 |
+| Docs build clean for 0.8.0 | #92 | PR #93: `bin/ci` fails on an ExDoc warning, every module grouped |
 
 ## In progress
 

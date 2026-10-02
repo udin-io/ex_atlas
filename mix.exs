@@ -53,10 +53,10 @@ defmodule ExAtlas.MixProject do
 
   defp description do
     """
-    Pluggable Elixir SDK for infrastructure management: multi-cloud GPU/CPU
-    compute (RunPod, Fly.io Machines, Lambda Labs, Vast.ai) plus Fly.io
-    platform ops (deploys, log streaming, token lifecycle). Igniter installer,
-    opt-in OTP supervision, preshared-key auth.
+    Pluggable Elixir SDK for infrastructure management: GPU/CPU compute on
+    RunPod and Lambda Labs (Fly.io Machines and Vast.ai are stubs), plus
+    Fly.io platform ops (deploys, log streaming, token lifecycle). Igniter
+    installer, opt-in OTP supervision, preshared-key auth.
     """
   end
 
@@ -92,7 +92,7 @@ defmodule ExAtlas.MixProject do
       ],
       source_ref: "v#{@version}",
       groups_for_modules: [
-        "Core API": [ExAtlas, ExAtlas.Config, ExAtlas.Error],
+        "Core API": [ExAtlas, ExAtlas.Application, ExAtlas.Config, ExAtlas.Error],
         "Provider contract": [
           ExAtlas.Provider,
           ExAtlas.Spec.ComputeRequest,
@@ -100,7 +100,15 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Spec.JobRequest,
           ExAtlas.Spec.Job,
           ExAtlas.Spec.GpuType,
-          ExAtlas.Spec.GpuCatalog
+          ExAtlas.Spec.GpuCatalog,
+          ExAtlas.Spec.Endpoint,
+          ExAtlas.Spec.NetworkVolume,
+          ExAtlas.Spec.NetworkVolumeRequest,
+          ExAtlas.Spec.Spend,
+          ExAtlas.Spec.Staging,
+          ExAtlas.Spec.Template,
+          ExAtlas.Spec.TemplateRequest,
+          ExAtlas.Secret
         ],
         Providers: [
           ExAtlas.Providers.RunPod,
@@ -109,12 +117,32 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Providers.LambdaLabs,
           ExAtlas.Providers.Vast
         ],
+        "Provider internals": [
+          ExAtlas.Providers.HTTP,
+          ExAtlas.Providers.Stub,
+          ExAtlas.Providers.RunPod.Billing,
+          ExAtlas.Providers.RunPod.Catalog,
+          ExAtlas.Providers.RunPod.Client,
+          ExAtlas.Providers.RunPod.Endpoints,
+          ExAtlas.Providers.RunPod.Jobs,
+          ExAtlas.Providers.RunPod.NetworkVolumes,
+          ExAtlas.Providers.RunPod.Pods,
+          ExAtlas.Providers.RunPod.Templates,
+          ExAtlas.Providers.RunPod.Translate,
+          ExAtlas.Providers.LambdaLabs.Client,
+          ExAtlas.Providers.LambdaLabs.Firewall,
+          ExAtlas.Providers.LambdaLabs.Translate
+        ],
         "Fly platform ops": [
           ExAtlas.Fly,
           ExAtlas.Fly.Deploy,
           ExAtlas.Fly.Dispatcher,
           ExAtlas.Fly.Tokens,
-          ExAtlas.Fly.Tokens.Server,
+          ExAtlas.Fly.Tokens.AppServer,
+          ExAtlas.Fly.Tokens.ETSOwner,
+          ExAtlas.Fly.Tokens.Registry,
+          ExAtlas.Fly.Tokens.Supervisor,
+          ExAtlas.Fly.Supervisor,
           ExAtlas.Fly.TokenStorage,
           ExAtlas.Fly.TokenStorage.Dets,
           ExAtlas.Fly.Logs.Client,
@@ -140,8 +168,13 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.TrackingStore,
           ExAtlas.Orchestrator.TrackingStore.Dets,
           ExAtlas.Orchestrator.Events,
-          ExAtlas.Orchestrator.UpstreamStatus
-        ]
+          ExAtlas.Orchestrator.UpstreamStatus,
+          ExAtlas.Orchestrator.CostMeter,
+          ExAtlas.Orchestrator.Ownership,
+          ExAtlas.Orchestrator.RespawnCredentials,
+          ExAtlas.Orchestrator.TaskOutcome
+        ],
+        "Mix tasks": [Mix.Tasks.ExAtlas.Install, Mix.Tasks.ExAtlas.Upgrade]
       ]
     ]
   end

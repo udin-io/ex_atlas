@@ -35,6 +35,8 @@ step() {
 step "format"            mix format --check-formatted
 step "compile"           mix compile --force --warnings-as-errors
 step "credo"             mix credo
+# ex_doc is a dev-only dep, so the docs build runs in the dev env.
+step "docs"              env MIX_ENV=dev mix docs --warnings-as-errors
 step "hex.audit"         mix hex.audit
 step "sobelow"           mix sobelow --config
 step "sobelow callback"  callback_boundary_clean

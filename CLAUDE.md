@@ -25,7 +25,8 @@ bin/audit                  # the weekly mix_audit run, not part of bin/ci
 ```
 
 - `bin/ci` is the one place CI's steps live: format, forced compile with
-  warnings as errors, credo, `hex.audit`, sobelow, a sobelow gate on
+  warnings as errors, credo, the docs build (`mix docs --warnings-as-errors` in
+  the dev env), `hex.audit`, sobelow, a sobelow gate on
   `lib/ex_atlas/callback*`, then `mix test`. `.github/workflows/ci.yml` only
   calls it.
 - `test/test_helper.exs` excludes `:runpod_live` and `:lambda_live`. Those tests spend real

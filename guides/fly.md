@@ -2,8 +2,8 @@
 
 ExAtlas's `ExAtlas.Fly.*` namespace provides first-class Fly.io platform
 operations — independent of the GPU-compute provider pipeline. If you're
-already using atlas for compute, Fly ops ride alongside with no extra
-dependencies; if you're only using atlas for Fly ops, ignore the compute API.
+already using ExAtlas for compute, Fly ops ride alongside with no extra
+dependencies; if you're only using ExAtlas for Fly ops, ignore the compute API.
 
 This guide covers: installation, configuration, token lifecycle, discovering
 apps, streaming logs, and streaming deploys.
@@ -14,7 +14,7 @@ The fastest path is the Igniter installer:
 
 ```bash
 mix igniter.install ex_atlas
-# or, if atlas is already a dep:
+# or, if ExAtlas is already a dep:
 mix ex_atlas.install
 ```
 
@@ -24,7 +24,7 @@ directory, and wires `phoenix_pubsub` if your app uses Phoenix.
 Manual install — add to `mix.exs`:
 
 ```elixir
-{:ex_atlas, "~> 0.2"}
+{:ex_atlas, "~> 0.7"}
 ```
 
 ExAtlas is a regular OTP application — its supervision tree starts automatically.
@@ -167,12 +167,12 @@ ExAtlas will supervise your module in its Fly sub-tree.
 ExAtlas cannot hard-depend on Phoenix, so logs/deploys are dispatched through
 `ExAtlas.Fly.Dispatcher` with three modes:
 
-* `:registry` (default) — atlas starts a `Registry` and uses `send/2`.
+* `:registry` (default) — ExAtlas starts a `Registry` and uses `send/2`.
   Zero-deps. Best for non-Phoenix hosts.
 * `:phoenix_pubsub` — uses `Phoenix.PubSub.broadcast/3`. Requires
   `phoenix_pubsub` in your deps and `config :ex_atlas, :fly, pubsub: MyApp.PubSub`.
   Best when you already have a cluster-wide PubSub.
-* `{:mfa, {Mod, :fun, extra_args}}` — custom: on each dispatch atlas calls
+* `{:mfa, {Mod, :fun, extra_args}}` — custom: on each dispatch ExAtlas calls
   `apply(Mod, :fun, [topic, message | extra_args])`.
 
 Subscriber message shapes are stable across modes.
