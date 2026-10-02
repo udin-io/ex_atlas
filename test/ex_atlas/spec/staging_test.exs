@@ -56,6 +56,12 @@ defmodule ExAtlas.Spec.StagingTest do
              }
     end
 
+    test "an IPv6 host and percent-escapes are accepted (control for the character rule)" do
+      url = "http://[::1]:9000/bucket/a%20b.tar.gz?X-Amz-Signature=#{@put_sig}&x=1;y=(2)"
+      assert {:ok, staging} = Staging.new(artifact_url: url)
+      assert Staging.env(staging) == %{"ATLAS_ARTIFACT_URL" => url}
+    end
+
     test "one presigned URL alone is enough, on either side" do
       assert {:ok, staging} = Staging.new(artifact_url: @put_url)
       assert Staging.env(staging) == %{"ATLAS_ARTIFACT_URL" => @put_url}
@@ -170,6 +176,21 @@ defmodule ExAtlas.Spec.StagingTest do
       {"newline in a URL", %{@full | artifact_url: @put_url <> "\nX=1"},
        ":artifact_url must not hold control characters"},
       {"empty URL", %{@full | dataset_url: ""}, ":dataset_url must be a non-empty string"},
+      {"curl glob braces in a URL", %{@full | dataset_url: @get_url <> "{"},
+       ":dataset_url must hold only URL characters"},
+      {"curl glob range in a URL", %{@full | artifact_url: @put_url <> "[1-2]"},
+       ":artifact_url must hold only URL characters"},
+      {"a space in a URL path", %{@full | dataset_url: "https://b.example/a b?#{@get_sig}"},
+       ":dataset_url must hold only URL characters"},
+      {"a non-ASCII character in a URL", %{@full | artifact_url: @put_url <> "\u00A0"},
+       ":artifact_url must hold only URL characters"},
+      {"a zero-width character in a URL", %{@full | dataset_url: @get_url <> "\u200B"},
+       ":dataset_url must hold only URL characters"},
+      {"a URL with no object path", %{@full | artifact_url: "https://bucket.s3.amazonaws.com"},
+       ":artifact_url must name an object"},
+      {"a URL whose path is only a slash",
+       %{@full | dataset_url: "https://b.example/?#{@get_sig}"},
+       ":dataset_url must name an object"},
       {"ftp endpoint", %{@full | endpoint: "ftp://t3.storage.dev"},
        ":endpoint must be an http:// or https:// URL"},
       {"endpoint with no host", %{@full | endpoint: "https://"},

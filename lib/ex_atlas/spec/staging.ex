@@ -112,8 +112,8 @@ defmodule ExAtlas.Spec.Staging do
          :ok <- check_http_url(:endpoint, staging.endpoint),
          :ok <- check_uri(:dataset_uri, staging.dataset_uri),
          :ok <- check_uri(:artifact_uri, staging.artifact_uri),
-         :ok <- check_http_url(:dataset_url, staging.dataset_url),
-         :ok <- check_http_url(:artifact_url, staging.artifact_url),
+         :ok <- check_presigned(:dataset_url, staging.dataset_url),
+         :ok <- check_presigned(:artifact_url, staging.artifact_url),
          :ok <- check_credentials(staging),
          :ok <- check_has_location(staging) do
       {:ok, seal(staging)}
@@ -233,6 +233,29 @@ defmodule ExAtlas.Spec.Staging do
   defp userinfo_message(key), do: "#{inspect(key)} must not carry user info"
 
   defp http_url_error(key), do: error("#{inspect(key)} must be an http:// or https:// URL")
+
+  # After the host, only RFC 3986 characters, without `[ ]`: curl reads `{ }`
+  # and `[ ]` as a glob and prints the whole URL in its error. A URL with no
+  # object path makes `curl -T` append the file name to it.
+  defp check_presigned(_key, nil), do: :ok
+
+  defp check_presigned(key, url) do
+    with :ok <- check_http_url(key, url) do
+      %URI{path: path, query: query} = URI.parse(url)
+
+      cond do
+        not (url =~ ~r/\A[\x21-\x7E]+\z/ and
+                 "#{path}?#{query}" =~ ~r/\A[A-Za-z0-9\-._~:\/?#@!$&'()*+,;=%]*\z/) ->
+          error("#{inspect(key)} must hold only URL characters (RFC 3986, no braces or brackets)")
+
+        path in [nil, "", "/"] ->
+          error("#{inspect(key)} must name an object: a path after the host")
+
+        true ->
+          :ok
+      end
+    end
+  end
 
   defp check_uri(_key, nil), do: :ok
 
