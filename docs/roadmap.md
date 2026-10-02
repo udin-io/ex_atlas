@@ -1,7 +1,7 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #77 (slice 2 of
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #80 (slice 3 of
 feature #26). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
