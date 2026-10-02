@@ -391,15 +391,28 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       Enum.map(computes, & &1.image)
     end
 
-    test "is refused on :persist before the provider is called" do
-      opts = task_opts(image: "trainer-s3-refused:latest", s3: @s3)
+    test "persists, and the record holds the URIs and the marker" do
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(task_opts(image: "trainer-s3-persisted:latest", s3: @s3))
 
-      assert {:error, %NimbleOptions.ValidationError{key: :persist, value: true} = error} =
-               Orchestrator.run_task(opts)
+      assert {:ok, %{opts: opts}} = Memory.get(compute.id)
 
-      assert Exception.message(error) =~ ":s3"
-      refute inspect(error) =~ "tsec-test-9f2c"
-      refute "trainer-s3-refused:latest" in mock_images()
+      assert opts[:s3] == %{
+               dataset_uri: "s3://bucket/datasets/abc/",
+               credentials: :not_stored
+             }
+
+      assert "trainer-s3-persisted:latest" in mock_images()
+    end
+
+    test "with max_cost and no s3: persists as before (control)" do
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(
+                 task_opts(max_cost: 2.5, provider_opts: %{cost_per_hour: 1.5})
+               )
+
+      assert {:ok, %{max_cost: 2.5, cost_rate: 1.5, opts: opts}} = Memory.get(compute.id)
+      refute Keyword.has_key?(opts, :s3)
     end
 
     test "without s3: still persists (control)" do
@@ -424,25 +437,100 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
   describe "secrets" do
     @describetag :tmp_dir
 
-    test "a record built from spawn opts drops s3:" do
+    test "a record built from spawn opts keeps only s3:'s non-secret fields" do
       compute = %ExAtlas.Spec.Compute{id: "mock-s3", provider: :mock, status: :running}
 
-      opts =
-        task_opts(
-          s3: %{
-            access_key_id: "tid-test-4b1e",
-            secret_access_key: "tsec-test-9f2c",
-            artifact_uri: "s3://b/a"
-          },
-          env: %{"WANDB_PROJECT" => "x"}
-        )
+      # `Orchestrator.spawn/1` hands the record a validated `Staging`.
+      {:ok, staging} =
+        ExAtlas.Spec.Staging.new(%{
+          endpoint: "https://t3.storage.dev",
+          region: "auto",
+          access_key_id: "tid-test-4b1e",
+          secret_access_key: "tsec-test-9f2c",
+          session_token: "tses-test-0d7a",
+          dataset_uri: "s3://bucket/datasets/abc/",
+          artifact_uri: "s3://bucket/artifacts/run-123/",
+          dataset_url: "https://b.example/d.tar.gz?X-Amz-Signature=getsig-5d0c91",
+          artifact_url: "https://b.example/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
+        })
+
+      opts = task_opts(s3: staging, env: %{"WANDB_PROJECT" => "x"})
 
       record = TrackingStore.new(compute, opts, mode: :task)
 
-      refute Keyword.has_key?(record.opts, :s3)
-      refute inspect(record) =~ "tsec-test-9f2c"
+      assert record.opts[:s3] == %{
+               endpoint: "https://t3.storage.dev",
+               region: "auto",
+               dataset_uri: "s3://bucket/datasets/abc/",
+               artifact_uri: "s3://bucket/artifacts/run-123/",
+               credentials: :not_stored
+             }
+
+      text = inspect(record, limit: :infinity, printable_limit: :infinity, structs: false)
+
+      for secret <- ~w(tid-test-4b1e tsec-test-9f2c tses-test-0d7a getsig-5d0c91 putsig-a7e3b2),
+          do: refute(text =~ secret)
+
       # Control: the rest of the opts are kept.
       assert record.opts[:env] == %{"WANDB_PROJECT" => "x"}
+    end
+
+    test "presigned URLs alone leave only the marker" do
+      {:ok, staging} =
+        ExAtlas.Spec.Staging.new(
+          dataset_url: "https://b.example/d.tar.gz?X-Amz-Signature=getsig-5d0c91"
+        )
+
+      assert TrackingStore.scrub_opts(s3: staging) == [s3: %{credentials: :not_stored}]
+    end
+
+    test "an s3: no one validated keeps only the marker" do
+      # A tracker started directly holds the raw map; its endpoint was never
+      # checked for user info.
+      raw = %{endpoint: "https://u:tsec-test-9f2c@t3.storage.dev", dataset_uri: "s3://b/d/"}
+
+      assert TrackingStore.scrub_opts(s3: raw) == [s3: %{credentials: :not_stored}]
+      assert TrackingStore.scrub_opts(s3: Map.to_list(raw)) == [s3: %{credentials: :not_stored}]
+    end
+
+    test "s3: nil stays nil" do
+      assert TrackingStore.scrub_opts(s3: nil) == [s3: nil]
+    end
+
+    test "s3: keys and presigned URLs never reach the store's bytes on disk",
+         %{tmp_dir: dir} do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
+
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(
+                 task_opts(
+                   s3: %{
+                     endpoint: "https://t3-probe-51c0.storage.dev",
+                     region: "auto",
+                     access_key_id: "tid-test-4b1e",
+                     secret_access_key: "tsec-test-9f2c",
+                     session_token: "tses-test-0d7a",
+                     dataset_uri: "s3://bucket/datasets/abc-probe-2e8f/",
+                     artifact_uri: "s3://bucket/artifacts/run-probe-77d1/",
+                     dataset_url: "https://b.example/d.tar.gz?X-Amz-Signature=getsig-5d0c91",
+                     artifact_url: "https://b.example/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
+                   },
+                   # Control: `:env` is stored verbatim, so a string in a record
+                   # shows up in these bytes as written.
+                   env: %{"PROBE" => "env-visible-6e1d"}
+                 )
+               )
+
+      bytes = File.read!(Path.join(dir, "tracked.dets"))
+
+      assert bytes =~ "env-visible-6e1d"
+      assert bytes =~ compute.id
+      assert bytes =~ "t3-probe-51c0.storage.dev"
+      assert bytes =~ "abc-probe-2e8f"
+      assert bytes =~ "run-probe-77d1"
+
+      for secret <- ~w(tid-test-4b1e tsec-test-9f2c tses-test-0d7a getsig-5d0c91 putsig-a7e3b2),
+          do: refute(bytes =~ secret, "#{secret} reached the DETS file")
     end
 
     test "never reach the store's bytes on disk", %{tmp_dir: dir} do

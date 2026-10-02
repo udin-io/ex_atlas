@@ -99,9 +99,10 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Never stored: `compute.auth.token` (the raw preshared key — see
   `ExAtlas.Auth.Token`), `:api_key` (re-resolved from config at adoption,
-  exactly as a fresh spawn does), `:s3` (storage credentials; `persist: true`
-  with `s3:` is refused for now), and anything else matching
-  `:scrub_keys`. `last_activity_ms` is not stored because it is monotonic and
+  exactly as a fresh spawn does), the keys and presigned URLs of `:s3`, and
+  anything else matching `:scrub_keys`. `:s3` keeps its endpoint, region and
+  URIs beside `credentials: :not_stored`, so an adopted task with `s3:` runs
+  on, and its tracker refuses a respawn it has no credentials for. `last_activity_ms` is not stored because it is monotonic and
   nobody was touching the session while the node was down.
 
   ### Container environment is *not* scrubbed
@@ -220,10 +221,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     cost_since_ms: nil
   }
 
-  # Opts that are credentials, or that could carry one. `:req_options` gets its
-  # own treatment below because the secret is nested inside it. `:s3` holds
-  # storage keys beside its URIs and goes whole.
-  @secret_opts [:api_key, :api_secret, :secret, :token, :password, :s3]
+  # Opts that are credentials, or that could carry one. `:req_options` and
+  # `:s3` get their own treatment below because the secret is nested inside.
+  @secret_opts [:api_key, :api_secret, :secret, :token, :password]
 
   @doc "The current record schema version."
   @spec version() :: version()
@@ -307,13 +307,19 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   Drops `#{inspect(@secret_opts)}`, anything named by
   `config :ex_atlas, :orchestrator, scrub_keys: [...]`, and the
   `#{inspect(Config.secret_req_options())}` entries of `:req_options`,
-  where a hand-rolled bearer header or AWS signing key would be.
+  where a hand-rolled bearer header or AWS signing key would be. `:s3` keeps
+  its endpoint, region and URIs, and `credentials: :not_stored` in place of
+  the keys and presigned URLs (`ExAtlas.Spec.Staging.scrub/1`); with
+  `scrub_keys: [:s3]` it keeps the marker alone.
   """
   @spec scrub_opts(keyword()) :: keyword()
   def scrub_opts(opts) do
+    scrub_keys = configured_scrub_keys()
+
     opts
-    |> Keyword.drop(@secret_opts ++ configured_scrub_keys())
+    |> Keyword.drop(@secret_opts ++ scrub_keys)
     |> scrub_req_options()
+    |> put_staging(Keyword.get(opts, :s3), :s3 in scrub_keys)
   end
 
   @doc """
@@ -338,6 +344,12 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
         opts
     end
   end
+
+  # `scrub_keys: [:s3]` keeps the marker alone, never nothing: a record with no
+  # `s3:` would let an adopted task respawn with no staging at all.
+  defp put_staging(opts, nil, _scrubbed?), do: opts
+  defp put_staging(opts, _s3, true), do: Keyword.put(opts, :s3, Spec.Staging.scrub(nil))
+  defp put_staging(opts, s3, false), do: Keyword.put(opts, :s3, Spec.Staging.scrub(s3))
 
   defp configured_scrub_keys do
     orchestrator_config() |> Keyword.get(:scrub_keys, []) |> List.wrap()

@@ -181,6 +181,38 @@ them from the provider.
 
 Presigned mode, below, puts no storage key on the pod at all.
 
+### Surviving a deploy: `persist: true`
+
+A task with `s3:` and `persist: true` writes a tracking record with the
+non-secret part of `s3:` only:
+
+```elixir
+# the record's opts
+s3: %{
+  endpoint: "https://t3.storage.dev",
+  region: "auto",
+  dataset_uri: "s3://bucket/datasets/abc/",
+  artifact_uri: "s3://bucket/artifacts/run-123/",
+  credentials: :not_stored
+}
+```
+
+The keys, the session token and the presigned URLs stay in memory. After a
+restart the next boot adopts the pod, which keeps running with the
+environment it was rented with. A respawn needs the credentials, and the new
+node has none:
+
+- Before any restart, a preempted `on_failure: {:respawn, n}` task respawns
+  with the full `s3:`.
+- After adoption, a preemption broadcasts `{:respawn_failed, {reason,
+  %ExAtlas.Error{kind: :validation}}}` and ends the task. No pod is rented.
+
+`scrub_keys: [:s3]` keeps the marker alone, so the refusal holds there too.
+`Spec.Staging.new/1` refuses `credentials: :not_stored`, so a record's `s3:`
+cannot rent a pod by hand either. A host `TrackingStore` must keep `opts`
+whole; one that drops the marker still gets the refusal, since an adopted
+`s3:` is never trusted to hold credentials.
+
 ## Presigned mode: no storage key on the pod
 
 You presign two URLs on your side: a GET for one dataset archive and a PUT

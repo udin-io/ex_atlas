@@ -84,6 +84,33 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
   end
 
+  test "a deployed-over task with s3: staging is adopted from the DETS file" do
+    boot()
+
+    {:ok, tracker, compute} =
+      run_task(
+        persist: true,
+        s3: %{
+          access_key_id: "tid-test-4b1e",
+          secret_access_key: "tsec-test-9f2c",
+          dataset_uri: "s3://bucket/datasets/abc/"
+        }
+      )
+
+    ref = Process.monitor(tracker)
+    Process.exit(tracker, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^tracker, :killed}, 2_000
+    shutdown()
+
+    boot()
+
+    assert {:ok, %{compute: %{id: id}, mode: :task}} = Orchestrator.info(compute.id)
+    assert id == compute.id
+
+    assert {:ok, %{opts: opts}} = TrackingStore.Dets.get(compute.id)
+    assert opts[:s3] == %{dataset_uri: "s3://bucket/datasets/abc/", credentials: :not_stored}
+  end
+
   # `stop_supervised!/1` sends the tree the same `:shutdown` exit that
   # `init:stop/0` sends on SIGTERM, so every tracker's `terminate/2` runs.
   describe "a graceful stop (SIGTERM)" do

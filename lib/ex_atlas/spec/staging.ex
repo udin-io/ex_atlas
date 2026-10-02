@@ -80,6 +80,8 @@ defmodule ExAtlas.Spec.Staging do
     :artifact_url
   ]
 
+  @public [:endpoint, :region, :dataset_uri, :artifact_uri]
+
   @variables [
     endpoint: ["AWS_ENDPOINT_URL_S3"],
     region: ["AWS_REGION", "AWS_DEFAULT_REGION"],
@@ -146,6 +148,29 @@ defmodule ExAtlas.Spec.Staging do
             "or ComputeRequest.new/1"
   end
 
+  @doc """
+  The part of `s3:` a tracking record may keep: the endpoint, region and URIs
+  that are set, plus `credentials: :not_stored`.
+
+  Only a `Staging` from `new/1` gives up its fields. Any other value gives the
+  marker alone, since nothing checked it for a credential.
+  """
+  @spec scrub(term()) :: map()
+  def scrub(%__MODULE__{} = staging) do
+    for key <- @public,
+        value = Map.fetch!(staging, key),
+        value != nil,
+        into: %{credentials: :not_stored},
+        do: {key, value}
+  end
+
+  def scrub(_unvalidated), do: %{credentials: :not_stored}
+
+  @doc "Whether `s3` is a record's scrubbed `s3:`, from `scrub/1`."
+  @spec not_stored?(term()) :: boolean()
+  def not_stored?(%{credentials: :not_stored}), do: true
+  def not_stored?(_s3), do: false
+
   # A presigned URL is a bearer credential until it expires.
   @sealed [:access_key_id, :secret_access_key, :session_token, :dataset_url, :artifact_url]
 
@@ -164,6 +189,12 @@ defmodule ExAtlas.Spec.Staging do
 
       not Enum.all?(pairs, fn {key, _} -> is_atom(key) end) ->
         error("keys must be atoms")
+
+      {:credentials, :not_stored} in pairs ->
+        error(
+          "credentials: :not_stored marks a tracking record's :s3, which never holds the " <>
+            "credentials or presigned URLs; pass the full :s3 again"
+        )
 
       unknown = Enum.find(pairs, fn {key, _} -> key not in @keys end) ->
         error("unknown key #{inspect(elem(unknown, 0))}; known keys are #{inspect(@keys)}")

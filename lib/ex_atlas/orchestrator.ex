@@ -141,9 +141,10 @@ defmodule ExAtlas.Orchestrator do
   Reaper reclaim it as an orphan. See `ExAtlas.Orchestrator.TrackingStore` for
   what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
 
-  `persist: true` with `s3:` returns `{:error, %NimbleOptions.ValidationError{key:
-  :persist}}` before the provider is called: a record never holds the storage
-  credentials, so an adopted task would respawn without them.
+  With `s3:` the record keeps the endpoint, region and URIs, never the keys or
+  presigned URLs. An adopted task runs on, but a respawn after adoption has no
+  credentials to give the replacement: it broadcasts `{:respawn_failed,
+  {reason, %ExAtlas.Error{kind: :validation}}}` and ends the task.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}

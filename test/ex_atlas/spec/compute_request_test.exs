@@ -139,7 +139,10 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
            ":dataset_uri must start with s3://"},
           {"an unknown key", %{dataset_uri: "s3://b/d", bucket: "b"}, "unknown key :bucket"},
           {"no URI and no URL", %{region: "auto"},
-           "needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url"}
+           "needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url"},
+          {"a tracking record's scrubbed s3:",
+           %{dataset_uri: "s3://b/", credentials: :not_stored},
+           "a tracking record's :s3, which never holds the credentials"}
         ] do
       @s3_input s3
       @expected expected

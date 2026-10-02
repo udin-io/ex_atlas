@@ -124,6 +124,23 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
                    @store.get("compute-m2")
         end
 
+        # `ExAtlas.Spec.Staging.scrub/1` writes this inside `opts`. A store
+        # that drops the nested map loses where the task's data lives.
+        test "put/1 round-trips a scrubbed s3: inside opts" do
+          s3 = %{
+            endpoint: "https://t3.storage.dev",
+            region: "auto",
+            dataset_uri: "s3://bucket/datasets/abc/",
+            artifact_uri: "s3://bucket/artifacts/run-123/",
+            credentials: :not_stored
+          }
+
+          record = conformance_record("compute-s3", %{opts: [gpu: :h100, mode: :task, s3: s3]})
+          :ok = @store.put(record)
+
+          assert {:ok, ^record} = @store.get("compute-s3")
+        end
+
         test "put/1 overwrites the record for an id" do
           :ok = @store.put(conformance_record("compute-b"))
           :ok = @store.put(conformance_record("compute-b", %{respawns: 3}))

@@ -157,6 +157,13 @@ defmodule ExAtlas.Spec.StagingTest do
       {"bad artifact URI", %{@full | artifact_uri: "/local/out"},
        ":artifact_uri must start with s3://"},
       {"unknown key", Map.put(@full, :bucket, "b"), "unknown key :bucket"},
+      # What `TrackingStore.scrub_opts/1` writes. Refused even beside a full
+      # set of credentials: it can only come from a record.
+      {"the not-stored marker", Map.put(@full, :credentials, :not_stored),
+       "a tracking record's :s3, which never holds the credentials"},
+      {"the not-stored marker as a keyword list",
+       [dataset_uri: "s3://bucket/d/", credentials: :not_stored],
+       "a tracking record's :s3, which never holds the credentials"},
       {"no URI and no URL",
        Map.drop(@full, [:dataset_uri, :artifact_uri, :dataset_url, :artifact_url]),
        "needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url"},

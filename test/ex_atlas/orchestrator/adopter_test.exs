@@ -388,6 +388,112 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a task with s3: staging" do
+    @s3 %{
+      access_key_id: "tid-test-4b1e",
+      secret_access_key: "tsec-test-9f2c",
+      dataset_uri: "s3://bucket/datasets/abc/"
+    }
+
+    defp orphaned_staged_task(image) do
+      orphaned_task(
+        image: image,
+        s3: @s3,
+        spot: true,
+        on_failure: {:respawn, 1},
+        status_poll_ms: 30
+      )
+    end
+
+    defp images do
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      Enum.map(computes, & &1.image)
+    end
+
+    test "adopts, and a respawn after adoption ends the task without renting" do
+      compute = orphaned_staged_task("trainer-adopted-s3:latest")
+      id = compute.id
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      {:ok, pid} = Orchestrator.lookup(id)
+      assert {:ok, %{mode: :task}} = Orchestrator.info(id)
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed,
+                       {:preempted, %ExAtlas.Error{kind: :validation, message: message}}}},
+                     2_000
+
+      assert message =~ "credentials are not stored"
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-s3:latest" in images()
+      assert :error = Memory.get(id)
+    end
+
+    test "scrub_keys: [:s3] keeps the marker, so the respawn is still refused" do
+      # A host that scrubs `:s3` whole must not lose the refusal with it: a
+      # record with no `s3:` would respawn a pod with no staging at all.
+      TestOrchestrator.put_env(scrub_keys: [:s3])
+      compute = orphaned_staged_task("trainer-adopted-s3-scrubbed:latest")
+      id = compute.id
+
+      assert {:ok, %{opts: opts}} = Memory.get(id)
+      assert opts[:s3] == %{credentials: :not_stored}
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-s3-scrubbed:latest" in images()
+    end
+
+    test "a host store that dropped the marker still adopts, and still refuses the respawn" do
+      compute = orphaned_staged_task("trainer-adopted-s3-nomarker:latest")
+      id = compute.id
+
+      # A host store that keeps only the fields it has columns for hands back
+      # the URIs without `credentials: :not_stored`. `Staging.new/1` would
+      # accept that `s3:`, and a replacement would rent with no keys.
+      {:ok, record} = Memory.get(id)
+
+      :ok =
+        Memory.put(%{
+          record
+          | opts: Keyword.put(record.opts, :s3, Map.delete(record.opts[:s3], :credentials))
+        })
+
+      {:ok, %{opts: stored}} = Memory.get(id)
+      assert stored[:s3] == %{dataset_uri: "s3://bucket/datasets/abc/"}
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      assert {:ok, %{mode: :task}} = Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-s3-nomarker:latest" in images()
+    end
+  end
+
   describe "a store that cannot account for itself" do
     test "adopts nothing and reports the failure" do
       compute = orphaned_task()
