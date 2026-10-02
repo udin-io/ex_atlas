@@ -4,7 +4,11 @@ defmodule ExAtlas.Providers.LambdaLabs.Firewall do
 
   Lambda's firewall admits only SSH by default. A spawn with `:ports` creates
   a ruleset named `atlas-<instance name>-<suffix>` and launches the instance
-  with it attached. A failed launch deletes the ruleset.
+  with it attached. A failed launch deletes the ruleset, and `terminate/2`
+  deletes it after the instance. Lambda refuses while the instance still uses
+  it (`firewall-rulesets/firewall-ruleset-in-use`), which is usual right after
+  a terminate, so every spawn first deletes `atlas-` rulesets that no
+  instance uses.
 
   The sweep skips a ruleset younger than 5 minutes: another spawn may have
   created it a moment ago and not launched yet. It deletes at most 10 per
@@ -63,7 +67,23 @@ defmodule ExAtlas.Providers.LambdaLabs.Firewall do
   def attach(body, id), do: Map.put(body, "firewall_rulesets", [%{"id" => id}])
 
   @doc """
-  Delete a ruleset. Always `:ok`: a ruleset left behind is not the caller's error.
+  The id of the `atlas-` ruleset that `instance_id` uses, or `nil`. A failed
+  read is `nil` too: the next spawn's sweep deletes the ruleset.
+  """
+  @spec find(ExAtlas.Provider.ctx(), String.t()) :: String.t() | nil
+  def find(ctx, instance_id) do
+    with {:ok, rulesets} when is_list(rulesets) <- Client.get(ctx, "/firewall-rulesets"),
+         %{"id" => id} <-
+           Enum.find(rulesets, &(atlas?(&1) and instance_id in instance_ids(&1))) do
+      id
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Delete a ruleset. Always `:ok`: an in-use refusal is expected right after a terminate, and
+  the next spawn's sweep deletes the ruleset.
   """
   @spec delete(ExAtlas.Provider.ctx(), String.t() | nil) :: :ok
   def delete(_ctx, nil), do: :ok

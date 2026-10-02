@@ -81,8 +81,10 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   @impl true
   def terminate(id, ctx) do
+    ruleset = Firewall.find(ctx, id)
+
     case Client.post(ctx, "/instance-operations/terminate", %{"instance_ids" => [id]}) do
-      {:ok, _} -> :ok
+      {:ok, _} -> Firewall.delete(ctx, ruleset)
       {:error, _} = err -> err
     end
   end
