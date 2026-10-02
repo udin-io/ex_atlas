@@ -48,6 +48,26 @@ ExAtlas.Orchestrator.list_ids()
 - The callback limiter's "not running" error names both ways to start the
   orchestrator.
 
+### Fixed: a Reaper that restarts reaps again (#122)
+
+With a tracking store, a Reaper that crashed and restarted waited for the
+Adopter's signal, which comes once per boot, and reaped nothing until the next
+deploy. The Adopter now records its outcome before it signals, and a
+restarted Reaper reads it.
+
+```elixir
+# adoption settled, then a tick raises
+# before: the restarted Reaper logs "skipping this cycle until boot-time
+#   adoption settles" on every tick, and orphans bill
+# after:  the restarted Reaper reaps on its next tick
+```
+
+- A failed adoption stays failed: the restarted Reaper reaps nothing and logs
+  that reaping is DISABLED for this boot.
+- The record belongs to the supervisor the Reaper and Adopter share. A new
+  tree, such as the app started again in the same VM, waits for its own
+  Adopter.
+
 ### Fixed: a respawn the Reaper cannot clean up warns, and a revived pod reports (#118)
 
 A spawn with `on_failure: {:respawn, n}` on a provider outside

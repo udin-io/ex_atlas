@@ -215,6 +215,8 @@ names the PR or issue that holds the reasoning.
 | The tracker checks reports against the attempt in its opts' callback descriptor; `respawns` counts the budget | Keep comparing with `respawns`: after an interrupted adoption the record's pod holds `respawns - 1` | #118 |
 | An interrupted adoption accepts the record's pod once a poll reads it alive | Refuse every token until the next respawn or the deadline | #118 |
 | A provider list that raises or exits skips that provider for the tick and logs only the error's kind | Let the tick crash: the restarted Reaper stays gated for the boot (#122) | #118 |
+| The Adopter records its outcome in `:persistent_term`, keyed by the pid of the supervisor it shares with the Reaper; a restarted Reaper reads it on init | A boot epoch, a `make_ref/0` in both child specs: it edits the child list #120 moves. ETS: needs an owner process. The app env: hosts and tests reset it | #122 |
+| The Adopter writes before it signals | The Reaper writes when the message arrives: a signal sent while the Reaper is down is lost | #122 |
 | A host-prepared callback descriptor starts at attempt 0 | Keep its attempt: the first respawn would issue it again | #118 |
 | The resolver returns `s3:` whole; `info.s3` gives the stored parts without the marker | ExAtlas merges keys onto the stored parts: presigned mode stores no URL | #87 |
 | `env:` must cover every stored name and replaces the stored env whole | Run with the names it returns: a container would miss a value it was rented with | #87 |

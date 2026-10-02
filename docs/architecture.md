@@ -151,6 +151,8 @@ flowchart TD
   ad -->|"start with adopted record"| cs
   cs -->|"respawn after adoption:<br/>apply(m, f, args ++ [info])"| res["Host resolver<br/>respawn_credentials"]
   ad -->|"adoption_complete / adoption_failed"| rp["Reaper"]
+  ad -->|"outcome, keyed by the supervisor's pid"| pt["persistent_term"]
+  pt -.->|"init: this tree's outcome,<br/>after a Reaper restart"| rp
   rp -->|"list, delete untracked"| prov
   rp -.->|"ours = Registry or store"| store
 ```

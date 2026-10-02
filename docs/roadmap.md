@@ -37,6 +37,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| A respawning task warns when no Reaper covers its provider, and an adopted task's revived pod reports again (risk 51) | #119 (#118) | 2026-10-02 |
 | Vast.ai provider (feature #98) | #102 (slice 1, #99): spawn by renting the cheapest on-demand offer, get, list, terminate, GPU types. #108 (slice 2, #105): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper. #113 (slice 3, #112): `spot: true` rents interruptible offers at `min_bid`, and an outbid instance respawns. #117 (slice 4, #116): `stop/2`, `start/2` and `compute_spend/3`, so `max_cost` reconciles against Vast's bill | 2026-10-02 |
 | A late report from a replaced pod no longer ends the replacement (#100) | #101: the callback token signs the pod's attempt, and a stale report gets 410. #109 (#107): a replaced pod's refused reports spend their own rate budget. #111 (#110): a token with no attempt gets 410 once a respawn replaced the pod. #115 (#114): a pod rented by a respawn the node died in gets 410 after the next boot (risk 51) | 2026-10-02 |
 | Lambda Labs provider (feature #83) | #89 (slice 1, #84): spawn through cloud-init, get, list, terminate, GPU types. #90 (slice 2, #85): `command:`, `run_task/1` ended by the host's report, the Reaper on Lambda. #91 (slice 3, #86): `ports:` open in Lambda's firewall. #97 (#96): an interactive session with a self-terminating command ends on the report | 2026-10-02 |

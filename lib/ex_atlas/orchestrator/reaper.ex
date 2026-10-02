@@ -58,6 +58,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   bounded by `:max_runtime_ms` and an operator reading the log, while a
   wrongly reaped task is hours of GPU spend that no longer exists.
 
+  The Adopter runs once per boot, so it records its outcome before it sends
+  it. A Reaper that crashes and restarts reads that record and keeps the gate
+  as it was: open after `:adoption_complete`, shut after `:adoption_failed`.
+  The record is keyed by the pid of the supervisor the two share. A new tree
+  (the app started again in the same VM, or a restarted supervisor) has a new
+  pid, so its Reaper starts gated until that tree's Adopter signals.
+
   With no store configured (`tracking_store: false`) there is nothing to wait
   for and the Reaper behaves exactly as it did before adoption existed.
 
@@ -153,10 +160,59 @@ defmodule ExAtlas.Orchestrator.Reaper do
      })}
   end
 
-  # With no tracking store there is nothing to adopt and nothing to wait for,
-  # so the Reaper behaves exactly as it did before adoption existed.
+  # A Reaper restarted after the Adopter's one signal takes the outcome its
+  # tree recorded, even when the store was switched off since. A new tree has
+  # a new supervisor pid, so an outcome from an earlier start of the app never
+  # opens its gate. With no record and no store there is nothing to wait for.
   defp initial_adoption do
-    if TrackingStore.impl(), do: :pending, else: :settled
+    cond do
+      recorded = recorded_adoption() -> recorded
+      TrackingStore.impl() -> :pending
+      true -> :settled
+    end
+  end
+
+  @adoption_key {__MODULE__, :adoption}
+
+  @doc false
+  # The Adopter calls this before it signals: the signal is lost when the
+  # Reaper is down at that moment, and the record is not. Keyed by the
+  # supervisor the caller runs under, which the Reaper shares. Entries of dead
+  # supervisors are dropped on each write, so `:persistent_term` sees one
+  # write per boot.
+  @spec record_adoption(:settled | :failed) :: :ok
+  def record_adoption(outcome) when outcome in [:settled, :failed] do
+    case tree() do
+      nil ->
+        :ok
+
+      sup ->
+        live =
+          @adoption_key
+          |> :persistent_term.get(%{})
+          |> Map.filter(fn {pid, _outcome} -> Process.alive?(pid) end)
+
+        :persistent_term.put(@adoption_key, Map.put(live, sup, outcome))
+    end
+  end
+
+  defp recorded_adoption do
+    case tree() do
+      nil -> nil
+      sup -> Map.get(:persistent_term.get(@adoption_key, %{}), sup)
+    end
+  end
+
+  # The supervisor this process runs under. A GenServer's `proc_lib` start
+  # stores a registered parent by name, a Task stores it by pid. A process no
+  # supervisor started, such as a test calling `Adopter.run/1`, has no
+  # ancestors and records nothing.
+  defp tree do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> pid
+      [name | _] when is_atom(name) -> Process.whereis(name)
+      _none -> nil
+    end
   end
 
   @impl true
