@@ -81,7 +81,7 @@ ep.raw["template"]["env"]     # before: %{"HF_TOKEN" => "..."}   after: nil
 - An error for a 3xx, 4xx or 5xx status whose body echoes a resource keeps no
   `env` in `Error.raw`, on every provider that shares `HTTP.handle_response/3`.
   The rest of the body stays. Only the `env` key goes.
-=======
+
 ### Fixed: a forged tracking record no longer steers an adopted task's calls (#125)
 
 Whoever could write the tracking store (the DETS file, or a row in your
@@ -118,7 +118,6 @@ req_options:` for a call that passes none, as it reads `api_key:`. Per-call
 `req_options` merge over the configured ones key by key, and a credential in
 either is sealed. RunPod gains a configured `base_url:` (the management API,
 as a per-call one); Lambda Labs and Vast read theirs as before.
->>>>>>> origin/main
 
 ### Fixed: `Compute.raw` no longer holds a RunPod pod's `env` (#126)
 
