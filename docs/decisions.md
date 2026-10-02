@@ -140,6 +140,7 @@ names the PR or issue that holds the reasoning.
 | `s3:` and `env:` are validated after NimbleOptions, with messages that name keys, never values | NimbleOptions types: its `ValidationError` holds the input | #26, #75 |
 | `inspect(%Spec.Compute{})` hides `raw` | Leave it: RunPod echoes env in `raw` | #26, #75 |
 | `RunPod.Translate.pod_to_compute/2` drops `"env"` from `raw` | Redact the tracker's `:message` in `format_status/1`: the poll reply never reaches it. Allow-list `raw`: it stays the fields ExAtlas does not normalize | #126 |
+| `RunPod.Translate` drops `"env"` (and an embedded `template`'s) from `Endpoint.raw` and `Template.raw`; `HTTP.handle_response/3` drops it from a non-2xx body before `Error.raw` | A copy of the scrub in `Error` and `Translate`. Allow-list `raw`. Drop `Template.env` too: it is the field callers read | #133 |
 | The reference entrypoint runs the trainer behind a fifo and `wait`, so the exit code is the trainer's | `trainer \| tee`: reports tee's status, and POSIX `sh` has no `pipefail` | #72 |
 | A failed pull still uploads the log; an upload failure is printed and the trainer's exit code stands | Skip the upload after a failed pull; fail the task on an upload error | #26, #72 |
 | The guide states no Tigris checksum claim; it gives the generic `when_required` fix with AWS's page as source | State that Tigris accepts the default, with no source | #26, #72 |

@@ -60,6 +60,28 @@ one only when the config set `start_orchestrator: true`. It now also fires
 when a module names `ExAtlas.Orchestrator.Supervisor`, and the installer shows
 the same notice.
 
+### Fixed: `Endpoint.raw` and `Template.raw` no longer hold RunPod's `env` (#133)
+
+RunPod echoes an endpoint's or template's `env` (a Hugging Face token, a
+W&B key) in its body. `inspect/1` hides `raw`, but a crash report of a process
+that holds the struct, or `inspect(.., structs: false)`, printed the values.
+
+```elixir
+{:ok, ep} = ExAtlas.get_endpoint("4m7x2k9q", provider: :runpod)
+ep.raw["env"]                 # before: %{"HF_TOKEN" => "..."}   after: nil
+ep.raw["template"]["env"]     # before: %{"HF_TOKEN" => "..."}   after: nil
+# the same for each pod in ep.raw["workers"] when RunPod lists them
+```
+
+- `get_endpoint/2`, `list_endpoints/1`, `get_template/2`, `list_templates/1`
+  and `create_template/1` apply it. Every other `raw` key stays.
+- `Spec.Template.env` still holds the template's configured values: it is a
+  normalized field, and `inspect(template, structs: false)` prints it.
+  Read values you need from `env`, not `raw["env"]`.
+- An error for a 3xx, 4xx or 5xx status whose body echoes a resource keeps no
+  `env` in `Error.raw`, on every provider that shares `HTTP.handle_response/3`.
+  The rest of the body stays. Only the `env` key goes.
+
 ### Fixed: `Compute.raw` no longer holds a RunPod pod's `env` (#126)
 
 RunPod echoes a pod's `env` (its bearer token, the callback token and the
@@ -79,8 +101,7 @@ compute.raw["env"]
 - An error for a success status the caller did not expect (a spawn answered
   `200` instead of `201`) keeps no `raw`, and `get_compute/2` keeps none for a
   200 body that is not a pod object: either body can hold pods and their `env`.
-- `Spec.Endpoint.raw` and `Spec.Template.raw` keep `env`; no tracker holds
-  them and `inspect/1` hides it.
+- `Spec.Endpoint.raw` and `Spec.Template.raw` follow in the next entry (#133).
 
 ### Added: keep tracking records in your database (#120)
 

@@ -3,8 +3,9 @@ defmodule ExAtlas.Spec.Template do
   Normalized template returned by `ExAtlas.create_template/1`,
   `ExAtlas.get_template/2` and `ExAtlas.list_templates/1`.
 
-  `raw` holds the provider's own body. `inspect/1` leaves out `env` and `raw`:
-  template env holds secrets.
+  `raw` holds the provider's own body without `env`. `env` holds the
+  configured values, and `inspect/1` leaves out `env` and `raw`: template env
+  holds secrets.
   """
 
   @derive {Inspect, except: [:env, :raw]}
