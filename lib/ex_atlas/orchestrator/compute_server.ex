@@ -63,9 +63,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   An interactive session whose non-empty `:command` self-terminates (the
   `ExAtlas.Spec.ComputeRequest` default) also ends on its container's finish
-  report, after `:finish_grace_ms`, with `{:terminating, :finished}`. A Lambda
-  instance cannot delete itself, so without this it would bill until the idle
-  TTL. `touch/1` does not postpone that end: the report says the command is
+  report, after `:finish_grace_ms`, with `{:terminating, :finished}`, unless
+  a status poll saw the resource disappear first. A Lambda instance cannot
+  delete itself, so without this it would bill until the idle TTL. `touch/1` does not postpone that end: the report says the command is
   over.
 
   ## The cost cap

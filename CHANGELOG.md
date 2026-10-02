@@ -76,7 +76,8 @@ wherever curl ran.
 `self_terminate: true` (the default) now ends on the container's finish
 report, as `run_task/1` does. `finish_grace_ms` (default 60 s) after
 `{:task_report, report}`, the tracker broadcasts `{:terminating, :finished}`
-and deletes the resource. `touch/1` does not postpone it. Before, a Lambda
+and deletes the resource, unless it disappeared first (a RunPod pod deletes
+itself). `touch/1` does not postpone it. Before, a Lambda
 instance whose command had exited billed until the idle TTL.
 `self_terminate: false` keeps the session up after the report, as before.
 

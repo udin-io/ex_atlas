@@ -42,7 +42,9 @@ defmodule ExAtlas.Orchestrator.Events do
       `mode: :task` it also ends the task: either the usual disappearance
       confirms it, or a `:finish_grace_ms` timer does. An interactive session
       whose `:command` self-terminates ends on it too, after
-      `:finish_grace_ms`, with `{:terminating, :finished}`.
+      `:finish_grace_ms`, with `{:terminating, :finished}`. A RunPod pod
+      that deletes itself first ends the session as a disappearance, with
+      no `:finished`.
     * `{:task, outcome}` — a `mode: :task` session ended, and this is what
       happened: `:completed`, `:timed_out`, or `{:failed, reason}`, where
       `reason` is `:cost_cap` when the spend reached `:max_cost`. Sent

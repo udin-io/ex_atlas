@@ -109,7 +109,8 @@ defmodule ExAtlas.Orchestrator do
   With a non-empty `:command`, a `:callback` and `self_terminate: true` (the
   default), the container's finish report ends the session:
   `:finish_grace_ms` (default 60 s) after `{:task_report, report}`, the
-  tracker broadcasts `{:terminating, :finished}` and deletes the resource.
+  tracker broadcasts `{:terminating, :finished}` and deletes the resource,
+  unless the resource disappeared first (a RunPod pod deletes itself).
   `touch/1` does not postpone it. With `self_terminate: false` the report is
   announced and the session runs on until its idle TTL.
 
