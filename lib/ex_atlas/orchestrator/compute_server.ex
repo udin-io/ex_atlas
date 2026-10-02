@@ -557,7 +557,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     state =
       %{
         new_state(compute, opts, tracking)
-        | respawns: record.respawns,
+        | respawns: spent_respawns(record),
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
@@ -658,6 +658,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       _valid_or_absent -> opts
     end
   end
+
+  # A respawn that was renting when the node died spent its attempt: the
+  # provider may have rented the replacement, which no record names (risk 51).
+  # A record without the field (0.8.0's) or with `nil` started none.
+  defp spent_respawns(%{respawning: attempt}) when is_integer(attempt), do: attempt
+  defp spent_respawns(record), do: record.respawns
 
   # What is left of a wall-clock budget, measured from the spawn that started
   # it. `0` means the budget is gone and the deadline fires on the next pass

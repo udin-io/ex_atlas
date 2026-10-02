@@ -58,9 +58,11 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
   defp pod_token(%{raw: %{request: request}}),
     do: ExAtlas.Spec.ComputeRequest.container_env(request)["ATLAS_CALLBACK_TOKEN"]
 
-  defp post_finish(token, exit_code) do
+  defp post_finish(token, exit_code), do: post(token, "/finish", ~s({"exit_code":#{exit_code}}))
+
+  defp post(token, path, body) do
     :post
-    |> Plug.Test.conn("/finish", ~s({"exit_code":#{exit_code}}))
+    |> Plug.Test.conn(path, body)
     |> Plug.Conn.put_req_header("content-type", "application/json")
     |> Plug.Conn.put_req_header("authorization", "Bearer " <> token)
     |> ExAtlas.Callback.Plug.call([])
@@ -1753,6 +1755,95 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       assert {:ok, %{owner: "a"}} = Memory.get(compute.id)
       assert Orchestrator.list_ids() == []
+    end
+  end
+
+  # Risk 51. Pod A is preempted, the tracker rents pod B, and the node dies
+  # before the record moves to B. B runs on with a token for attempt 1 and no
+  # tracker; the record still names A.
+  describe "a node that dies while a respawn rents the replacement" do
+    alias ExAtlas.Test.FaultyProvider
+
+    defp died_mid_respawn(max_attempts) do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            callback: "https://app.example.com/atlas/cb",
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, max_attempts}
+          )
+        )
+
+      FaultyProvider.arm(:spawn_compute, {:block_after, self()})
+      :ok = Mock.set_status(pod_a.id, :stopped)
+      assert_receive {:blocked, :spawn_compute, ^pid}, 2_000
+      FaultyProvider.reset()
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      TestOrchestrator.sync_registry()
+
+      {:ok, pods} = Mock.list_compute([], %{})
+      assert [pod_b] = Enum.reject(pods, &(&1.id == pod_a.id))
+      assert {:ok, %{id: id}} = Memory.get(pod_a.id)
+      assert id == pod_a.id
+      assert :error = Memory.get(pod_b.id)
+
+      {pod_a, pod_b}
+    end
+
+    test "the interrupted attempt counts as spent, so a spent budget rents nothing more" do
+      {pod_a, _pod_b} = died_mid_respawn(1)
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert_receive {:atlas_compute, ^old_id, {:task, _outcome}}, 2_000
+      refute_received {:atlas_compute, ^old_id, {:respawned, _}}
+      assert {:ok, pods} = Mock.list_compute([], %{})
+      assert length(pods) == 2
+    end
+
+    # A record 0.8.0 wrote has no `:respawning`; a host store that nils a
+    # field it does not know returns `nil`. Both adopt as before this field:
+    # the current pod reports, and the budget is what `respawns` says.
+    for shape <- [:missing, nil] do
+      test "a record with :respawning #{inspect(shape)} adopts and respawns as before" do
+        compute =
+          orphaned_task(
+            provider: ExAtlas.Test.FaultyProvider,
+            callback: "https://app.example.com/atlas/cb",
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+
+        {:ok, record} = Memory.get(compute.id)
+
+        record =
+          case unquote(shape) do
+            :missing -> Map.delete(record, :respawning)
+            nil -> Map.put(record, :respawning, nil)
+          end
+
+        :ok = Memory.put(record)
+        old_id = compute.id
+        Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+        :ok = Adopter.run(notify: self())
+        assert_receive :adoption_complete, 2_000
+
+        assert post(pod_token(compute), "/progress", ~s({"step":1})).status == 202
+        assert_receive {:atlas_compute, ^old_id, {:progress, %{"step" => 1}}}, 2_000
+
+        :ok = Mock.set_status(old_id, :stopped)
+        assert_receive {:atlas_compute, ^old_id, {:respawned, _new_id}}, 2_000
+      end
     end
   end
 
