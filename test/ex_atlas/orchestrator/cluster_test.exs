@@ -9,7 +9,8 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
 
   alias ExAtlas.Orchestrator
   alias ExAtlas.Orchestrator.{Adopter, Reaper}
-  alias ExAtlas.Test.{Cluster, RemoteProvider}
+  alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: EctoStore
+  alias ExAtlas.Test.{Cluster, LeaseClock, RemoteProvider, Repo}
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
   alias ExAtlas.Test.TrackingStore.{Memory, Remote}
 
@@ -305,6 +306,58 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
       assert [[line]] = Regex.scan(~r/\[info\][^\n]*owner "b"[^\n]*/, log)
       assert line =~ compute.id
+    end
+  end
+
+  describe "a dead owner's pod, and connected nodes" do
+    # m1's lease stayed expired for the whole window on this node (m2). The
+    # peer's reported owner, or its silence, is the only thing that differs.
+    @describetag :tmp_dir
+    @ttl 60_000
+
+    setup %{tmp_dir: dir} do
+      Repo.start!(dir)
+
+      TestOrchestrator.put_env(
+        tracking_store: EctoStore,
+        repo: Repo,
+        reap_owner: "m2",
+        reap_grace_ms: 0,
+        reap_dead_owner_after_ms: 2 * @ttl
+      )
+
+      :ok = EctoStore.renew_lease("m1", System.system_time(:millisecond) - 1)
+
+      lease = LeaseClock.start!(store: EctoStore, owner: "m2", ttl_ms: @ttl)
+
+      LeaseClock.run_for!(lease, 2 * @ttl)
+      {:ok, compute} = spawn_untracked("atlas-m1-notebook-3")
+      {:ok, compute: compute}
+    end
+
+    test "a peer that reports the dead owner keeps its pod", %{node_b: node_b, compute: compute} do
+      Cluster.put_orchestrator_env(node_b, reap_owner: "m1")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "a peer that cannot report its owner keeps it too", %{node_b: node_b, compute: compute} do
+      :ok = Cluster.unload_ownership!(node_b)
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "control: a peer that reports another owner leaves the pod to the Reaper",
+         %{node_b: node_b, compute: compute} do
+      Cluster.put_orchestrator_env(node_b, reap_owner: "m3")
+
+      :ok = Reaper.reap_now("atlas-", [:mock])
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
   end
 
