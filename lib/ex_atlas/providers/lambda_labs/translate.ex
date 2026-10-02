@@ -12,14 +12,127 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   | `atlas-created-at` | ISO 8601 at launch | `created_at`; Lambda reports no creation time |
   | `atlas-image` | the image, when 128 characters or fewer | `image` |
 
-  Every function here is pure.
+  Every function here is pure, except `launch_parts/2`, which mints the
+  `:auth` credential.
   """
 
-  alias ExAtlas.Spec
+  alias ExAtlas.{Error, Secret, Spec}
 
   @tag_ports "atlas-ports"
   @tag_created_at "atlas-created-at"
   @tag_image "atlas-image"
+
+  # Lambda's tag values hold at most 128 characters.
+  @max_tag_value 128
+
+  # Lambda caps `user_data` at "1MB"; we take the smaller reading.
+  @max_user_data_bytes 1_000_000
+
+  @shell_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
+
+  # How long the script waits for the Docker daemon, which cloud-init can
+  # reach before `docker.service` is up: 90 tries, 2 s apart.
+  @docker_wait_tries 90
+
+  @typedoc """
+  What a launch needs from the request alone: the `user_data` script as a
+  `Secret` (`nil` with no image), the tags, the `Compute.auth` handle, and
+  every value the script carries, as a `Secret`, for scrubbing an error.
+  """
+  @type parts :: %{
+          user_data: Secret.t() | nil,
+          tags: [%{String.t() => String.t()}],
+          auth: Spec.Compute.auth_handle() | nil,
+          secret_values: Secret.t()
+        }
+
+  @doc """
+  Validate `request` and build the request-only parts of the launch body.
+
+  Returns `{:error, %ExAtlas.Error{kind: :validation}}` for an env name that
+  is not a shell identifier, a value holding a NUL byte, a port that is not
+  `{1..65535, :http | :tcp}`, `:env`, `:s3`, `:auth`, `:ports` or a callback
+  without an `:image`, or a script over #{@max_user_data_bytes} bytes. No
+  error names a value.
+  """
+  @spec launch_parts(Spec.ComputeRequest.t(), DateTime.t()) ::
+          {:ok, parts()} | {:error, Error.t()}
+  def launch_parts(%Spec.ComputeRequest{} = request, %DateTime{} = now) do
+    with :ok <- check_container_fields(request),
+         {:ok, ports} <- ports(request.ports) do
+      {auth_env, auth} = ExAtlas.Auth.for_scheme(request.auth)
+      env = request |> Spec.ComputeRequest.container_env() |> Map.merge(auth_env)
+
+      with :ok <- check_env(env),
+           {:ok, user_data} <- user_data(request.image, env, ports),
+           {:ok, tags} <- tags(request.image, ports, now) do
+        {:ok,
+         %{
+           user_data: Secret.wrap(user_data),
+           tags: tags,
+           auth: auth,
+           secret_values: Secret.wrap(Map.values(env))
+         }}
+      end
+    end
+  end
+
+  @doc """
+  The `POST /instance-operations/launch` body. `user_data` stays an
+  `ExAtlas.Secret` until `LambdaLabs.Client.post/4` encodes it.
+  """
+  @spec launch_body(Spec.ComputeRequest.t(), parts(), String.t(), String.t(), String.t()) :: map()
+  def launch_body(%Spec.ComputeRequest{} = request, parts, instance_type, region, ssh_key) do
+    %{
+      "region_name" => region,
+      "instance_type_name" => instance_type,
+      "ssh_key_names" => [ssh_key],
+      "name" => request.name,
+      "user_data" => parts.user_data,
+      "tags" => parts.tags
+    }
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  @doc """
+  The instance type to launch: `provider_opts.instance_type` when set, else
+  the catalog's 1x name for `:gpu` with `1x` swapped for `:gpu_count`
+  (`gpu_8x_h100_sxm5`). `types` is the `GET /instance-types` data; a name it
+  does not list is `:validation`.
+  """
+  @spec instance_type(Spec.ComputeRequest.t(), map()) :: {:ok, String.t()} | {:error, Error.t()}
+  def instance_type(%Spec.ComputeRequest{} = request, types) when is_map(types) do
+    case provider_opt(request, :instance_type) do
+      nil -> catalog_type(request, types)
+      name when is_binary(name) -> listed_type(name, types)
+      _other -> validation("provider_opts.instance_type must be a string")
+    end
+  end
+
+  @doc """
+  The region to launch `type_entry` in: the first of `hints` with capacity,
+  else the first region with capacity. None has capacity: `:provider`.
+  """
+  @spec region(String.t(), map(), [String.t()]) :: {:ok, String.t()} | {:error, Error.t()}
+  def region(type, %{} = type_entry, hints) do
+    with_capacity =
+      for %{"name" => name} when is_binary(name) <-
+            List.wrap(type_entry["regions_with_capacity_available"]),
+          do: name
+
+    case Enum.find(hints, &(&1 in with_capacity)) || List.first(with_capacity) do
+      nil ->
+        {:error,
+         Error.new(:provider,
+           provider: :lambda_labs,
+           message: "Lambda has no capacity for #{type} in any region"
+         )}
+
+      region ->
+        {:ok, region}
+    end
+  end
+
   @doc "Turn a Lambda `Instance` into an `ExAtlas.Spec.Compute`."
   @spec instance_to_compute(map(), Spec.Compute.auth_handle() | nil) :: Spec.Compute.t()
   def instance_to_compute(%{} = instance, auth \\ nil) do
@@ -48,6 +161,34 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   end
 
   @doc """
+  The `Compute` a launch returns, built from the request and the launch id.
+  No `GET` follows the launch: a failed read there must not turn a rented
+  instance into an error the caller drops.
+  """
+  @spec launched_compute(String.t(), Spec.ComputeRequest.t(), parts(), map(), String.t()) ::
+          Spec.Compute.t()
+  def launched_compute(id, request, parts, type_entry, region) do
+    type = map_or_empty(type_entry["instance_type"])
+    tags = tag_map(parts.tags)
+
+    %Spec.Compute{
+      id: id,
+      provider: :lambda_labs,
+      status: :provisioning,
+      ports: tags |> Map.get(@tag_ports) |> parse_ports() |> Enum.map(&binding(&1, nil)),
+      gpu_type: type["name"],
+      gpu_count: gpu_count(type),
+      cost_per_hour: price(type["price_cents_per_hour"]),
+      region: region,
+      image: request.image,
+      name: request.name,
+      auth: parts.auth,
+      created_at: parse_time(tags[@tag_created_at]),
+      raw: %{"instance_ids" => [id]}
+    }
+  end
+
+  @doc """
   Turn the `GET /instance-types` data into `ExAtlas.Spec.GpuType`s, one per
   instance type. Stock is `:unavailable` with no region, else `:unknown`:
   Lambda says only whether a region has capacity.
@@ -71,6 +212,183 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   def gpu_family?(_gpu_type, _canonical), do: false
 
+  # --- launch parts ---
+
+  defp check_container_fields(%Spec.ComputeRequest{image: image}) when is_binary(image), do: :ok
+
+  defp check_container_fields(request) do
+    used =
+      [
+        env: request.env != %{},
+        s3: request.s3 != nil,
+        auth: request.auth != :none,
+        ports: request.ports != [],
+        callback: request.callback != nil
+      ]
+      |> Enum.filter(fn {_field, set?} -> set? end)
+      |> Enum.map(fn {field, _} -> inspect(field) end)
+
+    case used do
+      [] ->
+        :ok
+
+      fields ->
+        validation(
+          "#{Enum.join(fields, ", ")} configure a container; Lambda runs one only " <>
+            "with an :image"
+        )
+    end
+  end
+
+  defp ports(ports) do
+    Enum.reduce_while(ports, {:ok, []}, fn
+      {port, protocol}, {:ok, acc}
+      when is_integer(port) and port in 1..65_535 and protocol in [:http, :tcp] ->
+        {:cont, {:ok, [{port, protocol} | acc]}}
+
+      other, _acc ->
+        {:halt, validation("a port must be {1..65535, :http | :tcp}, got: #{inspect(other)}")}
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, acc |> Enum.reverse() |> Enum.uniq()}
+      error -> error
+    end
+  end
+
+  defp check_env(env) do
+    Enum.find_value(env, :ok, fn {name, value} ->
+      cond do
+        not Regex.match?(@shell_name, name) ->
+          validation(
+            "env name #{inspect(name)} is not a shell identifier ([A-Za-z_][A-Za-z0-9_]*)"
+          )
+
+        String.contains?(value, <<0>>) ->
+          validation("the value of #{inspect(name)} holds a NUL byte, which a shell cannot carry")
+
+        true ->
+          nil
+      end
+    end)
+  end
+
+  defp user_data(nil, _env, _ports), do: {:ok, nil}
+
+  defp user_data(image, env, ports) do
+    names = env |> Map.keys() |> Enum.sort()
+
+    exports = Enum.map(names, fn name -> "export #{name}=#{shell_quote(env[name])}\n" end)
+
+    flags =
+      Enum.map(ports, fn {port, _} -> " -p #{port}:#{port}" end) ++
+        Enum.map(names, &" -e #{&1}")
+
+    # Values reach `docker` through its environment, never its argv, so `ps`
+    # on the instance shows names only. No `set -x`: cloud-init logs the
+    # script's output.
+    script =
+      IO.iodata_to_binary([
+        "#!/bin/bash\n",
+        "set -euo pipefail\n",
+        exports,
+        "for _ in $(seq 1 #{@docker_wait_tries}); do ",
+        "docker info >/dev/null 2>&1 && break; sleep 2; done\n",
+        "docker run --detach --name atlas --gpus all --restart no",
+        flags,
+        " ",
+        shell_quote(image),
+        "\n"
+      ])
+
+    if byte_size(script) > @max_user_data_bytes do
+      validation(
+        "the user_data script is #{byte_size(script)} bytes; Lambda takes at most " <>
+          "#{@max_user_data_bytes}"
+      )
+    else
+      {:ok, script}
+    end
+  end
+
+  # POSIX single quotes: nothing inside is shell syntax, and an embedded `'`
+  # closes, escapes and reopens.
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
+
+  defp tags(image, ports, now) do
+    ports_value = Enum.map_join(ports, ",", fn {port, protocol} -> "#{port}/#{protocol}" end)
+
+    if String.length(ports_value) > @max_tag_value do
+      validation(
+        "the ports take #{String.length(ports_value)} characters as a Lambda tag; " <>
+          "at most #{@max_tag_value} fit"
+      )
+    else
+      {:ok,
+       [
+         {@tag_created_at, DateTime.to_iso8601(DateTime.truncate(now, :second))},
+         {@tag_ports, ports_value},
+         {@tag_image, image_tag(image)}
+       ]
+       |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+       |> Enum.map(fn {key, value} -> %{"key" => key, "value" => value} end)}
+    end
+  end
+
+  defp image_tag(image) when is_binary(image) do
+    if String.length(image) <= @max_tag_value, do: image
+  end
+
+  defp image_tag(nil), do: nil
+
+  # --- instance type ---
+
+  defp catalog_type(request, types) do
+    with {:ok, suffix} <- family_or_error(request.gpu) do
+      name = "gpu_#{request.gpu_count}x_#{suffix}"
+
+      if Map.has_key?(types, name) do
+        {:ok, name}
+      else
+        counts =
+          types
+          |> Map.keys()
+          |> Enum.flat_map(fn listed ->
+            case Regex.run(~r/\Agpu_(\d+)x_#{Regex.escape(suffix)}\z/, listed) do
+              [_, count] -> [String.to_integer(count)]
+              nil -> []
+            end
+          end)
+          |> Enum.sort()
+
+        listed =
+          if counts == [],
+            do: "lists no #{suffix} type",
+            else: "lists #{suffix} with #{Enum.join(counts, ", ")} GPUs"
+
+        validation("Lambda has no #{name}: it #{listed}")
+      end
+    end
+  end
+
+  defp listed_type(name, types) do
+    if Map.has_key?(types, name),
+      do: {:ok, name},
+      else: validation("Lambda lists no instance type #{inspect(name)}")
+  end
+
+  defp family_or_error(gpu) do
+    case family(gpu) do
+      {:ok, suffix} ->
+        {:ok, suffix}
+
+      :error ->
+        validation(
+          "Lambda has no mapping for GPU #{inspect(gpu)}. Known: " <>
+            inspect(Enum.sort(Spec.GpuCatalog.supported_gpus(:lambda_labs)))
+        )
+    end
+  end
+
   defp family(canonical) do
     with {:ok, "gpu_1x_" <> suffix} <- Spec.GpuCatalog.for_provider(canonical, :lambda_labs) do
       {:ok, suffix}
@@ -88,6 +406,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   end
 
   defp canonical_for(_name), do: nil
+
+  defp provider_opt(request, key),
+    do: Map.get(request.provider_opts, key) || Map.get(request.provider_opts, to_string(key))
 
   # --- reading an instance ---
 
@@ -190,4 +511,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   defp string_or_nil(value) when is_binary(value) and value != "", do: value
   defp string_or_nil(_), do: nil
+
+  defp validation(message),
+    do: {:error, Error.new(:validation, provider: :lambda_labs, message: message)}
 end

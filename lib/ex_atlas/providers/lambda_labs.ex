@@ -32,15 +32,26 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   @behaviour ExAtlas.Provider
 
-  alias ExAtlas.{Error, Spec}
+  alias ExAtlas.{Error, Secret, Spec}
+  alias ExAtlas.Providers.HTTP
   alias ExAtlas.Providers.LambdaLabs.{Client, Translate}
 
   @impl true
   def capabilities, do: [:raw_tcp]
 
   @impl true
-  def spawn_compute(%Spec.ComputeRequest{}, _ctx),
-    do: unsupported("spawn_compute is not implemented for Lambda yet")
+  def spawn_compute(%Spec.ComputeRequest{} = request, ctx) do
+    with :ok <- check_supported(request),
+         {:ok, ssh_key} <- ssh_key(request),
+         {:ok, parts} <- Translate.launch_parts(request, DateTime.utc_now()),
+         {:ok, types} <- instance_types(ctx),
+         {:ok, type} <- Translate.instance_type(request, types),
+         {:ok, region} <- Translate.region(type, types[type], request.region_hints),
+         body = Translate.launch_body(request, parts, type, region, ssh_key),
+         {:ok, id} <- launch(ctx, body, parts) do
+      {:ok, Translate.launched_compute(id, request, parts, types[type], region)}
+    end
+  end
 
   @impl true
   def get_compute(id, ctx) do
@@ -82,7 +93,43 @@ defmodule ExAtlas.Providers.LambdaLabs do
     with {:ok, types} <- instance_types(ctx), do: {:ok, Translate.gpu_types(types)}
   end
 
-  # --- helpers ---
+  # --- spawn ---
+
+  defp check_supported(%Spec.ComputeRequest{} = request) do
+    unsupported =
+      [
+        spot: request.spot,
+        template_id: request.template_id != nil,
+        network_volume_id: request.network_volume_id != nil,
+        command: request.command not in [nil, []]
+      ]
+      |> Enum.find(fn {_field, set?} -> set? end)
+
+    case unsupported do
+      nil -> :ok
+      {:command, _} -> unsupported(":command is not supported on Lambda yet")
+      {field, _} -> unsupported("Lambda has no #{field}")
+    end
+  end
+
+  defp ssh_key(request) do
+    configured = Application.get_env(:ex_atlas, :lambda_labs, [])[:ssh_key_name]
+
+    case Map.get(request.provider_opts, :ssh_key_name) ||
+           Map.get(request.provider_opts, "ssh_key_name") || configured do
+      key when is_binary(key) and key != "" ->
+        {:ok, key}
+
+      _ ->
+        {:error,
+         Error.new(:validation,
+           provider: :lambda_labs,
+           message:
+             "Lambda needs exactly one SSH key name: pass provider_opts: %{ssh_key_name: name} " <>
+               "or set config :ex_atlas, :lambda_labs, ssh_key_name: name"
+         )}
+    end
+  end
 
   defp instance_types(ctx) do
     case Client.get(ctx, "/instance-types") do
@@ -91,6 +138,41 @@ defmodule ExAtlas.Providers.LambdaLabs do
       {:error, _} = err -> err
     end
   end
+
+  # Retried on a 429 only: a launch that answered 5xx or timed out may have
+  # rented an instance already.
+  defp launch(ctx, body, parts) do
+    case Client.post(ctx, "/instance-operations/launch", body, retry: &HTTP.retry_rate_limited/2) do
+      {:ok, %{"instance_ids" => [id | _]}} when is_binary(id) ->
+        {:ok, id}
+
+      {:ok, _other} ->
+        unexpected_body("POST /instance-operations/launch")
+
+      {:error, %Error{} = error} ->
+        {:error, scrub(error, Secret.reveal(parts.secret_values))}
+    end
+  end
+
+  # Lambda may echo a refused field in its error. A message that holds a value
+  # of the script is withheld, and `raw` keeps only Lambda's error code.
+  defp scrub(%Error{} = error, values) do
+    code = code(error.raw)
+
+    message =
+      if is_binary(error.message) and Enum.any?(values, &echoes?(error.message, &1)),
+        do: "Lambda refused the launch (#{code || "no code"}); its message is withheld",
+        else: error.message
+
+    %{error | message: message, raw: code && %{"error" => %{"code" => code}}}
+  end
+
+  defp echoes?(message, value), do: value != "" and String.contains?(message, value)
+
+  defp code(%{"error" => %{"code" => code}}) when is_binary(code), do: code
+  defp code(_raw), do: nil
+
+  # --- helpers ---
 
   defp no_stop(fun),
     do: unsupported("Lambda instances cannot #{fun}; terminate it and spawn a new one")
