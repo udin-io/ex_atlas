@@ -309,14 +309,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   `#{inspect(Config.secret_req_options())}` entries of `:req_options`,
   where a hand-rolled bearer header or AWS signing key would be. `:s3` keeps
   its endpoint, region and URIs, and `credentials: :not_stored` in place of
-  the keys and presigned URLs (`ExAtlas.Spec.Staging.scrub/1`).
+  the keys and presigned URLs (`ExAtlas.Spec.Staging.scrub/1`); with
+  `scrub_keys: [:s3]` it keeps the marker alone.
   """
   @spec scrub_opts(keyword()) :: keyword()
   def scrub_opts(opts) do
+    scrub_keys = configured_scrub_keys()
+
     opts
-    |> Keyword.drop(@secret_opts ++ configured_scrub_keys())
+    |> Keyword.drop(@secret_opts ++ scrub_keys)
     |> scrub_req_options()
-    |> scrub_staging()
+    |> put_staging(Keyword.get(opts, :s3), :s3 in scrub_keys)
   end
 
   @doc """
@@ -342,13 +345,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     end
   end
 
-  defp scrub_staging(opts) do
-    case Keyword.fetch(opts, :s3) do
-      {:ok, nil} -> opts
-      {:ok, s3} -> Keyword.put(opts, :s3, Spec.Staging.scrub(s3))
-      :error -> opts
-    end
-  end
+  # `scrub_keys: [:s3]` keeps the marker alone, never nothing: a record with no
+  # `s3:` would let an adopted task respawn with no staging at all.
+  defp put_staging(opts, nil, _scrubbed?), do: opts
+  defp put_staging(opts, _s3, true), do: Keyword.put(opts, :s3, Spec.Staging.scrub(nil))
+  defp put_staging(opts, s3, false), do: Keyword.put(opts, :s3, Spec.Staging.scrub(s3))
 
   defp configured_scrub_keys do
     orchestrator_config() |> Keyword.get(:scrub_keys, []) |> List.wrap()

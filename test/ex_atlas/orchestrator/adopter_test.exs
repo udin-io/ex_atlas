@@ -436,6 +436,30 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert :error = Memory.get(id)
     end
 
+    test "scrub_keys: [:s3] keeps the marker, so the respawn is still refused" do
+      # A host that scrubs `:s3` whole must not lose the refusal with it: a
+      # record with no `s3:` would respawn a pod with no staging at all.
+      TestOrchestrator.put_env(scrub_keys: [:s3])
+      compute = orphaned_staged_task("trainer-adopted-s3-scrubbed:latest")
+      id = compute.id
+
+      assert {:ok, %{opts: opts}} = Memory.get(id)
+      assert opts[:s3] == %{credentials: :not_stored}
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-s3-scrubbed:latest" in images()
+    end
+
     test "a host store that dropped the marker still adopts, and still refuses the respawn" do
       compute = orphaned_staged_task("trainer-adopted-s3-nomarker:latest")
       id = compute.id
