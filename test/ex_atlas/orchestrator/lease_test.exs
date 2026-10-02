@@ -448,13 +448,17 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
+    # m1 renews on its own clock every step; by m2's clock its lease is a day
+    # in the past every time m2 reads it.
     test "a wall clock a day ahead makes no live owner dead" do
       :ok = Store.renew_lease("m1", now() + @ttl)
       lease = watching_lease!("m2")
-      LeaseClock.run_for!(lease, @step)
-
       LeaseClock.step!(lease, 86_400_000, @step)
-      LeaseClock.run_for!(lease, @window - 2 * @step - 1)
+
+      for i <- 1..div(2 * @window, @step) do
+        :ok = Store.renew_lease("m1", now() + @ttl + i)
+        LeaseClock.step!(lease, @step, @step)
+      end
 
       assert Lease.dead_owners() == %{}
     end

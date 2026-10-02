@@ -308,9 +308,14 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
     end
 
     test "this node's wall clock a day ahead deletes no live owner's pod", %{lease: lease} do
-      :ok = Store.renew_lease("m1", now() + @ttl)
-      LeaseClock.step!(lease, 86_400_000, div(@ttl, 3))
-      LeaseClock.run_for!(lease, @window - div(@ttl, 3) - 1)
+      step = div(@ttl, 3)
+      LeaseClock.step!(lease, 86_400_000, step)
+
+      for i <- 1..div(2 * @window, step) do
+        :ok = Store.renew_lease("m1", now() + @ttl + i)
+        LeaseClock.step!(lease, step, step)
+      end
+
       compute = pod()
 
       reap()
