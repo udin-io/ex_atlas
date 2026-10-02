@@ -50,6 +50,7 @@ defmodule ExAtlas.Orchestrator do
   """
 
   alias ExAtlas.Callback
+  alias ExAtlas.Config
 
   alias ExAtlas.Orchestrator.{
     ComputeRegistry,
@@ -150,7 +151,8 @@ defmodule ExAtlas.Orchestrator do
   def spawn(opts) do
     ensure_running!()
 
-    with {:ok, opts} <- Callback.prepare(opts),
+    with {:ok, opts} <- Config.seal_credentials(opts),
+         {:ok, opts} <- Callback.prepare(opts),
          {:ok, opts} <- stage(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),

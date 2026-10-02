@@ -17,6 +17,9 @@ defmodule ExAtlas.Config do
     3. Environment variable (e.g. `RUNPOD_API_KEY`, `LAMBDA_LABS_API_KEY`).
     4. `nil` (providers decide whether to raise).
 
+  The ctx holds the key as an `ExAtlas.Secret`; a provider reads it with
+  `ExAtlas.Secret.reveal/1` where its HTTP client needs it.
+
   This mirrors the `stripity_stripe` / `ex_aws` pattern: per-call overrides win,
   application config is the default, no global mutable state. Multi-tenant hosts
   pass `api_key:` per request and skip config entirely.
@@ -31,6 +34,8 @@ defmodule ExAtlas.Config do
       config :ex_atlas, :runpod, api_key: System.get_env("RUNPOD_API_KEY")
       config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY")
   """
+
+  alias ExAtlas.Secret
 
   @builtin_providers %{
     runpod: ExAtlas.Providers.RunPod,
@@ -52,6 +57,21 @@ defmodule ExAtlas.Config do
   @resolved_opts [:provider, :api_key, :base_url, :req_options]
 
   @type opts :: keyword()
+
+  @doc """
+  Wrap the credentials in `opts` in `ExAtlas.Secret`, so no stacktrace that
+  carries `opts` prints them.
+
+  `ExAtlas.Orchestrator.spawn/1` runs this before anything else reads its
+  opts; `build_ctx/2` runs it for every provider call.
+  """
+  @spec seal_credentials(opts()) :: {:ok, opts()}
+  def seal_credentials(opts) do
+    case Keyword.fetch(opts, :api_key) do
+      :error -> {:ok, opts}
+      {:ok, key} -> {:ok, Keyword.put(opts, :api_key, Secret.wrap(key))}
+    end
+  end
 
   @doc "Pop `:provider` from opts and return `{provider_atom_or_module, remaining_opts}`."
   @spec pop_provider!(opts()) :: {atom() | module(), opts()}
@@ -89,6 +109,8 @@ defmodule ExAtlas.Config do
   """
   @spec build_ctx(atom() | module(), opts()) :: ExAtlas.Provider.ctx()
   def build_ctx(provider, opts) do
+    {:ok, opts} = seal_credentials(opts)
+
     opts
     |> Keyword.drop(@resolved_opts)
     # Storage credentials belong to the request alone; a tracker passes its
@@ -97,7 +119,7 @@ defmodule ExAtlas.Config do
     |> Map.new()
     |> Map.merge(%{
       provider: provider,
-      api_key: resolve_api_key(provider, opts),
+      api_key: provider |> resolve_api_key(opts) |> Secret.wrap(),
       base_url: Keyword.get(opts, :base_url),
       req_options: Keyword.get(opts, :req_options, [])
     })

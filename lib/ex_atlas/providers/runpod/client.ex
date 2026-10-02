@@ -32,12 +32,12 @@ defmodule ExAtlas.Providers.RunPod.Client do
   """
   @spec management(ExAtlas.Provider.ctx()) :: Req.Request.t()
   def management(ctx) do
-    api_key = fetch_key!(ctx)
+    auth = bearer!(ctx)
     base = Map.get(ctx, :base_url) || @management_url
 
     Req.new(
       base_url: base,
-      auth: {:bearer, api_key},
+      auth: auth,
       headers: [{"content-type", "application/json"}, {"accept", "application/json"}],
       retry: :transient,
       max_retries: 3,
@@ -54,11 +54,11 @@ defmodule ExAtlas.Providers.RunPod.Client do
   """
   @spec runtime(ExAtlas.Provider.ctx(), String.t()) :: Req.Request.t()
   def runtime(ctx, endpoint_id) do
-    api_key = fetch_key!(ctx)
+    auth = bearer!(ctx)
 
     Req.new(
       base_url: "#{@runtime_url}/#{endpoint_id}",
-      auth: {:bearer, api_key},
+      auth: auth,
       headers: [{"content-type", "application/json"}, {"accept", "application/json"}],
       retry: :transient,
       max_retries: 3,
@@ -187,7 +187,10 @@ defmodule ExAtlas.Providers.RunPod.Client do
 
   defp merge_user_options(req, _ctx), do: req
 
-  defp fetch_key!(%{api_key: nil}) do
+  # `ctx.api_key` is an `ExAtlas.Secret`. Req calls the function in its `auth`
+  # step, so the raw key sits in no `Req.Request` field before the header,
+  # which Req's `inspect/1` redacts.
+  defp bearer!(%{api_key: nil}) do
     raise ExAtlas.Error,
       kind: :unauthorized,
       provider: :runpod,
@@ -196,5 +199,5 @@ defmodule ExAtlas.Providers.RunPod.Client do
           "`config :ex_atlas, :runpod, api_key: \"...\"`, or set RUNPOD_API_KEY."
   end
 
-  defp fetch_key!(%{api_key: key}) when is_binary(key), do: key
+  defp bearer!(%{api_key: secret}), do: fn -> {:bearer, ExAtlas.Secret.reveal(secret)} end
 end

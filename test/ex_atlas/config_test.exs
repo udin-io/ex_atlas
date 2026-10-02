@@ -27,7 +27,7 @@ defmodule ExAtlas.ConfigTest do
 
   test "build_ctx resolves api_key from opts" do
     ctx = Config.build_ctx(:runpod, api_key: "from-opts")
-    assert ctx.api_key == "from-opts"
+    assert ExAtlas.Secret.reveal(ctx.api_key) == "from-opts"
     assert ctx.provider == :runpod
   end
 
@@ -36,7 +36,7 @@ defmodule ExAtlas.ConfigTest do
     on_exit(fn -> Application.delete_env(:ex_atlas, :runpod) end)
 
     ctx = Config.build_ctx(:runpod, [])
-    assert ctx.api_key == "from-config"
+    assert ExAtlas.Secret.reveal(ctx.api_key) == "from-config"
   end
 
   test "build_ctx threads provider-specific opts (e.g. :endpoint) into the ctx" do
@@ -55,7 +55,7 @@ defmodule ExAtlas.ConfigTest do
         endpoint: "abc123"
       )
 
-    assert ctx.api_key == "k"
+    assert ExAtlas.Secret.reveal(ctx.api_key) == "k"
     assert ctx.base_url == "http://example.test"
     assert ctx.req_options == [receive_timeout: 1]
     assert ctx.endpoint == "abc123"

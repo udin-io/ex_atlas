@@ -247,6 +247,68 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  # The Mock, but each status poll sends its ctx to the pid in
+  # `:key_echo_pid`, so a test sees what a tracker hands the provider.
+  defmodule KeyEchoProvider do
+    alias ExAtlas.Providers.Mock
+
+    def capabilities, do: Mock.capabilities()
+    defdelegate spawn_compute(req, ctx), to: Mock
+    defdelegate terminate(id, ctx), to: Mock
+
+    def get_compute(id, ctx) do
+      send(Application.fetch_env!(:ex_atlas, :key_echo_pid), {:poll_ctx, ctx})
+      Mock.get_compute(id, ctx)
+    end
+  end
+
+  describe "credentials beyond the State line" do
+    @api_key "sk-tracker-probe-7a3e"
+
+    # Crashes the tracker with a FunctionClauseError. OTP prints the
+    # callback's arguments, the state included, outside `format_status/1`.
+    defp clause_crash_log(pid) do
+      ref = Process.monitor(pid)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      end)
+    end
+
+    defp spawn_tracked(extra) do
+      [provider: :mock, gpu: :h100, image: "x", status_poll_ms: false]
+      |> Keyword.merge(extra)
+      |> ExAtlas.Orchestrator.spawn()
+    end
+
+    test "a function clause crash prints no api_key" do
+      {:ok, pid, compute} = spawn_tracked(api_key: @api_key)
+
+      log = clause_crash_log(pid)
+
+      # The crash and its stacktrace were logged, so the refute is not vacuous.
+      assert log =~ "terminating"
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute log =~ @api_key
+    end
+
+    test "control: the tracker's polls still hand the per-call key to the provider" do
+      Application.put_env(:ex_atlas, :key_echo_pid, self())
+      on_exit(fn -> Application.delete_env(:ex_atlas, :key_echo_pid) end)
+
+      {:ok, _pid, _compute} =
+        spawn_tracked(provider: KeyEchoProvider, api_key: @api_key, status_poll_ms: 20)
+
+      assert_receive {:poll_ctx, ctx}, 2_000
+      assert reveal(ctx.api_key) == @api_key
+    end
+
+    defp reveal(%{__struct__: _} = secret), do: ExAtlas.Secret.reveal(secret)
+    defp reveal(value), do: value
+  end
+
   describe "upstream status polling" do
     setup do
       # Idle TTL and heartbeat are pushed far out so nothing but the status
