@@ -494,6 +494,86 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a task with env:" do
+    @env %{"HF_TOKEN" => "hf-adopt-probe-5b70", "WANDB_PROJECT" => "atlas"}
+
+    defp orphaned_env_task(image, env \\ @env) do
+      orphaned_task(
+        image: image,
+        env: env,
+        spot: true,
+        on_failure: {:respawn, 1},
+        status_poll_ms: 30
+      )
+    end
+
+    defp env_images do
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      Enum.map(computes, & &1.image)
+    end
+
+    # Adopt `id` and preempt it; returns the tracker's pid.
+    defp adopt_and_preempt(id) do
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      {:ok, pid} = Orchestrator.lookup(id)
+      assert {:ok, %{mode: :task}} = Orchestrator.info(id)
+      :ok = Mock.forget(id)
+      pid
+    end
+
+    test "a record holding env names alone refuses the respawn, naming them" do
+      compute = orphaned_env_task("trainer-adopted-env-marked:latest")
+      id = compute.id
+
+      {:ok, record} = Memory.get(id)
+      marked = %{"HF_TOKEN" => :not_stored, "WANDB_PROJECT" => :not_stored}
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, marked)})
+
+      pid = adopt_and_preempt(id)
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed,
+                       {:preempted, %ExAtlas.Error{kind: :validation, message: message}}}},
+                     2_000
+
+      assert message =~ "HF_TOKEN, WANDB_PROJECT"
+      assert message =~ "not stored"
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-env-marked:latest" in env_images()
+    end
+
+    test "a record whose env: is the bare marker refuses the respawn" do
+      compute = orphaned_env_task("trainer-adopted-env-bare:latest")
+      id = compute.id
+
+      {:ok, record} = Memory.get(id)
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, :not_stored)})
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute "trainer-adopted-env-bare:latest" in env_images()
+    end
+
+    test "control: an empty env: respawns after adoption" do
+      compute = orphaned_env_task("trainer-adopted-env-empty:latest", %{})
+      id = compute.id
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, _new_id}}, 2_000
+      assert "trainer-adopted-env-empty:latest" in env_images()
+    end
+  end
+
   describe "a store that cannot account for itself" do
     test "adopts nothing and reports the failure" do
       compute = orphaned_task()

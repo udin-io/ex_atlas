@@ -1021,23 +1021,45 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
-  # An adopted task's `s3:` came from its record, which never holds the
-  # credentials or presigned URLs. A replacement without them would run blind,
-  # and `ExAtlas.spawn_compute/1` raises on the marker, so the respawn ends
-  # here, before the provider is asked for anything.
+  # An adopted task's `s3:` and `env:` came from its record, which never holds
+  # the credentials, presigned URLs or env values. A replacement without them
+  # would run blind, and `ExAtlas.spawn_compute/1` raises on the markers, so the
+  # respawn ends here, before the provider is asked for anything.
   defp spawn_replacement(opts) do
-    if Spec.Staging.not_stored?(Keyword.get(opts, :s3)) do
-      {:error,
-       ExAtlas.Error.new(:validation,
-         provider: Keyword.get(opts, :provider),
-         message:
-           "cannot respawn: the :s3 staging credentials are not stored in a tracking " <>
-             "record, so a task adopted after a restart has none to give a replacement"
-       )}
-    else
-      ExAtlas.spawn_compute(opts)
+    cond do
+      Spec.Staging.not_stored?(Keyword.get(opts, :s3)) ->
+        not_stored(opts, "the :s3 staging credentials are")
+
+      names = unstored_env(Keyword.get(opts, :env)) ->
+        not_stored(opts, "the :env values#{names} are")
+
+      true ->
+        ExAtlas.spawn_compute(opts)
     end
   end
+
+  defp not_stored(opts, what) do
+    {:error,
+     ExAtlas.Error.new(:validation,
+       provider: Keyword.get(opts, :provider),
+       message:
+         "cannot respawn: #{what} not stored in a tracking record, so a task " <>
+           "adopted after a restart has none to give a replacement"
+     )}
+  end
+
+  # The names of the values a record left out, as a message suffix; `nil` when
+  # the env is whole. `TrackingStore.scrub_opts/1` writes both markers.
+  defp unstored_env(:not_stored), do: ""
+
+  defp unstored_env(env) when is_map(env) do
+    case for {name, :not_stored} <- env, do: name do
+      [] -> nil
+      names -> " (#{names |> Enum.sort() |> Enum.join(", ")})"
+    end
+  end
+
+  defp unstored_env(_env), do: nil
 
   # A death does not always mean the resource is gone. A reclaimed spot pod
   # reads as `status: EXITED` — dead to us, still present upstream,
