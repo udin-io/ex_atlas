@@ -20,7 +20,7 @@ if Code.ensure_loaded?(Igniter) do
     version in `mix.lock` before the update and the one after. Run directly,
     the task takes `<from_version>` as `0.1.0` and `<to_version>` as the
     installed ex_atlas version, so it runs every upgrader. Each upgrader is
-    idempotent. `mix ex_atlas.upgrade 0.7.0 0.8.0` runs the steps in that range
+    idempotent. `mix ex_atlas.upgrade 0.8.0 0.9.0` runs the steps in that range
     only.
 
     ## Registered upgraders
