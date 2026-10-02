@@ -68,4 +68,61 @@ defmodule ExAtlas.Test.FakeVast do
 
   @doc "A refused rent, as Vast's reference documents it."
   def refused(code, msg), do: %{"success" => false, "error" => code, "msg" => msg}
+
+  @doc """
+  Start a fake Vast on Bypass that keeps rented instances in an Agent.
+  Returns the opts every conformance call needs.
+  """
+  def start do
+    bypass = Bypass.open()
+    {:ok, store} = Agent.start_link(fn -> %{} end)
+
+    Bypass.stub(bypass, "POST", "/api/v0/bundles", fn conn ->
+      {query, conn} = read_json(conn)
+      names = get_in(query, ["gpu_name", "in"]) || ["RTX 4090"]
+      offers = Enum.map(Enum.with_index(names, 1), fn {name, i} -> offer_for(name, i) end)
+      json(conn, 200, %{"offers" => offers})
+    end)
+
+    Bypass.stub(bypass, "PUT", "/api/v0/asks/:id", fn conn ->
+      {body, conn} = read_json(conn)
+      id = System.unique_integer([:positive])
+
+      rented =
+        instance(%{
+          "id" => id,
+          "actual_status" => nil,
+          "label" => body["label"],
+          "image_uuid" => body["image"],
+          "extra_env" => Enum.map(body["env"] || %{}, fn {k, v} -> [k, v] end),
+          "ports" => %{}
+        })
+
+      Agent.update(store, &Map.put(&1, Integer.to_string(id), rented))
+      json(conn, 200, %{"success" => true, "new_contract" => id})
+    end)
+
+    Bypass.stub(bypass, "GET", "/api/v0/instances/:id", fn conn ->
+      json(conn, 200, %{"instances" => Agent.get(store, &Map.get(&1, List.last(conn.path_info)))})
+    end)
+
+    Bypass.stub(bypass, "GET", "/api/v1/instances", fn conn ->
+      json(conn, 200, %{"instances" => Agent.get(store, &Map.values/1), "next_token" => nil})
+    end)
+
+    Bypass.stub(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
+      id = List.last(conn.path_info)
+
+      if Agent.get(store, &Map.has_key?(&1, id)) do
+        Agent.update(store, &Map.delete(&1, id))
+        json(conn, 200, %{"success" => true})
+      else
+        json(conn, 404, refused("not_found", "Instance not found"))
+      end
+    end)
+
+    [base_url: "http://localhost:#{bypass.port}", api_key: "vast-test-key"]
+  end
+
+  defp offer_for(name, i), do: offer(%{"id" => 1000 + i, "gpu_name" => name})
 end
