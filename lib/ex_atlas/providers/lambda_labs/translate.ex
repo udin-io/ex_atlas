@@ -403,7 +403,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   #
   # The unit's script holds the callback URL and token. `printf` is a bash
   # builtin, so the token never appears on an argv; `mktemp` makes the file
-  # readable by root alone; and curl reads the `Authorization` header from
+  # readable by root alone, and the unit deletes it as it starts; and curl reads the `Authorization` header from
   # stdin, since the host's `ps` shows every login each process's argv.
   # `finish` is first-report-wins, so curl's retries are safe.
   defp finish_reporter(env) do
@@ -411,6 +411,8 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       IO.iodata_to_binary([
         "#!/bin/bash\n",
         "set -uo pipefail\n",
+        # bash holds the file open, so it reads the lines below after this.
+        "rm -f -- \"$0\"\n",
         "ATLAS_CALLBACK_URL=",
         Shell.quote_arg(env["ATLAS_CALLBACK_URL"]),
         "\n",

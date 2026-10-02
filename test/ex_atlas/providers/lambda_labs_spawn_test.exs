@@ -557,8 +557,11 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert List.last(run.curl_argv) == "https://app.example.com/atlas/cb/finish"
 
       # The unit's script holds the token, readable by root alone.
-      assert File.read!(unit_file) =~ token
-      assert Bitwise.band(File.stat!(unit_file).mode, 0o777) == 0o600
+      # The unit's script holds the token, readable by root alone, and
+      # deletes itself once the unit reads it.
+      assert run.unit_script =~ token
+      assert run.unit_script_mode == "-rw-------"
+      refute File.exists?(unit_file)
     end
 
     @tag :tmp_dir
@@ -583,7 +586,6 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
       run = run_with_stubs(launched_body()["user_data"], dir, wait_code: 0)
       token = run.env["ATLAS_CALLBACK_TOKEN"]
-      [_, _, _, _, unit_file, _] = run.systemd_run_argv
 
       # Controls: each value reached the container, so each refute below can fail.
       assert run.env["HF_TOKEN"] == @hf_token
@@ -604,8 +606,8 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       end
 
       refute run.systemd_run_env =~ "evil-bus"
-      refute File.read!(unit_file) =~ @hf_token
-      refute File.read!(unit_file) =~ compute.auth.token
+      refute run.unit_script =~ @hf_token
+      refute run.unit_script =~ compute.auth.token
     end
 
     @tag :tmp_dir
@@ -896,6 +898,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     env > "$OUT/systemd_run.env"
     while [ "${1#--}" != "$1" ]; do shift; done
     printf '%s\\n' "$@" > "$OUT/unit.cmd"
+    # The unit's script as systemd-run hands it over: its bytes and mode.
+    cp "$2" "$OUT/unit_script"
+    ls -ln "$2" | cut -c1-10 > "$OUT/unit_script.mode"
     """)
 
     stub!(bin, "curl", """
@@ -940,7 +945,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       wait_argv: read_argv(dir, "wait.argv"),
       curl_argv: read_argv(dir, "curl.argv"),
       curl_stdin: read_file(dir, "curl.stdin"),
-      curl_env: read_file(dir, "curl.env")
+      curl_env: read_file(dir, "curl.env"),
+      unit_script: read_file(dir, "unit_script"),
+      unit_script_mode: dir |> read_file("unit_script.mode") |> then(&(&1 && String.trim(&1)))
     }
   end
 
