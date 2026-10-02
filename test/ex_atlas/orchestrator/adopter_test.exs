@@ -1914,22 +1914,27 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert length(pods) == 2
     end
 
-    # Adopt with every poll held: the Adopter's own look, then the tracker's
-    # first poll, which is released so the tracker applies it, then the
-    # second poll, held until the caller releases it. When this returns, the
-    # tracker has applied exactly one poll.
-    defp adopt_after_one_poll do
+    # Adopt with every poll held: the Adopter's own look is released, and the
+    # tracker's first poll is returned still held. Polls stay armed to block.
+    defp adopt_holding_first_poll do
       FaultyProvider.arm(:get_compute, {:block, self()})
       me = self()
       adopter = Task.async(fn -> Adopter.run(notify: me) end)
       assert_receive {:blocked, :get_compute, observer}, 2_000
       send(observer, :release)
       assert_receive {:blocked, :get_compute, first_poll}, 2_000
+      assert :ok = Task.await(adopter)
+      assert_receive :adoption_complete, 2_000
+      first_poll
+    end
+
+    # When this returns, the tracker has applied exactly one poll, and its
+    # second is held until the caller releases it.
+    defp adopt_after_one_poll do
+      first_poll = adopt_holding_first_poll()
       send(first_poll, :release)
       assert_receive {:blocked, :get_compute, second_poll}, 2_000
       FaultyProvider.reset()
-      assert :ok = Task.await(adopter)
-      assert_receive :adoption_complete, 2_000
       second_poll
     end
 
@@ -1976,6 +1981,91 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       assert post_finish(pod_token(pod_c), 5).status == 202
       assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 5}}}, 2_000
+    end
+
+    # The first adoption leaves the record as it found it, so a node that dies
+    # again before the adopted task respawns hands the next boot the same
+    # intent: attempt 1 stays spent.
+    defp adopt_and_die_again(old_id) do
+      poller = adopt_holding_first_poll()
+      FaultyProvider.reset()
+      [{pid, _}] = Registry.lookup(ExAtlas.Orchestrator.ComputeRegistry, {:compute, old_id})
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      send(poller, :release)
+      TestOrchestrator.sync_registry()
+    end
+
+    test "a second adoption before the respawn still refuses the orphan and spends no attempt twice" do
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      adopt_and_die_again(old_id)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+      assert log =~ "attempt 1"
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_c} = Mock.get_compute(new_id, %{})
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 100
+
+      # Control: the replacement the second boot rented reports.
+      assert post_finish(pod_token(pod_c), 6).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 6}}}, 2_000
+    end
+
+    test "a second adoption of a spent budget rents nothing more" do
+      {pod_a, _pod_b} = died_mid_respawn(1)
+      old_id = pod_a.id
+      adopt_and_die_again(old_id)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Adopter.run(notify: self())
+
+      assert_receive {:atlas_compute, ^old_id, {:task, _outcome}}, 2_000
+      refute_received {:atlas_compute, ^old_id, {:respawned, _}}
+      assert {:ok, pods} = Mock.list_compute([], %{})
+      assert length(pods) == 2
+    end
+
+    # A rent that returns an error may still have rented (a timeout, a 5xx).
+    # When the old pod's DELETE fails too, the record stays for the next boot,
+    # and so does the intent: the attempt counts as spent there.
+    test "a failed respawn whose old pod could not be deleted keeps its attempt spent" do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            callback: "https://app.example.com/atlas/cb",
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+        )
+
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      ref = Process.monitor(pid)
+      FaultyProvider.arm(:spawn_compute, {:error, ExAtlas.Error.new(:timeout, message: "rent")})
+      FaultyProvider.arm(:terminate, {:error, ExAtlas.Error.new(:transport, message: "delete")})
+      :ok = Mock.set_status(old_id, :stopped)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawn_failed, _}}, 2_000
+      assert_receive {:atlas_compute, ^old_id, {:terminate_failed, _}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      FaultyProvider.reset()
+      TestOrchestrator.sync_registry()
+
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+      assert log =~ "attempt 1"
+
+      assert_receive {:atlas_compute, ^old_id, {:task, _outcome}}, 2_000
+      refute_received {:atlas_compute, ^old_id, {:respawned, _}}
+      assert {:ok, [_pod_a]} = Mock.list_compute([], %{})
     end
 
     # A record 0.8.0 wrote has no `:respawning`; a host store that nils a
