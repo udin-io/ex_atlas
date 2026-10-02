@@ -295,9 +295,22 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # One that reports no owner, an invalid one, or cannot report may be the
   # dead owner itself (slow, misconfigured, on an old release), so with any
   # such peer no owner reads as dead this tick.
-  defp dead_owners(:no_owner), do: %{}
-  defp dead_owners({_peer_owners, [_unsure | _]}), do: %{}
-  defp dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
+  defp dead_owners(peers) do
+    if reap_dead_owners?(), do: live_dead_owners(peers), else: %{}
+  end
+
+  defp live_dead_owners(:no_owner), do: %{}
+  defp live_dead_owners({_peer_owners, [_unsure | _]}), do: %{}
+  defp live_dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
+
+  # On unless set to something other than `true`: a mistyped value leaves
+  # pods alone rather than deleting them.
+  defp reap_dead_owners? do
+    :ex_atlas
+    |> Application.get_env(:orchestrator, [])
+    |> Keyword.get(:reap_dead_owners, true)
+    |> Kernel.==(true)
+  end
 
   # Two nodes with one owner each read the other's pods as their own. Only a
   # reported match stops reaping. A peer that cannot answer (an ex_atlas older

@@ -257,6 +257,32 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       assert log =~ "leaving #{compute.id} (#{@name}) alone"
     end
 
+    # The off switch: anything but `true` keeps the pod, so a mistyped value
+    # fails toward leaving pods alone.
+    for value <- [false, "true", nil] do
+      test "reap_dead_owners: #{inspect(value)} leaves the pod alone and logged",
+           %{lease: lease} do
+        TestOrchestrator.put_env(reap_dead_owners: unquote(value))
+        dead!(lease)
+        compute = pod()
+
+        log = reap()
+
+        assert status(compute) == :running
+        assert log =~ "leaving #{compute.id} (#{@name}) alone"
+      end
+    end
+
+    test "control: reap_dead_owners: true deletes it", %{lease: lease} do
+      TestOrchestrator.put_env(reap_dead_owners: true)
+      dead!(lease)
+      compute = pod()
+
+      reap()
+
+      assert status(compute) == :terminated
+    end
+
     test "once its own last renewal is a ttl old, the pod is left alone", %{lease: lease} do
       dead!(lease)
       LeaseClock.stall!(lease, @ttl)
