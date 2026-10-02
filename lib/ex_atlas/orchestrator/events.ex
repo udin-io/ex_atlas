@@ -65,7 +65,10 @@ defmodule ExAtlas.Orchestrator.Events do
       the session ended itself, and anything else on a crash. A session that
       ends itself for a reason of its own announces that reason first:
       `{:terminating, :idle_timeout}` or `{:terminating, :cost_cap}`, then
-      `{:terminating, :normal}`.
+      `{:terminating, :normal}`. An interactive session past
+      `:max_runtime_ms` announces `{:terminating, :max_runtime}`, and one
+      still provisioning at `:ready_timeout_ms` announces
+      `{:terminating, :never_ready}`; a task reports both as `{:task, _}`.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 
   Statuses are ordinary state changes, not necessarily endings: a session that

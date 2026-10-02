@@ -57,6 +57,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   `ExAtlas.Orchestrator.TaskOutcome`, so this server keeps two extra timers and
   one extra branch rather than a second personality.
 
+  An interactive session may set `:max_runtime_ms` and `:ready_timeout_ms`
+  too. It has no task to fail, so it announces `{:terminating, :max_runtime}`
+  or `{:terminating, :never_ready}` and stops, sending no `{:task, _}` event.
+
   ## The cost cap
 
   With `max_cost: dollars` the server keeps an `ExAtlas.Orchestrator.CostMeter`
@@ -732,14 +736,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # container died without running its self-termination trap — a SIGKILL, an
   # OOM kill, a wedged process — because RunPod keeps reporting such a pod as
   # RUNNING and billing for it indefinitely.
-  def handle_info(:max_runtime, state), do: finish(:timed_out, state)
+  def handle_info(:max_runtime, state), do: end_session(:timed_out, :max_runtime, state)
 
   # A resource still provisioning this late is not slow, it is stuck: an image
   # that will not pull leaves a rented, billing pod with no container in it.
   # Failing here rather than waiting for `:max_runtime_ms` turns hours of
   # wasted spend into minutes.
   def handle_info(:ready_timeout, %{compute: %{status: :provisioning}} = state),
-    do: finish({:failed, :never_ready}, state)
+    do: end_session({:failed, :never_ready}, :never_ready, state)
 
   def handle_info(:ready_timeout, state), do: {:noreply, state}
 
@@ -964,6 +968,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # session ended before it ends.
   defp finish(outcome, state) do
     Events.broadcast(state.compute.id, {:task, outcome})
+    {:stop, :normal, state}
+  end
+
+  # A task ends on its outcome. An interactive session has no task, so it
+  # names the cause on `:terminating`, as `:idle_timeout` and `:cost_cap` do.
+  defp end_session(outcome, _cause, %{mode: :task} = state), do: finish(outcome, state)
+
+  defp end_session(_outcome, cause, state) do
+    Events.broadcast(state.compute.id, {:terminating, cause})
     {:stop, :normal, state}
   end
 
