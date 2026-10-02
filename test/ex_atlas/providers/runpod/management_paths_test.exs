@@ -1,7 +1,7 @@
 defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   use ExUnit.Case, async: false
 
-  alias ExAtlas.Providers.RunPod.{Billing, Endpoints, NetworkVolumes, Templates}
+  alias ExAtlas.Providers.RunPod.{Billing, Endpoints, NetworkVolumes, Pods, Templates}
 
   setup do
     bypass = Bypass.open()
@@ -20,6 +20,29 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
       |> Plug.Conn.put_resp_header("content-type", "application/json")
       |> Plug.Conn.resp(status, body)
     end)
+  end
+
+  # A pod id can come from a tracking record its writer chose (issue 138), so
+  # it never adds a path segment.
+  describe "a pod id is sent path-encoded" do
+    test "get, stop, start and delete", %{bypass: bypass, ctx: ctx} do
+      expect_path(bypass, "GET", "/pods/..%2Fx")
+      assert {:ok, _} = Pods.get(ctx, "../x")
+
+      expect_path(bypass, "POST", "/pods/..%2Fx/action", "{}")
+      _ = Pods.stop(ctx, "../x")
+      assert_received {:hit, "POST", "/pods/..%2Fx/action"}
+
+      expect_path(bypass, "POST", "/pods/..%2Fx/action", "{}")
+      _ = Pods.start(ctx, "../x")
+      assert_received {:hit, "POST", "/pods/..%2Fx/action"}
+
+      expect_path(bypass, "DELETE", "/pods/..%2Fx")
+      assert {:ok, _} = Pods.delete(ctx, "../x")
+
+      assert_received {:hit, "GET", "/pods/..%2Fx"}
+      assert_received {:hit, "DELETE", "/pods/..%2Fx"}
+    end
   end
 
   describe "serverless endpoints live under /serverless in REST v2" do

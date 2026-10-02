@@ -26,7 +26,7 @@ defmodule ExAtlas.Providers.RunPod.Pods do
 
   @doc "GET /pods/:id — fetch a pod."
   def get(ctx, id) do
-    ctx |> Client.management() |> Req.get(url: "/pods/#{id}") |> Client.handle_response()
+    ctx |> Client.management() |> Req.get(url: "/pods/#{encode(id)}") |> Client.handle_response()
   end
 
   @doc """
@@ -47,7 +47,7 @@ defmodule ExAtlas.Providers.RunPod.Pods do
   defp action(ctx, id, action) do
     ctx
     |> Client.management()
-    |> Req.post(url: "/pods/#{id}/action", json: %{action: action})
+    |> Req.post(url: "/pods/#{encode(id)}/action", json: %{action: action})
     |> Client.handle_response()
   end
 
@@ -55,7 +55,11 @@ defmodule ExAtlas.Providers.RunPod.Pods do
   def delete(ctx, id) do
     ctx
     |> Client.management()
-    |> Req.delete(url: "/pods/#{id}")
+    |> Req.delete(url: "/pods/#{encode(id)}")
     |> Client.handle_response(200..204)
   end
+
+  # A pod id can come from a tracking record whoever wrote the store chose, so
+  # it is one path segment, never more (issue 138).
+  defp encode(id), do: URI.encode(to_string(id), &URI.char_unreserved?/1)
 end
