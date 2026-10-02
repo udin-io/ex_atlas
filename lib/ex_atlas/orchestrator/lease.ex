@@ -120,11 +120,15 @@ defmodule ExAtlas.Orchestrator.Lease do
     end
   end
 
+  # A crash restarts the Lease with no record of how long it held its lease,
+  # so it would wait a full ttl again before claiming.
+  def handle_info(_unexpected, state), do: {:noreply, state}
+
   defp renew(state, now) do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
       :ok ->
         state = hold(state, now)
-        release_lost_trackers(state)
+        safely(fn -> release_lost_trackers(state) end)
         if claiming?(state, now), do: claim(state, now), else: state
 
       other ->
@@ -150,7 +154,7 @@ defmodule ExAtlas.Orchestrator.Lease do
       {:ok, []} ->
         state
 
-      {:ok, records} ->
+      {:ok, records} when is_list(records) ->
         Logger.info(
           "[ExAtlas.Orchestrator.Lease] took over #{length(records)} record(s) of expired " <>
             "owners: #{Enum.map_join(records, ", ", &inspect(&1.id))}"

@@ -37,6 +37,16 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     def renew_lease(_owner, _expires_at_ms), do: {:error, :database_unreachable}
   end
 
+  defmodule OddClaims do
+    @moduledoc false
+    # A custom store whose claim answers a shape the contract does not allow.
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate get(id), to: Store
+    defdelegate renew_lease(owner, expires_at_ms), to: Store
+    def claim_expired(_claimer, _now_ms, _rewrite), do: {:ok, :not_a_list}
+  end
+
   setup %{tmp_dir: dir} do
     Repo.start!(dir)
     TestOrchestrator.start!(tracking_store: Store)
@@ -322,6 +332,23 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
         send(call, :release)
         assert await(fn -> Orchestrator.list_ids() == [id] end)
       end)
+    end
+  end
+
+  describe "what the Lease survives" do
+    test "a message it does not expect" do
+      lease = start_lease!("m2")
+      send(lease, {:unexpected, :message})
+
+      assert :ok = tick!(lease)
+      assert Process.alive?(lease)
+    end
+
+    test "a store whose claim answers a shape outside the contract" do
+      log = capture_log(fn -> held_lease!("m2", store: OddClaims) end)
+
+      assert Process.alive?(Process.whereis(Lease))
+      assert log =~ "could not claim"
     end
   end
 
