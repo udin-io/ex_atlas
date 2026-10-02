@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased (v0.8.0)
+## v0.8.0 — 2026-10-02
+
+### Upgrading
+
+Six changes break host code or deployments. Read
+[the upgrading guide](guides/upgrading.md), or run `mix igniter.upgrade ex_atlas`
+to list the modules and config it affects.
 
 ### Added: Lambda Labs compute provider (#84)
 
@@ -97,6 +103,7 @@ pod may exist. Lambda's launch follows the same rule
 
 `:rtx_6000` is `gpu_1x_rtx6000` and `:a100_80g` is `gpu_1x_a100_80gb_sxm4`,
 as Lambda names them. `:gh200` maps to `gpu_1x_gh200`.
+
 ### Added: `respawn_credentials:`, a respawn after a deploy (#87)
 
 A `persist: true` task with `s3:` or `env:` that was preempted after a

@@ -1,7 +1,7 @@
 defmodule ExAtlas.MixProject do
   use Mix.Project
 
-  @version "0.7.0"
+  @version "0.8.0"
   @source_url "https://github.com/udin-io/ex_atlas"
 
   def project do
@@ -78,6 +78,7 @@ defmodule ExAtlas.MixProject do
         "README.md",
         "CHANGELOG.md",
         "guides/getting_started.md",
+        "guides/upgrading.md",
         "guides/fly.md",
         "guides/transient_pods.md",
         "guides/data_staging.md",

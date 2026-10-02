@@ -16,19 +16,40 @@ if Code.ensure_loaded?(Igniter) do
 
     ## Arguments
 
-    When called directly by `mix igniter.upgrade`, receives `<from_version> <to_version>`.
-    When called directly by you, reads versions from `mix.lock` and the current
-    ex_atlas mix.exs; defaults to running *all* upgraders if versions can't be
-    determined.
+    `mix igniter.upgrade ex_atlas` passes `<from_version> <to_version>`, the
+    version in `mix.lock` before the update and the one after. Run directly,
+    the task takes `<from_version>` as `0.1.0` and `<to_version>` as the
+    installed ex_atlas version, so it runs every upgrader. Each upgrader is
+    idempotent. `mix ex_atlas.upgrade 0.7.0 0.8.0` runs the steps in that range
+    only.
 
     ## Registered upgraders
 
     `0.1` → `0.2` — no-op (placeholder). Reserved for surface migrations
     between the pre-Fly compute-only release and the infrastructure SDK
     release that introduced `ExAtlas.Fly.*`.
+
+    `0.8.0` — edits no file. Warns once for each module that carries
+    `@behaviour ExAtlas.Provider`: `ctx.api_key` and the credentials in
+    `ctx.req_options` are now `ExAtlas.Secret` values. Adds a notice when the
+    config sets `start_orchestrator: true` and no `:reap_owner`. Always adds a
+    notice linking the [upgrading guide](upgrading.html).
     """
 
     use Igniter.Mix.Task
+
+    alias Igniter.Code.Common
+    alias Igniter.Code.Function
+    alias Igniter.Code.Keyword, as: IgniterKeyword
+    alias Igniter.Project.Config
+    alias Sourceror.Zipper
+
+    @guide_url "https://hexdocs.pm/ex_atlas/upgrading.html"
+    @config_files ["config.exs", "runtime.exs", "prod.exs"]
+
+    # The version of the installed dep, read from its own mix.exs when it
+    # compiles. `Application.spec/2` returns nothing while the app is not loaded.
+    @atlas_version Mix.Project.config()[:version]
 
     @impl Igniter.Mix.Task
     def info(_argv, _parent) do
@@ -50,20 +71,14 @@ if Code.ensure_loaded?(Igniter) do
     defp pick_versions(igniter) do
       args = Map.get(igniter.args, :positional, %{})
       from = Map.get(args, :from) || "0.1.0"
-      to = Map.get(args, :to) || atlas_version()
+      to = Map.get(args, :to) || @atlas_version
       {from, to}
-    end
-
-    defp atlas_version do
-      case :application.get_key(:ex_atlas, :vsn) do
-        {:ok, vsn} -> to_string(vsn)
-        _ -> "0.2.0"
-      end
     end
 
     defp upgraders do
       %{
-        "0.2.0" => &upgrade_0_1_to_0_2/2
+        "0.2.0" => &upgrade_0_1_to_0_2/2,
+        "0.8.0" => &upgrade_0_7_to_0_8/2
       }
     end
 
@@ -84,6 +99,112 @@ if Code.ensure_loaded?(Igniter) do
 
       No breaking changes to the compute API.
       """)
+    end
+
+    # 0.7 → 0.8 migration.
+    #
+    # Edits no file. Host provider modules read `ctx.api_key` in shapes a
+    # rewrite would miss (`%{api_key: key} = ctx`, `Map.get/2`, passing `ctx`
+    # on), so the upgrader names the modules and leaves the change to the host.
+    defp upgrade_0_7_to_0_8(igniter, _opts) do
+      igniter
+      |> warn_provider_modules()
+      |> notice_reap_owner()
+      |> Igniter.add_notice("Upgrading to 0.8.0: #{@guide_url}")
+    end
+
+    defp warn_provider_modules(igniter) do
+      {igniter, modules} =
+        Igniter.Project.Module.find_all_matching_modules(igniter, fn _module, body ->
+          implements_provider?(body)
+        end)
+
+      Enum.reduce(modules, igniter, fn module, igniter ->
+        Igniter.add_warning(igniter, """
+        #{inspect(module)} implements ExAtlas.Provider. In 0.8.0 `ctx.api_key` is an \
+        `ExAtlas.Secret` or nil, and so are the credentials in `ctx.req_options`. \
+        Read the key with `ExAtlas.Secret.reveal/1` and build Req options with \
+        `ExAtlas.Config.reveal_req_options/1`. See #{@guide_url}
+        """)
+      end)
+    end
+
+    # Checks every `@behaviour` line: `Igniter.Code.Module.move_to_attribute_definition/2`
+    # stops at the first. `Common.nodes_equal?/2` expands aliases, so
+    # `alias ExAtlas.Provider; @behaviour Provider` matches.
+    defp implements_provider?(body) do
+      provider = {:__aliases__, [], [:ExAtlas, :Provider]}
+
+      body
+      |> Zipper.traverse(false, fn zipper, found? ->
+        {zipper, found? or behaviour_equals?(zipper, provider)}
+      end)
+      |> elem(1)
+    end
+
+    defp behaviour_equals?(%Zipper{node: {:@, _, [{:behaviour, _, [_]}]}} = zipper, expected) do
+      with attribute when not is_nil(attribute) <- Zipper.down(zipper),
+           argument when not is_nil(argument) <- Zipper.down(attribute) do
+        Common.nodes_equal?(argument, expected)
+      else
+        _ -> false
+      end
+    end
+
+    defp behaviour_equals?(_zipper, _expected), do: false
+
+    defp notice_reap_owner(igniter) do
+      igniter = Enum.reduce(@config_files, igniter, &include_config/2)
+
+      if Enum.any?(@config_files, &starts_orchestrator?(igniter, &1)) and
+           not Enum.any?(@config_files, &sets_reap_owner?(igniter, &1)) do
+        Igniter.add_notice(igniter, """
+        Your config sets `start_orchestrator: true` and no `:reap_owner`. One machine \
+        on the account needs nothing. In a cluster, set \
+        `config :ex_atlas, :orchestrator, reap_owner: ...` on every node, or no node \
+        reaps pods the others spawned. See #{@guide_url}
+        """)
+      else
+        igniter
+      end
+    end
+
+    defp include_config(file, igniter) do
+      Igniter.include_existing_file(igniter, Path.join("config", file), required?: false)
+    end
+
+    defp sets_reap_owner?(igniter, file) do
+      Config.configures_key?(igniter, file, :ex_atlas, [:orchestrator, :reap_owner])
+    end
+
+    defp starts_orchestrator?(igniter, file) do
+      case Rewrite.source(igniter.rewrite, Path.join("config", file)) do
+        {:ok, source} ->
+          zipper = source |> Rewrite.Source.get(:quoted) |> Zipper.zip()
+
+          case Function.move_to_function_call_in_current_scope(
+                 zipper,
+                 :config,
+                 2,
+                 &start_orchestrator?/1
+               ) do
+            {:ok, _call} -> true
+            :error -> false
+          end
+
+        _ ->
+          false
+      end
+    end
+
+    defp start_orchestrator?(call) do
+      Function.argument_equals?(call, 0, :ex_atlas) and
+        Function.argument_matches_predicate?(call, 1, fn options ->
+          case IgniterKeyword.get_key(options, :start_orchestrator) do
+            {:ok, value} -> Common.nodes_equal?(Zipper.node(value), true)
+            :error -> false
+          end
+        end)
     end
   end
 else

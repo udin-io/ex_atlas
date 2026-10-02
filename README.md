@@ -83,7 +83,7 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_atlas, "~> 0.7"}
+    {:ex_atlas, "~> 0.8"}
   ]
 end
 ```
@@ -110,8 +110,13 @@ mix deps.update ex_atlas
 mix ex_atlas.upgrade
 ```
 
-The upgrade task is idempotent and runs only the steps needed between your
-previous and current ExAtlas version.
+`mix igniter.upgrade ex_atlas` passes your previous and new version, so the
+task runs only the steps between them. Run directly, `mix ex_atlas.upgrade`
+starts at 0.1.0 and runs every step; each step is idempotent.
+`mix ex_atlas.upgrade 0.7.0 0.8.0` runs one range.
+
+Coming from 0.7? Read [guides/upgrading.md](guides/upgrading.md): six changes
+in 0.8.0 break provider modules, cluster deployments or tracking stores.
 
 ## Architecture at a glance
 
@@ -1528,7 +1533,10 @@ mandate Req — it's an implementation choice of the bundled providers.
 - **v0.1** — RunPod (full surface), Mock provider, orchestrator, auth,
   LiveDashboard page.
 - **v0.8** — Lambda Labs compute: spawn, get, list, terminate, `command:`,
-  `run_task/1` and the Reaper. `ports:` open in Lambda's firewall.
+  `run_task/1` and the Reaper. `ports:` open in Lambda's firewall. Also
+  `s3:` data staging, `persist: true` with `respawn_credentials:`, cost caps
+  (`max_cost`), `ExAtlas.Secret` credentials and `:reap_owner`. See
+  [Upgrading](guides/upgrading.md).
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
 - Vast.ai.

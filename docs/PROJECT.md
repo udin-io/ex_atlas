@@ -8,10 +8,9 @@ structure, a risk or a decision updates the pages in the same PR.
 
 ## What ExAtlas is
 
-ExAtlas is an Elixir library (`ex_atlas`, version 0.7.0 on Hex, 0.8.0
-unreleased). It gives one API over GPU clouds, with RunPod as the only
-complete provider, plus an opt-in orchestrator that tracks, polls and
-deletes the pods you rent. It also carries Fly.io platform operations
+ExAtlas is an Elixir library (`ex_atlas`, version 0.8.0). It gives one
+API over GPU clouds, with RunPod as the only complete provider, plus an
+opt-in orchestrator that tracks, polls and deletes the pods you rent. It also carries Fly.io platform operations
 (deploys, log streaming, tokens) that are independent of the compute path.
 
 ## Public API
@@ -60,7 +59,8 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Orchestrator: polling, task mode, callbacks, adoption, multi-node | Shipped |
 | Cost caps with billing reconciliation (feature #28) | Shipped in #70 (slices #67, #69, #70) |
 | S3-compatible data staging (#26) | Shipped in four slices: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods (#75); a guide and a tested entrypoint script say what the container does with them (PR #77); credentials print redacted in crash reports (#78); presigned URLs put no storage key on the pod (#80); `persist: true` with `s3:` stores no credential, and an adopted task cannot respawn (#81); `env:` values print redacted and records keep names only (#82) |
-| Lambda Labs provider (feature #83) | Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 3 (#86, PR #91): one firewall ruleset per instance opens its `ports:`. Slice 2 (#85, PR #90): `command:`, `run_task/1` ended by the host's finish report, the Reaper |
+| Lambda Labs provider (feature #83) | Shipped in three slices. Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 3 (#86, PR #91): one firewall ruleset per instance opens its `ports:`. Slice 2 (#85, PR #90): `command:`, `run_task/1` ended by the host's finish report, the Reaper |
+| Release 0.8.0 (#94) | `mix ex_atlas.upgrade` has a `"0.8.0"` step that edits no file: it warns about each module with `@behaviour ExAtlas.Provider` and about `start_orchestrator: true` with no `:reap_owner`. `guides/upgrading.md` covers the six breaking changes. The owner publishes to Hex and pushes the tag |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages
