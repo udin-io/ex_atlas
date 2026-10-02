@@ -225,6 +225,12 @@ defmodule ExAtlas.Spec.Staging do
       bad = Enum.find(fields, fn {_key, value} -> not (is_nil(value) or non_empty?(value)) end) ->
         error("#{inspect(elem(bad, 0))} must be a non-empty string")
 
+      # Before the regex, which raises on invalid UTF-8 with the value in its
+      # stacktrace.
+      bad =
+          Enum.find(fields, fn {_key, value} -> is_binary(value) and not String.valid?(value) end) ->
+        error("#{inspect(elem(bad, 0))} must be valid UTF-8")
+
       bad = Enum.find(fields, fn {_key, value} -> is_binary(value) and control?(value) end) ->
         error("#{inspect(elem(bad, 0))} must not hold control characters")
 

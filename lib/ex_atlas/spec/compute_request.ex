@@ -150,11 +150,25 @@ defmodule ExAtlas.Spec.ComputeRequest do
   def new(opts) do
     with {:ok, opts} <- normalize(opts),
          {:ok, opts} <- NimbleOptions.validate(opts, @schema),
-         :ok <- Env.validate(opts[:env]),
-         {:ok, staging} <- Staging.new(opts[:s3]),
-         :ok <- check_env_overlap(opts[:env], staging) do
+         {:ok, staging} <- validate_env_and_s3(opts[:env], opts[:s3]) do
       opts = opts |> Keyword.put(:s3, staging) |> Keyword.update!(:env, &seal_env/1)
       {:ok, struct!(__MODULE__, opts)}
+    end
+  end
+
+  @doc """
+  Validate `:env` and `:s3` as `new/1` does, returning the `s3:` staging.
+
+  A tracker checks a host resolver's values with this before a respawn, since
+  `ExAtlas.spawn_compute/1` raises on what `new/1` refuses.
+  """
+  @spec validate_env_and_s3(term(), term()) ::
+          {:ok, Staging.t() | nil} | {:error, NimbleOptions.ValidationError.t()}
+  def validate_env_and_s3(env, s3) do
+    with :ok <- Env.validate(env),
+         {:ok, staging} <- Staging.new(s3),
+         :ok <- check_env_overlap(env, staging) do
+      {:ok, staging}
     end
   end
 

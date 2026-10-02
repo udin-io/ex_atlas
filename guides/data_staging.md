@@ -200,18 +200,60 @@ s3: %{
 The keys, the session token and the presigned URLs stay in memory. After a
 restart the next boot adopts the pod, which keeps running with the
 environment it was rented with. A respawn needs the credentials, and the new
-node has none:
+node has none of its own. Name a resolver that hands them back:
 
-- Before any restart, a preempted `on_failure: {:respawn, n}` task respawns
-  with the full `s3:`.
-- After adoption, a preemption broadcasts `{:respawn_failed, {reason,
-  %ExAtlas.Error{kind: :validation}}}` and ends the task. No pod is rented.
+```elixir
+defmodule MyApp.Atlas do
+  @behaviour ExAtlas.Orchestrator.RespawnCredentials
 
-`scrub_keys: [:s3]` keeps the marker alone, so the refusal holds there too.
-`Spec.Staging.new/1` refuses `credentials: :not_stored`, so a record's `s3:`
-cannot rent a pod by hand either. A host `TrackingStore` must keep `opts`
-whole; one that drops the marker still gets the refusal, since an adopted
-`s3:` is never trusted to hold credentials.
+  # info: %{id:, name:, user_id:, provider:, s3: stored_s3, env_names: [...]}
+  def credentials(:trainer, info) do
+    {:ok,
+     s3: MyApp.Storage.task_credentials(info.user_id) |> Map.merge(info.s3),
+     env: %{"HF_TOKEN" => MyApp.Secrets.hf_token()}}
+  end
+end
+
+ExAtlas.Orchestrator.run_task(
+  # ...
+  s3: s3,
+  env: %{"HF_TOKEN" => token},
+  persist: true,
+  on_failure: {:respawn, 2},
+  respawn_credentials: {MyApp.Atlas, :credentials, [:trainer]}
+)
+```
+
+- Before any restart, a preempted task respawns with its own `s3:` and
+  `env:`. ExAtlas does not call the resolver.
+- After adoption, a preemption calls `MyApp.Atlas.credentials(:trainer,
+  info)`. `info.s3` is the stored part of `s3:`, without the marker, and
+  `info.env_names` lists the names the record kept. The resolver returns
+  `{:ok, keyword}` with `:s3`, `:env` or both. `s3:` must come back whole;
+  `env:` must hold every name in `env_names` and may add more.
+- The module must declare `@behaviour
+  ExAtlas.Orchestrator.RespawnCredentials`. The tuple is read back from the
+  store, so whoever can write the store picks the function; ExAtlas calls no
+  other module.
+- The record keeps the tuple, never what it returns, so the next restart
+  calls it again. The args are stored as given: a closure or an
+  `ExAtlas.Secret` in them is refused, and they should hold no secret.
+- `config :ex_atlas, :orchestrator, respawn_credentials: {m, f, args}`
+  serves records with no tuple, such as those written before the option
+  existed.
+- Any other return, a raise, a throw, an exit, or no answer within
+  `respawn_credentials_timeout_ms` (default 30,000) broadcasts
+  `{:respawn_failed, {reason, %ExAtlas.Error{kind: :validation}}}` and ends
+  the task. No pod is rented. The message names the resolver and what was
+  wrong, never a value it returned or raised.
+- With no resolver the respawn fails the same way.
+
+`scrub_keys: [:s3]` keeps the marker alone, so a respawn still needs the
+resolver. `Spec.Staging.new/1` refuses `credentials: :not_stored`, so a
+record's `s3:` cannot rent a pod by hand either. A host `TrackingStore` must
+keep `opts` whole, the resolver tuple included; one that drops the `s3:`
+marker still needs the resolver, since an adopted `s3:` is never trusted to
+hold credentials.
 
 ## Presigned mode: no storage key on the pod
 

@@ -434,6 +434,128 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
   end
 
+  describe "respawn_credentials:" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
+    end
+
+    @resolver {ExAtlas.Test.CredentialResolver, :resolve, [{:return, {:ok, []}}]}
+
+    test "is stored in the record as the tuple itself" do
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(task_opts(respawn_credentials: @resolver))
+
+      assert {:ok, %{opts: opts}} = Memory.get(compute.id)
+      assert opts[:respawn_credentials] == @resolver
+    end
+
+    test "without persist: true is refused before anything is rented" do
+      assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+               Orchestrator.run_task(task_opts(persist: false, respawn_credentials: @resolver))
+
+      assert Exception.message(error) =~ "persist: true"
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+      assert {:ok, []} = Memory.all()
+    end
+
+    test "a malformed tuple is refused before anything is rented" do
+      resolver = ExAtlas.Test.CredentialResolver
+
+      for bad <- [
+            {resolver, "resolve", []},
+            {resolver, :resolve},
+            {resolver, :resolve, [:a | :b]},
+            fn _info -> {:ok, []} end
+          ] do
+        assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials}} =
+                 Orchestrator.run_task(task_opts(respawn_credentials: bad)),
+               "accepted #{inspect(bad)}"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a module that does not declare the RespawnCredentials behaviour is refused" do
+      # `:erlang.send/2` is exported and would send `info` to this process.
+      assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+               Orchestrator.run_task(task_opts(respawn_credentials: {:erlang, :send, [self()]}))
+
+      assert Exception.message(error) =~ "ExAtlas.Orchestrator.RespawnCredentials"
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "args holding a function or a Secret are refused, since the record stores them" do
+      for args <- [
+            [fn -> "hf-closure-arg-5a1c" end],
+            [%{token: ExAtlas.Secret.wrap("hf-secret-arg-08be")}],
+            [{:nested, [ExAtlas.Secret.wrap("hf-secret-arg-08be")]}]
+          ] do
+        assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+                 Orchestrator.run_task(
+                   task_opts(
+                     respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, args}
+                   )
+                 )
+
+        assert Exception.message(error) =~ "args"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "args holding structs, ranges, sets and improper lists validate without a raise" do
+      for args <- [[~D[2026-01-01]], [URI.parse("https://x.example")], [1..3], [MapSet.new([1])]] do
+        assert {:ok, _pid, _compute} =
+                 Orchestrator.run_task(
+                   task_opts(
+                     respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, args}
+                   )
+                 ),
+               "refused #{inspect(args)}"
+      end
+
+      # A Secret inside a struct or an improper tail is still found.
+      for args <- [
+            [URI.parse("https://x") |> Map.put(:host, ExAtlas.Secret.wrap("h"))],
+            [[1 | ExAtlas.Secret.wrap("t")]]
+          ] do
+        assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials}} =
+                 Orchestrator.run_task(
+                   task_opts(
+                     respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, args}
+                   )
+                 )
+      end
+    end
+
+    test "an Erlang module that spells it -behavior(...) is accepted" do
+      forms = [
+        {:attribute, 1, :module, :ea87_erlang_resolver},
+        {:attribute, 1, :behavior, ExAtlas.Orchestrator.RespawnCredentials},
+        {:attribute, 1, :export, [resolve: 2]},
+        {:function, 1, :resolve, 2,
+         [{:clause, 1, [{:var, 1, :_S}, {:var, 1, :_I}], [], [{:atom, 1, :ok}]}]},
+        {:eof, 1}
+      ]
+
+      {:ok, module, binary, _warnings} = :compile.forms(forms, [:binary, :return])
+      {:module, ^module} = :code.load_binary(module, ~c"ea87_erlang_resolver.erl", binary)
+
+      assert {:ok, _pid, _compute} =
+               Orchestrator.run_task(task_opts(respawn_credentials: {module, :resolve, [:x]}))
+    end
+
+    test "a function the module does not export is refused, naming it" do
+      assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+               Orchestrator.run_task(
+                 task_opts(respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, []})
+               )
+
+      assert Exception.message(error) =~ "ExAtlas.Test.CredentialResolver.resolve/1"
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
+
   describe "secrets" do
     @describetag :tmp_dir
 
@@ -617,6 +739,71 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, %{id: id}} = TrackingStore.Dets.get(compute.id)
       assert id == compute.id
       assert bytes =~ compute.id
+    end
+
+    test "a task adopted from DETS respawns through its record's tuple, and no resolved value reaches the disk",
+         %{tmp_dir: dir} do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
+
+      # `:fixed` returns `CredentialResolver.credentials/0` and `env/0`, values
+      # the record's args never hold.
+      resolver = {ExAtlas.Test.CredentialResolver, :resolve, [:fixed]}
+
+      {:ok, pid, compute} =
+        Orchestrator.run_task(
+          task_opts(
+            image: "trainer-dets-resolver:latest",
+            s3: %{
+              access_key_id: "tid-dets-orig-91aa",
+              secret_access_key: "tsec-dets-orig-5e37",
+              dataset_uri: "s3://bucket/datasets/dets-probe-6a0d/"
+            },
+            env: %{"HF_TOKEN" => "hf-dets-orig-d81b", "WANDB_PROJECT" => "wandb-dets-orig-a3c2"},
+            spot: true,
+            on_failure: {:respawn, 1},
+            status_poll_ms: 30,
+            respawn_credentials: resolver
+          )
+        )
+
+      # A deploy: the tracker dies without `terminate/2`, the store reopens
+      # its file, and the next boot adopts from what DETS kept.
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      ExAtlas.Test.Orchestrator.sync_registry()
+      stop_supervised!(TrackingStore.Dets)
+      start_supervised!({TrackingStore.Dets, [storage_path: dir]})
+
+      id = compute.id
+      assert {:ok, %{opts: opts}} = TrackingStore.Dets.get(id)
+      assert opts[:respawn_credentials] == resolver
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = ExAtlas.Orchestrator.Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      {:ok, %{compute: replacement}} = Orchestrator.info(new_id)
+      env = ExAtlas.Spec.ComputeRequest.container_env(replacement.raw.request)
+      assert env["AWS_SECRET_ACCESS_KEY"] == "tsec-resolved-0e58"
+      assert env["ATLAS_DATASET_URI"] == "s3://bucket/datasets/dets-probe-6a0d/"
+      assert env["WANDB_PROJECT"] == "wandb-resolved-5c07"
+
+      bytes = File.read!(Path.join(dir, "tracked.dets"))
+
+      # The replacement's record landed, with its names and URIs.
+      assert bytes =~ new_id
+      assert bytes =~ "WANDB_PROJECT"
+      assert bytes =~ "dets-probe-6a0d"
+
+      for secret <-
+            ~w(tid-resolved-7a41 tsec-resolved-0e58 hf-resolved-91d2 wandb-resolved-5c07) ++
+              ~w(tid-dets-orig-91aa tsec-dets-orig-5e37 hf-dets-orig-d81b wandb-dets-orig-a3c2),
+          do: refute(bytes =~ secret, "#{secret} reached the DETS file")
+
+      refute bytes =~ "ExAtlas.Secret"
     end
   end
 end

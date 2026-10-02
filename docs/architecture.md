@@ -45,6 +45,7 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.Events` | Functions | PubSub broadcasts `{:atlas_compute, id, event}` |
 | `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`. Default `TrackingStore.Dets` |
 | `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper |
+| `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
 | `Orchestrator.Ownership` | Functions | Reads and validates `reap_owner`; stamps it into pod names |
 | `Orchestrator.ComputeRegistry`, `ComputeSupervisor` | `Registry`, `DynamicSupervisor` | Look up and supervise trackers |
@@ -77,10 +78,48 @@ flowchart TD
   boot["Boot"] --> ad["Adopter"]
   ad -->|"all/0"| store
   ad -->|"start with adopted record"| cs
+  cs -->|"respawn after adoption:<br/>apply(m, f, args ++ [info])"| res["Host resolver<br/>respawn_credentials"]
   ad -->|"adoption_complete / adoption_failed"| rp["Reaper"]
   rp -->|"list, delete untracked"| prov
   rp -.->|"ours = Registry or store"| store
 ```
+
+## What a respawn after adoption does
+
+A tracking record holds `:not_stored` in place of `s3:` credentials and
+`env:` values. When an adopted `on_failure: {:respawn, n}` task is
+preempted, `ComputeServer.spawn_replacement/1` asks the host's
+`respawn_credentials:` resolver for them (#87). The record's tuple comes
+first, then `config :ex_atlas, :orchestrator, respawn_credentials:`. A task
+that never restarted holds its own values and calls no resolver.
+
+```mermaid
+sequenceDiagram
+  participant Ad as Adopter
+  participant St as TrackingStore
+  participant CS as ComputeServer
+  participant R as Host resolver, an MFA
+  participant P as Provider
+  participant Host as Host app, PubSub
+  Ad->>St: all/0 at boot
+  St-->>Ad: record, s3 and env values not_stored, respawn_credentials MFA
+  Ad->>CS: start with adopted record
+  CS->>P: status poll
+  P-->>CS: pod gone, preempted
+  CS->>R: apply(m, f, args ++ [info]) in a task, at most 30 s
+  R-->>CS: ok, s3 and env
+  CS->>CS: validate as ComputeRequest.new/1 does, seal as Secrets
+  CS->>P: spawn_compute with resolved s3 and env
+  P-->>CS: replacement compute
+  CS->>St: carry record, markers kept, no value written
+  CS-->>Host: respawned, new id
+  alt no resolver, error, raise, throw, exit or timeout
+  CS-->>Host: respawn_failed with a validation error naming the resolver
+  end
+```
+
+The resolved values live in the tracker's opts, so a second respawn in the
+same VM reuses them. The next restart calls the resolver again.
 
 ## What a cost cap does
 
