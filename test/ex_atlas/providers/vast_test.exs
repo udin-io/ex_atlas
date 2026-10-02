@@ -207,6 +207,24 @@ defmodule ExAtlas.Providers.VastTest do
     end
   end
 
+  describe "list_compute/1 gpu: on the A100" do
+    # The 40 GB and 80 GB A100 share Vast's names; gpu_ram tells them apart.
+    test "tells the 40 GB from the 80 GB", %{bypass: bypass, opts: opts} do
+      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+        json(conn, 200, %{
+          "instances" => [
+            instance(%{"id" => 40, "gpu_name" => "A100 SXM4", "gpu_ram" => 40_960}),
+            instance(%{"id" => 80, "gpu_name" => "A100 PCIE", "gpu_ram" => 81_920})
+          ],
+          "next_token" => nil
+        })
+      end)
+
+      assert {:ok, [%{id: "40"}]} = ExAtlas.list_compute(opts ++ [gpu: :a100_40g])
+      assert {:ok, [%{id: "80"}]} = ExAtlas.list_compute(opts ++ [gpu: :a100_80g])
+    end
+  end
+
   describe "list_compute/1 paging errors" do
     test "a token that does not advance fails the whole call", %{bypass: bypass, opts: opts} do
       Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->

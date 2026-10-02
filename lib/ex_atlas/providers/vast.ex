@@ -294,7 +294,7 @@ defmodule ExAtlas.Providers.Vast do
       {:status, s} -> compute.status == s
       {:name, n} -> compute.name == n
       {:region, r} -> compute.region == r
-      {:gpu, g} -> Translate.gpu_family?(compute.gpu_type, g)
+      {:gpu, g} -> Translate.gpu_family?(compute, g)
       _ -> true
     end)
   end

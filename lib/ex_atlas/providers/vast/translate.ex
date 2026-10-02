@@ -244,16 +244,24 @@ defmodule ExAtlas.Providers.Vast.Translate do
     |> Enum.sort_by(&{&1.id, &1.memory_gb})
   end
 
-  @doc "Whether `gpu_type` is one of `canonical`'s Vast names."
-  @spec gpu_family?(String.t() | nil, atom()) :: boolean()
-  def gpu_family?(gpu_type, canonical) when is_binary(gpu_type) do
+  @doc """
+  Whether `compute` runs one of `canonical`'s Vast names, with the GPU
+  memory `canonical` needs where two atoms share names (the A100).
+  """
+  @spec gpu_family?(Spec.Compute.t(), atom()) :: boolean()
+  def gpu_family?(%Spec.Compute{gpu_type: name, raw: raw}, canonical) when is_binary(name) do
     case Spec.GpuCatalog.for_provider(canonical, :vast) do
-      {:ok, names} -> gpu_type in names
+      {:ok, names} -> name in names and ram_fits?(raw["gpu_ram"], @gpu_ram_mb[canonical])
       _ -> false
     end
   end
 
-  def gpu_family?(_gpu_type, _canonical), do: false
+  def gpu_family?(_compute, _canonical), do: false
+
+  defp ram_fits?(_mb, nil), do: true
+  defp ram_fits?(mb, {"gte", min}) when is_number(mb), do: mb >= min
+  defp ram_fits?(mb, {"lt", max}) when is_number(mb), do: mb < max
+  defp ram_fits?(_mb, _bound), do: false
 
   # --- request checks ---
 
