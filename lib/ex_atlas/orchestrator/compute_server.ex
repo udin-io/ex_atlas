@@ -322,6 +322,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   @doc false
   def start_link(arg) do
+    arg = sealed(arg)
     name = {:via, Registry, {ComputeRegistry, {:compute, tracked_id(arg)}}}
     GenServer.start_link(__MODULE__, arg, name: name)
   end
@@ -334,6 +335,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       shutdown: @shutdown_timeout_ms,
       type: :worker
     }
+  end
+
+  # `Orchestrator.spawn/1` has sealed these already; a tracker started
+  # directly gets the same, so its state never holds a raw key.
+  defp sealed({:adopted, _record} = arg), do: arg
+
+  defp sealed({compute, opts}) do
+    case ExAtlas.Config.seal_credentials(opts) do
+      {:ok, opts} -> {compute, opts}
+      {:error, error} -> raise error
+    end
   end
 
   defp tracked_id({:adopted, record}), do: record.id
@@ -1112,7 +1124,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       opts = poll_opts(state.opts)
 
       {:ok,
-       Task.Supervisor.async_nolink(@task_supervisor, fn -> UpstreamStatus.observe(id, opts) end)}
+       Task.Supervisor.async_nolink(
+         @task_supervisor,
+         contained(fn -> UpstreamStatus.observe(id, opts) end)
+       )}
     else
       :error
     end
@@ -1124,10 +1139,36 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       opts = Keyword.put(poll_opts(state.opts), :from, state.spend_from)
 
       {:ok,
-       Task.Supervisor.async_nolink(@task_supervisor, fn -> ExAtlas.compute_spend(id, opts) end)}
+       Task.Supervisor.async_nolink(
+         @task_supervisor,
+         contained(fn -> ExAtlas.compute_spend(id, opts) end)
+       )}
     else
       :error
     end
+  end
+
+  # A raise inside a provider can come after the HTTP client revealed the key,
+  # and the BEAM keeps the crashed frame's arguments in the stacktrace. That
+  # stacktrace would reach the task's crash log and, as the DOWN reason, the
+  # `{:poll_failed, _}` or `{:spend_reconcile_failed, _}` broadcast. Exit
+  # instead with the exception's module and the stacktrace with arities only;
+  # the exception struct goes too, as its fields can hold the value.
+  defp contained(fun) do
+    fn ->
+      try do
+        fun.()
+      rescue
+        exception -> exit({:crashed, exception.__struct__, arities(__STACKTRACE__)})
+      end
+    end
+  end
+
+  defp arities(stacktrace) do
+    Enum.map(stacktrace, fn
+      {mod, fun, args, location} when is_list(args) -> {mod, fun, length(args), location}
+      frame -> frame
+    end)
   end
 
   defp clear_reconcile(%{reconcile_timeout: timer} = state) do

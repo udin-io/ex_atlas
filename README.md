@@ -1405,6 +1405,12 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
   prefix unique per deployment. Within one deployment, `:reap_owner` keeps
   each machine away from the others' pods; set it on every machine (see "More
   than one node").
+- **Credentials print as `#ExAtlas.Secret<redacted>`.** ExAtlas wraps
+  `api_key:` and the `:auth`, `:headers` and `:aws_sigv4` entries of
+  `req_options:` in `ExAtlas.Secret` where it first receives them, so a crash
+  in a tracker or a provider prints none of them. `inspect/1` of a
+  `Spec.Compute` leaves out `auth`. Your own frames hold what you pass: pass
+  `api_key: ExAtlas.Secret.wrap(key)` to cover them too.
 - **The tracking store is on disk.** Records are scrubbed of `:api_key` and
   friends and never hold `compute.auth.token`, but they do hold your spawn
   opts — including `:env`, which is persisted verbatim so a respawn after

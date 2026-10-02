@@ -453,7 +453,10 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
           task_opts(
             api_key: @api_key,
             auth: :bearer,
-            req_options: [auth: {:bearer, @api_key}]
+            req_options: [
+              auth: {:bearer, @api_key},
+              aws_sigv4: [access_key_id: "AKIDPROBE", secret_access_key: "sigv4-disk-probe-3c7e"]
+            ]
           )
         )
 
@@ -461,6 +464,7 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
 
       # The provider credential, however it was passed in.
       refute bytes =~ @api_key
+      refute bytes =~ "sigv4-disk-probe-3c7e"
 
       # And the resource's own bearer token, which `ExAtlas.Auth.Token`'s
       # moduledoc promises ExAtlas never stores.

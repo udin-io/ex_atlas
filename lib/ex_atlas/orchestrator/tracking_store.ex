@@ -157,6 +157,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   an operator reading the warning; the alternative is destroying live work.
   """
 
+  alias ExAtlas.Config
   alias ExAtlas.Orchestrator.{CostMeter, Ownership}
   alias ExAtlas.Spec
 
@@ -304,9 +305,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   Remove credentials from a spawn keyword list before it reaches disk.
 
   Drops `#{inspect(@secret_opts)}`, anything named by
-  `config :ex_atlas, :orchestrator, scrub_keys: [...]`, and the `:auth` /
-  `:headers` entries of `:req_options`, which is where a hand-rolled bearer
-  header would be.
+  `config :ex_atlas, :orchestrator, scrub_keys: [...]`, and the
+  `#{inspect(Config.secret_req_options())}` entries of `:req_options`,
+  where a hand-rolled bearer header or AWS signing key would be.
   """
   @spec scrub_opts(keyword()) :: keyword()
   def scrub_opts(opts) do
@@ -327,7 +328,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   defp scrub_req_options(opts) do
     case Keyword.fetch(opts, :req_options) do
       {:ok, req_options} when is_list(req_options) ->
-        Keyword.put(opts, :req_options, Keyword.drop(req_options, [:auth, :headers]))
+        Keyword.put(
+          opts,
+          :req_options,
+          Keyword.drop(req_options, Config.secret_req_options())
+        )
 
       _not_a_keyword_list ->
         opts

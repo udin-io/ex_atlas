@@ -18,6 +18,7 @@ feature #26). It feeds the choice of the next feature. Dates are merge dates.
 |---|---|---|
 | S3-compatible data staging (feature #26, milestone Data staging) | Slice 1 (#71): the `s3:` option, `Spec.Staging`, `ComputeRequest.container_env/1`; `inspect(%Compute{})` hides `raw`; `env:` errors carry no values | #75 |
 | | Slice 2 (#72): `guides/data_staging.md` and the tested `guides/scripts/atlas_entrypoint.sh` | #77 |
+| | Follow-up #76: credentials (`api_key:`, `req_options:` secrets, `s3:` keys, `compute.auth`) print as `#ExAtlas.Secret<redacted>` or not at all in crash reports | #78 |
 
 ## Shipped
 

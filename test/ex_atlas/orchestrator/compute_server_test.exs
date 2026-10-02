@@ -247,6 +247,180 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  # The Mock, but each status poll sends its ctx to the pid in
+  # `:key_echo_pid`, so a test sees what a tracker hands the provider.
+  defmodule KeyEchoProvider do
+    alias ExAtlas.Providers.Mock
+
+    def capabilities, do: Mock.capabilities()
+    defdelegate spawn_compute(req, ctx), to: Mock
+    defdelegate terminate(id, ctx), to: Mock
+
+    def get_compute(id, ctx) do
+      send(Application.fetch_env!(:ex_atlas, :key_echo_pid), {:poll_ctx, ctx})
+      Mock.get_compute(id, ctx)
+    end
+  end
+
+  # The Mock, but a status poll and a billing read reveal the key and then
+  # crash in a frame that takes it: a provider bug after the HTTP client
+  # read the key.
+  defmodule RevealCrashProvider do
+    alias ExAtlas.Providers.Mock
+
+    def capabilities, do: Mock.capabilities()
+    defdelegate spawn_compute(req, ctx), to: Mock
+    defdelegate terminate(id, ctx), to: Mock
+
+    def get_compute(_id, ctx), do: send_with(ExAtlas.Secret.reveal(ctx.api_key))
+    def compute_spend(_id, _opts, ctx), do: send_with(ExAtlas.Secret.reveal(ctx.api_key))
+
+    defp send_with(:never), do: :ok
+  end
+
+  describe "credentials beyond the State line" do
+    @api_key "sk-tracker-probe-7a3e"
+
+    # Crashes the tracker with a FunctionClauseError. OTP prints the
+    # callback's arguments, the state included, outside `format_status/1`.
+    defp clause_crash_log(pid) do
+      ref = Process.monitor(pid)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      end)
+    end
+
+    defp spawn_tracked(extra) do
+      [provider: :mock, gpu: :h100, image: "x", status_poll_ms: false]
+      |> Keyword.merge(extra)
+      |> ExAtlas.Orchestrator.spawn()
+    end
+
+    test "a function clause crash prints no api_key" do
+      {:ok, pid, compute} = spawn_tracked(api_key: @api_key)
+
+      log = clause_crash_log(pid)
+
+      # The crash and its stacktrace were logged, so the refute is not vacuous.
+      # Only the stacktrace frame prints the sealed key; `format_status/1`
+      # drops it from the State line.
+      assert log =~ "terminating"
+      assert log =~ "#ExAtlas.Secret<redacted>"
+      assert log =~ compute.id
+      refute log =~ @api_key
+    end
+
+    test "a tracker started without Orchestrator.spawn/1 prints no api_key either" do
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      opts = [provider: :mock, api_key: @api_key, status_poll_ms: false]
+
+      {:ok, pid} =
+        DynamicSupervisor.start_child(ComputeSupervisor, {ComputeServer, {compute, opts}})
+
+      log = clause_crash_log(pid)
+
+      assert log =~ "#ExAtlas.Secret<redacted>"
+      refute log =~ @api_key
+    end
+
+    test "a function clause crash prints no compute auth token" do
+      {:ok, pid, compute} = spawn_tracked(auth: :bearer)
+      assert is_binary(compute.auth.token)
+
+      log = clause_crash_log(pid)
+
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute log =~ compute.auth.token
+    end
+
+    test "a function clause crash prints no req_options :auth or :headers" do
+      header_secret = "hdr-tracker-probe-2b9d"
+
+      {:ok, pid, compute} =
+        spawn_tracked(
+          req_options: [auth: {:bearer, @api_key}, headers: [{"x-api-key", header_secret}]]
+        )
+
+      log = clause_crash_log(pid)
+
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute log =~ @api_key
+      refute log =~ header_secret
+    end
+
+    # Runs `fun` under capture_log and returns the log and the event `fun` got.
+    defp crash_event(fun) do
+      log = ExUnit.CaptureLog.capture_log(fn -> send(self(), {:event, fun.()}) end)
+      assert_received {:event, event}
+      {log, event}
+    end
+
+    test "a provider crash in a status poll prints no key in the log or the event" do
+      {:ok, _pid, compute} =
+        spawn_tracked(provider: RevealCrashProvider, api_key: @api_key, status_poll_ms: 20)
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      {log, reason} =
+        crash_event(fn ->
+          assert_receive {:atlas_compute, ^id, {:poll_failed, reason}}, 2_000
+          reason
+        end)
+
+      # The task's crash was logged and reported, so the refutes are not vacuous.
+      assert log =~ "send_with"
+      assert inspect(reason) =~ "send_with"
+      refute log =~ @api_key
+      refute inspect(reason) =~ @api_key
+      refute :erlang.term_to_binary(reason) =~ @api_key
+    end
+
+    test "a provider crash in a billing read prints no key in the log or the event" do
+      {:ok, _pid, compute} =
+        spawn_tracked(
+          provider: RevealCrashProvider,
+          api_key: @api_key,
+          max_cost: 1,
+          reconcile_spend_ms: 20,
+          provider_opts: %{cost_per_hour: 0.36}
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      {log, reason} =
+        crash_event(fn ->
+          assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, reason}}, 2_000
+          reason
+        end)
+
+      assert log =~ "send_with"
+      assert inspect(reason) =~ "send_with"
+      refute log =~ @api_key
+      refute inspect(reason) =~ @api_key
+      refute :erlang.term_to_binary(reason) =~ @api_key
+    end
+
+    test "control: the tracker's polls still hand the per-call key to the provider" do
+      Application.put_env(:ex_atlas, :key_echo_pid, self())
+      on_exit(fn -> Application.delete_env(:ex_atlas, :key_echo_pid) end)
+
+      {:ok, _pid, _compute} =
+        spawn_tracked(provider: KeyEchoProvider, api_key: @api_key, status_poll_ms: 20)
+
+      assert_receive {:poll_ctx, ctx}, 2_000
+      assert reveal(ctx.api_key) == @api_key
+    end
+
+    defp reveal(%{__struct__: _} = secret), do: ExAtlas.Secret.reveal(secret)
+    defp reveal(value), do: value
+  end
+
   describe "upstream status polling" do
     setup do
       # Idle TTL and heartbeat are pushed far out so nothing but the status
@@ -424,8 +598,11 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       assert {:ok, %{compute: replacement}} = ExAtlas.Orchestrator.info(new_id)
 
-      assert %{dataset_uri: "s3://bucket/datasets/abc/", secret_access_key: "tsec-test-9f2c"} =
-               replacement.raw.request.s3
+      assert %{
+               "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
+               "AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"
+             } =
+               ExAtlas.Spec.Staging.env(replacement.raw.request.s3)
     end
 
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do

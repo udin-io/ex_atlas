@@ -83,6 +83,26 @@ defmodule ExAtlas.Spec.StagingTest do
       assert text =~ "https://t3.storage.dev"
       refute_secrets(text)
     end
+
+    test "a printer that skips Inspect shows none of the three secrets either" do
+      {:ok, staging} = Staging.new(@full)
+
+      for text <- [
+            inspect(staging, structs: false),
+            :io_lib.format(~c"~p", [staging]) |> IO.iodata_to_binary()
+          ] do
+        # The URIs printed, so the refute is not vacuous.
+        assert text =~ "s3://bucket/datasets/abc/"
+        refute_secrets(text)
+      end
+    end
+
+    test "a Staging passed back to new/1 keeps its credentials" do
+      {:ok, staging} = Staging.new(@full)
+
+      assert {:ok, again} = Staging.new(staging)
+      assert Staging.env(again)["AWS_SECRET_ACCESS_KEY"] == @secret
+    end
   end
 
   describe "new/1 refusals" do
@@ -149,7 +169,8 @@ defmodule ExAtlas.Spec.StagingTest do
     end
 
     test "the full input with the same secrets is accepted (control)" do
-      assert {:ok, %Staging{secret_access_key: @secret}} = Staging.new(@full)
+      assert {:ok, staging} = Staging.new(@full)
+      assert Staging.env(staging)["AWS_SECRET_ACCESS_KEY"] == @secret
     end
   end
 end

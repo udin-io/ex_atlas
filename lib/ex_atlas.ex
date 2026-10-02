@@ -103,9 +103,7 @@ defmodule ExAtlas do
   def spawn_compute(opts) when is_list(opts) do
     # Checked here, not by `Keyword.split/2` below: a non-atom key would skip
     # validation and reach the provider ctx, credentials and all.
-    unless Keyword.keyword?(opts) do
-      raise ArgumentError, "spawn_compute/1 expects a keyword list with atom keys"
-    end
+    Config.keyword!(opts)
 
     {provider, opts} = Config.pop_provider!(opts)
     {request_opts, config_opts} = split_compute_request_opts(opts)
@@ -113,6 +111,8 @@ defmodule ExAtlas do
     ctx = Config.build_ctx(provider, config_opts)
     provider |> Config.provider_module() |> apply(:spawn_compute, [req, ctx])
   end
+
+  def spawn_compute(_opts), do: not_keyword!()
 
   @spec spawn_compute(Spec.ComputeRequest.t(), opts()) ::
           {:ok, Spec.Compute.t()} | {:error, term()}
@@ -127,6 +127,8 @@ defmodule ExAtlas do
     ctx = Config.build_ctx(provider, opts)
     provider |> Config.provider_module() |> apply(:spawn_compute, [req, ctx])
   end
+
+  def spawn_compute(_req, _opts), do: not_keyword!()
 
   @doc "Fetch a compute resource by id."
   @spec get_compute(String.t(), opts()) :: {:ok, Spec.Compute.t()} | {:error, term()}
@@ -186,12 +188,17 @@ defmodule ExAtlas do
   status poll instead of opening a second one.
   """
   @spec await_ready(String.t(), opts()) :: await_result()
-  def await_ready(id, opts \\ []) when is_binary(id) do
+  def await_ready(id, opts \\ [])
+
+  def await_ready(id, opts) when is_binary(id) do
+    Config.keyword!(opts)
     {timeout_ms, opts} = Keyword.pop(opts, :timeout_ms, @default_await_timeout_ms)
     {interval_ms, opts} = Keyword.pop(opts, :poll_interval_ms, @default_await_poll_interval_ms)
 
     poll_until_ready(id, opts, monotonic_ms() + timeout_ms, interval_ms, 0, nil)
   end
+
+  def await_ready(_id, _opts), do: raise(ArgumentError, "await_ready/2 expects a string id")
 
   defp poll_until_ready(id, opts, deadline, interval_ms, failures, last) do
     case UpstreamStatus.observe(id, opts) do
@@ -259,12 +266,16 @@ defmodule ExAtlas do
     provider |> Config.provider_module() |> apply(:run_job, [req, ctx])
   end
 
+  def run_job(_opts), do: not_keyword!()
+
   @spec run_job(Spec.JobRequest.t(), opts()) :: {:ok, Spec.Job.t()} | {:error, term()}
   def run_job(%Spec.JobRequest{} = req, opts) when is_list(opts) do
     {provider, opts} = Config.pop_provider!(opts)
     ctx = Config.build_ctx(provider, opts)
     provider |> Config.provider_module() |> apply(:run_job, [req, ctx])
   end
+
+  def run_job(_req, _opts), do: not_keyword!()
 
   @doc "Fetch a serverless job by id."
   @spec get_job(String.t(), opts()) :: {:ok, Spec.Job.t()} | {:error, term()}
@@ -322,10 +333,13 @@ defmodule ExAtlas do
   """
   @spec create_network_volume(opts()) :: {:ok, Spec.NetworkVolume.t()} | {:error, term()}
   def create_network_volume(opts) when is_list(opts) do
+    Config.keyword!(opts)
     {request_opts, config_opts} = Keyword.split(opts, @network_volume_request_keys)
     req = Spec.NetworkVolumeRequest.new!(request_opts)
     dispatch_optional(:create_network_volume, [req], config_opts)
   end
+
+  def create_network_volume(_opts), do: not_keyword!()
 
   @doc "Delete a network volume. The provider destroys the data on it."
   @spec delete_network_volume(String.t(), opts()) :: :ok | {:error, term()}
@@ -383,10 +397,13 @@ defmodule ExAtlas do
   """
   @spec create_template(opts()) :: {:ok, Spec.Template.t()} | {:error, term()}
   def create_template(opts) when is_list(opts) do
+    Config.keyword!(opts)
     {request_opts, config_opts} = Keyword.split(opts, @template_request_keys)
     req = Spec.TemplateRequest.new!(request_opts)
     dispatch_optional(:create_template, [req], config_opts)
   end
+
+  def create_template(_opts), do: not_keyword!()
 
   @doc "Delete a template. RunPod refuses while a pod or endpoint uses it."
   @spec delete_template(String.t(), opts()) :: :ok | {:error, term()}
@@ -416,7 +433,10 @@ defmodule ExAtlas do
   read the total as a live cost.
   """
   @spec compute_spend(String.t(), opts()) :: {:ok, Spec.Spend.t()} | {:error, term()}
-  def compute_spend(id, opts \\ []) when is_binary(id) do
+  def compute_spend(id, opts \\ [])
+
+  def compute_spend(id, opts) when is_binary(id) do
+    Config.keyword!(opts)
     {window, config_opts} = Keyword.split(opts, [:from, :to])
 
     case Enum.reject(window, fn {_key, value} -> match?(%DateTime{}, value) end) do
@@ -427,6 +447,8 @@ defmodule ExAtlas do
         {:error, ExAtlas.Error.new(:validation, message: "#{inspect(key)} must be a DateTime")}
     end
   end
+
+  def compute_spend(_id, _opts), do: raise(ArgumentError, "compute_spend/2 expects a string id")
 
   @doc """
   List the account's serverless endpoints, every page.
@@ -492,6 +514,10 @@ defmodule ExAtlas do
     :policy,
     :provider_opts
   ]
+
+  # A failed guard prints the arguments, and opts can hold the API key, so
+  # every guarded public function ends in a clause that raises without them.
+  defp not_keyword!, do: raise(ArgumentError, "expected opts to be a keyword list with atom keys")
 
   defp split_compute_request_opts(opts), do: Keyword.split(opts, @compute_request_keys)
   defp split_job_request_opts(opts), do: Keyword.split(opts, @job_request_keys)

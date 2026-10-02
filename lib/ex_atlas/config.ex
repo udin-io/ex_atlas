@@ -17,6 +17,9 @@ defmodule ExAtlas.Config do
     3. Environment variable (e.g. `RUNPOD_API_KEY`, `LAMBDA_LABS_API_KEY`).
     4. `nil` (providers decide whether to raise).
 
+  The ctx holds the key as an `ExAtlas.Secret`; a provider reads it with
+  `ExAtlas.Secret.reveal/1` where its HTTP client needs it.
+
   This mirrors the `stripity_stripe` / `ex_aws` pattern: per-call overrides win,
   application config is the default, no global mutable state. Multi-tenant hosts
   pass `api_key:` per request and skip config entirely.
@@ -31,6 +34,8 @@ defmodule ExAtlas.Config do
       config :ex_atlas, :runpod, api_key: System.get_env("RUNPOD_API_KEY")
       config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY")
   """
+
+  alias ExAtlas.Secret
 
   @builtin_providers %{
     runpod: ExAtlas.Providers.RunPod,
@@ -51,11 +56,127 @@ defmodule ExAtlas.Config do
   # passed through to the ctx verbatim.
   @resolved_opts [:provider, :api_key, :base_url, :req_options]
 
+  # Req options that carry a credential: the `authorization` header, any
+  # hand-rolled header, and AWS signing keys.
+  @secret_req_options [:auth, :headers, :aws_sigv4]
+
   @type opts :: keyword()
+
+  @doc """
+  Wrap the credentials in `opts` in `ExAtlas.Secret`, so no stacktrace that
+  carries `opts` prints them: `:api_key`, and the
+  `#{inspect(@secret_req_options)}` entries of `:req_options`.
+
+  `ExAtlas.Orchestrator.spawn/1` runs this before anything else reads its
+  opts; `build_ctx/2` runs it for every provider call. An `:api_key` that is
+  not a string or an `ExAtlas.Secret` of one, or a `:req_options` that is not
+  a keyword list, is a `NimbleOptions.ValidationError` with `value: nil`, so
+  no message prints it.
+  """
+  @spec seal_credentials(opts()) :: {:ok, opts()} | {:error, NimbleOptions.ValidationError.t()}
+  def seal_credentials(opts) do
+    with :ok <- check_keyword(opts),
+         {:ok, opts} <- seal(opts, :api_key, &seal_api_key/1) do
+      seal(opts, :req_options, &seal_req_options/1)
+    end
+  end
+
+  @doc """
+  `req_options` with its `#{inspect(@secret_req_options)}` entries unwrapped,
+  for the HTTP client to read. A provider calls this where it builds the
+  request, and nowhere else.
+  """
+  @spec reveal_req_options(keyword()) :: keyword()
+  def reveal_req_options(req_options) do
+    Enum.map(req_options, fn {key, value} -> {key, Secret.reveal(value)} end)
+  end
+
+  @doc "The `req_options` entries that can carry a credential."
+  @spec secret_req_options() :: [atom()]
+  def secret_req_options, do: @secret_req_options
+
+  @doc """
+  Raise `ArgumentError` unless `opts` is a keyword list with atom keys.
+
+  The message names no value: opts can hold credentials, and a later
+  `Keyword` call on a malformed list prints it in the stacktrace.
+  """
+  @spec keyword!(term()) :: :ok
+  def keyword!(opts) do
+    case check_keyword(opts) do
+      :ok -> :ok
+      {:error, _error} -> raise ArgumentError, "expected opts to be a keyword list with atom keys"
+    end
+  end
+
+  defp check_keyword(opts) do
+    if is_list(opts) and Keyword.keyword?(opts),
+      do: :ok,
+      else: invalid(:opts, "expected a keyword list with atom keys")
+  end
+
+  defp seal(opts, key, seal_fun) do
+    case Keyword.fetch(opts, key) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, value} ->
+        with {:ok, sealed} <- seal_fun.(value), do: {:ok, Keyword.put(opts, key, sealed)}
+    end
+  end
+
+  defp seal_api_key(key) do
+    secret = Secret.wrap(key)
+
+    case Secret.reveal(secret) do
+      value when is_binary(value) or is_nil(value) -> {:ok, secret}
+      _other -> invalid(:api_key, "expected a string or an ExAtlas.Secret of one")
+    end
+  end
+
+  defp seal_req_options(req_options) do
+    cond do
+      not (is_list(req_options) and Keyword.keyword?(req_options)) ->
+        invalid(:req_options, "expected a keyword list")
+
+      not Enum.all?(Keyword.get_values(req_options, :auth), &req_auth?(Secret.reveal(&1))) ->
+        invalid(:req_options, ":auth must be a shape Req's auth step takes")
+
+      true ->
+        {:ok, Enum.map(req_options, &seal_req_option/1)}
+    end
+  end
+
+  # The shapes `Req.Steps.auth/1` matches. Any other raises a
+  # FunctionClauseError there, whose stacktrace prints the revealed value.
+  defp req_auth?(auth) when is_binary(auth), do: true
+  defp req_auth?({scheme, value}) when scheme in [:basic, :bearer, :digest], do: is_binary(value)
+  defp req_auth?(fun) when is_function(fun, 0), do: true
+  defp req_auth?({mod, fun, args}), do: is_atom(mod) and is_atom(fun) and is_list(args)
+  defp req_auth?(:netrc), do: true
+  defp req_auth?({:netrc, _path}), do: true
+  defp req_auth?({user, pass}), do: is_binary(user) and is_binary(pass)
+  defp req_auth?(_other), do: false
+
+  defp seal_req_option({key, value}) when key in @secret_req_options,
+    do: {key, Secret.wrap(value)}
+
+  defp seal_req_option(pair), do: pair
+
+  defp invalid(key, detail) do
+    {:error,
+     %NimbleOptions.ValidationError{
+       key: key,
+       value: nil,
+       message: "invalid value for #{inspect(key)} option: #{detail}"
+     }}
+  end
 
   @doc "Pop `:provider` from opts and return `{provider_atom_or_module, remaining_opts}`."
   @spec pop_provider!(opts()) :: {atom() | module(), opts()}
   def pop_provider!(opts) do
+    keyword!(opts)
+
     case Keyword.pop(opts, :provider) do
       {nil, rest} ->
         case Application.get_env(:ex_atlas, :default_provider) do
@@ -89,6 +210,10 @@ defmodule ExAtlas.Config do
   """
   @spec build_ctx(atom() | module(), opts()) :: ExAtlas.Provider.ctx()
   def build_ctx(provider, opts) do
+    opts = ok!(seal_credentials(opts))
+    # A key from app config or the environment gets the same check.
+    api_key = ok!(provider |> resolve_api_key(opts) |> seal_api_key())
+
     opts
     |> Keyword.drop(@resolved_opts)
     # Storage credentials belong to the request alone; a tracker passes its
@@ -97,11 +222,14 @@ defmodule ExAtlas.Config do
     |> Map.new()
     |> Map.merge(%{
       provider: provider,
-      api_key: resolve_api_key(provider, opts),
+      api_key: api_key,
       base_url: Keyword.get(opts, :base_url),
       req_options: Keyword.get(opts, :req_options, [])
     })
   end
+
+  defp ok!({:ok, value}), do: value
+  defp ok!({:error, error}), do: raise(error)
 
   @doc "Resolve the module that implements `ExAtlas.Provider` for a given provider atom."
   @spec provider_module(atom() | module()) :: module()

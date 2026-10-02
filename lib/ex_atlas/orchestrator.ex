@@ -50,6 +50,7 @@ defmodule ExAtlas.Orchestrator do
   """
 
   alias ExAtlas.Callback
+  alias ExAtlas.Config
 
   alias ExAtlas.Orchestrator.{
     ComputeRegistry,
@@ -150,7 +151,8 @@ defmodule ExAtlas.Orchestrator do
   def spawn(opts) do
     ensure_running!()
 
-    with {:ok, opts} <- Callback.prepare(opts),
+    with {:ok, opts} <- Config.seal_credentials(opts),
+         {:ok, opts} <- Callback.prepare(opts),
          {:ok, opts} <- stage(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),
@@ -353,11 +355,13 @@ defmodule ExAtlas.Orchestrator do
   @spec run_task(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()} | {:error, term()}
   def run_task(opts) do
-    opts
-    |> Keyword.put(:mode, :task)
-    |> Keyword.put_new(:max_runtime_ms, @default_task_max_runtime_ms)
-    |> Keyword.put_new(:ready_timeout_ms, @default_ready_timeout_ms)
-    |> __MODULE__.spawn()
+    with {:ok, opts} <- Config.seal_credentials(opts) do
+      opts
+      |> Keyword.put(:mode, :task)
+      |> Keyword.put_new(:max_runtime_ms, @default_task_max_runtime_ms)
+      |> Keyword.put_new(:ready_timeout_ms, @default_ready_timeout_ms)
+      |> __MODULE__.spawn()
+    end
   end
 
   @doc """
@@ -408,7 +412,10 @@ defmodule ExAtlas.Orchestrator do
   worker — rather than from the LiveView that is also listening.
   """
   @spec await_ready(String.t(), keyword()) :: ExAtlas.await_result()
-  def await_ready(id, opts \\ []) when is_binary(id) do
+  def await_ready(id, opts \\ [])
+
+  def await_ready(id, opts) when is_binary(id) do
+    Config.keyword!(opts)
     ensure_running!()
     {timeout_ms, opts} = Keyword.pop(opts, :timeout_ms, @default_ready_timeout_ms)
 
@@ -420,6 +427,9 @@ defmodule ExAtlas.Orchestrator do
         ExAtlas.await_ready(id, Keyword.put(opts, :timeout_ms, timeout_ms))
     end
   end
+
+  # A failed guard prints the arguments, and opts can hold the API key.
+  def await_ready(_id, _opts), do: raise(ArgumentError, "await_ready/2 expects a string id")
 
   # `ExAtlas.Orchestrator.Events` silently skips broadcasts when the host app
   # has no `phoenix_pubsub`. With nothing announcing anything there is no event

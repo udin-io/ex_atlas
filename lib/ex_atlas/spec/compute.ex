@@ -4,10 +4,12 @@ defmodule ExAtlas.Spec.Compute do
 
   `:raw` holds the provider's native response for callers that need access to
   fields ExAtlas doesn't normalize. `inspect/1` leaves it out: RunPod's pod body
-  echoes the container `env`, credentials included.
+  echoes the container `env`, credentials included. It leaves out `:auth` too,
+  whose `token` is the pod's bearer credential: a tracker holds its compute in
+  its state, which a crash's stacktrace prints.
   """
 
-  @derive {Inspect, except: [:raw]}
+  @derive {Inspect, except: [:raw, :auth]}
   @enforce_keys [:id, :provider, :status]
   defstruct id: nil,
             provider: nil,

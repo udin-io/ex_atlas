@@ -15,6 +15,12 @@ defmodule ExAtlas.Provider do
   struct (`ExAtlas.Spec.Compute`, `ExAtlas.Spec.Job`, ...) or a tagged error tuple
   shaped by `ExAtlas.Error`.
 
+  `ctx.api_key` is an `ExAtlas.Secret` or `nil`. Call `ExAtlas.Secret.reveal/1`
+  only where the HTTP client reads the key: a crash in any frame that holds
+  the ctx then prints `#ExAtlas.Secret<redacted>`. The `:auth`, `:headers`
+  and `:aws_sigv4` entries of `ctx.req_options` are Secrets too;
+  `ExAtlas.Config.reveal_req_options/1` unwraps them.
+
   ## Capabilities
 
   Not every provider supports every operation. `c:capabilities/0` returns the
@@ -45,7 +51,7 @@ defmodule ExAtlas.Provider do
   alias ExAtlas.Spec
 
   @type ctx :: %{
-          required(:api_key) => String.t() | nil,
+          required(:api_key) => ExAtlas.Secret.t() | nil,
           required(:provider) => atom(),
           optional(:base_url) => String.t(),
           optional(:req_options) => keyword(),
