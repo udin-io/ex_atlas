@@ -43,8 +43,9 @@ defmodule ExAtlas.Providers.Vast do
   (`exec "$@"`).
 
   `spot: true` searches interruptible (`type: "bid"`) offers and rents the
-  cheapest by `min_bid`, bidding exactly that price, so `cost_per_hour` is the
-  bid. An offer with no `min_bid` is skipped, and `provider_opts.offer_id`
+  cheapest by `dph_total` (a bid search lists it as the offer's `min_bid` plus
+  storage), bidding exactly its `min_bid`, so `cost_per_hour` is the bid plus
+  the disk. An offer with no `min_bid` is skipped, and `provider_opts.offer_id`
   with `spot: true` is `:validation`: it searches nothing to bid on. An
   outbid instance reads `exited`, which `ExAtlas.Orchestrator` classes as
   `:preempted`; `on_failure: {:respawn, n}` rents a replacement. A finished

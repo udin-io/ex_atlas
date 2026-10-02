@@ -82,9 +82,11 @@ defmodule ExAtlas.Test.FakeVast do
       names = get_in(query, ["gpu_name", "in"]) || ["RTX 4090"]
       offers = Enum.map(Enum.with_index(names, 1), fn {name, i} -> offer_for(name, i) end)
 
+      # A bid search lists `dph_total` as the bid plus 0.01 of storage
+      # (`dph_base` = `min_bid`), as Vast's free search does.
       offers =
         if query["type"] == "bid",
-          do: Enum.map(offers, &Map.put(&1, "min_bid", 0.2)),
+          do: Enum.map(offers, &Map.merge(&1, %{"min_bid" => 0.2, "dph_total" => 0.21})),
           else: offers
 
       json(conn, 200, %{"offers" => offers})
@@ -139,11 +141,18 @@ defmodule ExAtlas.Test.FakeVast do
     [base_url: "http://localhost:#{bypass.port}", api_key: "vast-test-key"]
   end
 
-  # A bid instance bills its bid and reads `is_bid`.
+  # ASSUMPTION, unverified until the :vast_live spot test prints the real
+  # values: a bid instance reads `is_bid` and bills its bid plus 0.01 of
+  # storage, as its offer listed.
   defp bid_fields(instance, nil), do: instance
 
   defp bid_fields(instance, price),
-    do: Map.merge(instance, %{"is_bid" => true, "dph_total" => price, "min_bid" => price})
+    do:
+      Map.merge(instance, %{
+        "is_bid" => true,
+        "dph_total" => Float.round(price + 0.01, 4),
+        "min_bid" => price
+      })
 
   @doc "Outbid a rented instance of `start/0`'s fake: it reads `exited` from now on."
   def outbid(vast, id) do

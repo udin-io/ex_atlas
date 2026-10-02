@@ -528,8 +528,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   end
 
   describe "spawn_compute/1 spot: true" do
-    defp bid_offer(id, min_bid, attrs \\ %{}),
-      do: offer(Map.merge(%{"id" => id, "min_bid" => min_bid, "dph_total" => 0.9}, attrs))
+    # A bid search lists `dph_total` as the bid plus the disk's storage cost
+    # (read from Vast's free search, 2026-10-02: `dph_base` = `min_bid`).
+    defp bid_offer(id, min_bid, attrs \\ %{}) do
+      total = if is_number(min_bid), do: Float.round(min_bid + 0.01, 4), else: 0.9
+      offer(Map.merge(%{"id" => id, "min_bid" => min_bid, "dph_total" => total}, attrs))
+    end
 
     test "searches type bid and rents at the offer's min_bid", %{bypass: bypass, opts: opts} do
       expect_search(bypass, [bid_offer(7, 0.18)])
@@ -541,8 +545,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert query["type"] == "bid"
       assert_received {:rent, "7", body}
       assert body["price"] == 0.18
-      # The bid, not the on-demand dph_total of 0.9.
-      assert compute.cost_per_hour == 0.18
+      # What the bid bills: the bid plus the disk's storage.
+      assert compute.cost_per_hour == 0.19
     end
 
     test "control: an on-demand spawn searches ondemand and sends no price", %{
@@ -557,14 +561,18 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert_received {:search, %{"type" => "ondemand"}}
       assert_received {:rent, "7", body}
       refute Map.has_key?(body, "price")
-      assert compute.cost_per_hour == 0.9
+      assert compute.cost_per_hour == 0.19
     end
 
-    test "tries offers by min_bid, not by dph_total", %{bypass: bypass, opts: opts} do
+    # Offer 1 has the lowest bid and the dearest disk: it bills the most.
+    test "tries offers by what the bid bills", %{
+      bypass: bypass,
+      opts: opts
+    } do
       expect_search(bypass, [
-        bid_offer(1, 0.30, %{"dph_total" => 0.50}),
-        bid_offer(2, 0.12, %{"dph_total" => 0.80}),
-        bid_offer(3, 0.20, %{"dph_total" => 0.60})
+        bid_offer(1, 0.10, %{"dph_total" => 0.30}),
+        bid_offer(2, 0.15, %{"dph_total" => 0.16}),
+        bid_offer(3, 0.20, %{"dph_total" => 0.21})
       ])
 
       expect_rents(bypass, fn _ -> {400, refused("bid_too_low", "no")} end)
@@ -586,7 +594,7 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
       expect_rents(bypass, fn _ -> rented(5) end)
 
-      assert {:ok, %{cost_per_hour: 0.25}} = rent_spawn(opts, spot: true)
+      assert {:ok, %{cost_per_hour: 0.26}} = rent_spawn(opts, spot: true)
       assert rent_ids() == ["4"]
     end
 
@@ -607,7 +615,7 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       expect_search(bypass, [bid_offer(7, 0.18)])
       expect_rents(bypass, fn _ -> rented(1) end)
 
-      assert {:ok, %{cost_per_hour: 0.18}} =
+      assert {:ok, %{cost_per_hour: 0.19}} =
                rent_spawn(opts, spot: true, provider_opts: %{offer_id: nil})
     end
 
@@ -634,7 +642,7 @@ defmodule ExAtlas.Providers.VastSpawnTest do
         "2" -> rented(9)
       end)
 
-      assert {:ok, %{id: "9", cost_per_hour: 0.15}} = rent_spawn(opts, spot: true)
+      assert {:ok, %{id: "9", cost_per_hour: 0.16}} = rent_spawn(opts, spot: true)
       assert_received {:rent, "1", %{"price" => 0.10}}
       assert_received {:rent, "2", %{"price" => 0.15}}
     end

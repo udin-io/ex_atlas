@@ -110,15 +110,16 @@ defmodule ExAtlas.Providers.Vast.Translate do
   `list_gpu_types/1`: on-demand, or interruptible for `:bid`.
   """
   @spec gpu_type_query(atom(), :ondemand | :bid) :: {:ok, map()} | {:error, Error.t()}
-  def gpu_type_query(canonical, type \\ :ondemand) do
+  def gpu_type_query(canonical, type) do
     with {:ok, query} <- gpu_query(canonical), do: {:ok, Map.merge(query, base_query(type))}
   end
 
   defp offer_type(%Spec.ComputeRequest{spot: true}), do: :bid
   defp offer_type(%Spec.ComputeRequest{}), do: :ondemand
 
-  # The order is `dph_total` for both types: Vast's reference says a `bid`
-  # search prices offers by their minimum bid. The live test prints the order.
+  # `dph_total` orders both types. A `bid` search lists it as the offer's
+  # `min_bid` plus storage (Vast's free search, 2026-10-02: `dph_base` equals
+  # `min_bid`, and the list is sorted by `dph_total`, not by `min_bid`).
   defp base_query(type) do
     %{
       "verified" => %{"eq" => true},
@@ -135,16 +136,17 @@ defmodule ExAtlas.Providers.Vast.Translate do
   `geolocation` country code is the first of `hints` that any offer has,
   else the cheapest anywhere.
 
-  With `spot?` the price is `min_bid`, the bid a rent sends, and an offer
-  without a positive numeric `min_bid` is dropped: renting it at `dph_total`
-  would bill an interruptible instance at the on-demand price.
+  With `spot?`, `offers` come from a `bid` search, where `dph_total` is the
+  offer's `min_bid` plus the disk's storage cost, so the order is still
+  `dph_total`. An offer without a positive numeric `min_bid` is dropped:
+  Vast would rent it at the on-demand price.
   """
   @spec pick([map()], [String.t()], boolean()) :: [map()]
-  def pick(offers, hints, spot? \\ false) do
+  def pick(offers, hints, spot?) do
     offers =
       offers
       |> Enum.filter(&(is_map(&1) and is_integer(&1["id"]) and biddable?(&1, spot?)))
-      |> Enum.sort_by(&price_key(&1[if(spot?, do: "min_bid", else: "dph_total")]))
+      |> Enum.sort_by(&price_key(&1["dph_total"]))
 
     in_hint =
       Enum.find_value(hints, fn hint ->
@@ -160,6 +162,8 @@ defmodule ExAtlas.Providers.Vast.Translate do
   @doc """
   The rent body for one `offer`: `body` as it is, or with `price`, the offer's
   `min_bid`, for `spot: true`. Vast takes `price` as the bid per machine.
+  The bid is the offer's price without storage: `cost_per_hour` is the bid
+  plus the disk, as the offer lists it.
   """
   @spec priced(map(), Spec.ComputeRequest.t(), map()) :: map()
   def priced(body, %Spec.ComputeRequest{spot: true}, %{"min_bid" => bid}),
@@ -212,7 +216,7 @@ defmodule ExAtlas.Providers.Vast.Translate do
         Enum.map(request.ports, fn {port, protocol} -> binding(port, protocol, nil, nil) end),
       gpu_type: string_or_nil(offer["gpu_name"]),
       gpu_count: count(offer["num_gpus"]) || request.gpu_count,
-      cost_per_hour: number_or_nil(offer[if(request.spot, do: "min_bid", else: "dph_total")]),
+      cost_per_hour: cost_per_hour(offer, request.spot),
       region: string_or_nil(offer["geolocation"]),
       image: request.image,
       name: request.name,
@@ -314,6 +318,11 @@ defmodule ExAtlas.Providers.Vast.Translate do
   end
 
   def gpu_family?(_compute, _canonical), do: false
+
+  # What the rent bills an hour. A bid offer lists `dph_total` as its bid plus
+  # storage; one without it bills at least its bid.
+  defp cost_per_hour(offer, true), do: number_or_nil(offer["dph_total"]) || offer["min_bid"]
+  defp cost_per_hour(offer, false), do: number_or_nil(offer["dph_total"])
 
   defp biddable?(_offer, false), do: true
   defp biddable?(%{"min_bid" => bid}, true), do: is_number(bid) and bid > 0

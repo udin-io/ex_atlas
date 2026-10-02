@@ -110,9 +110,9 @@ defmodule ExAtlas.Orchestrator.VastTaskTest do
       subscribe(old_id)
       ref = Process.monitor(pid)
 
-      # Control: the instance bills its bid, exists, and is not replaced
-      # before it is outbid.
-      assert bid == 0.2
+      # Control: the instance bills its bid and storage, exists, and is not
+      # replaced before it is outbid.
+      assert bid == 0.21
       assert {:ok, %{id: ^old_id}} = ExAtlas.get_compute(old_id, vast)
       refute_receive {:atlas_compute, ^old_id, {:respawned, _}}, 100
 
@@ -121,7 +121,7 @@ defmodule ExAtlas.Orchestrator.VastTaskTest do
       assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
       refute new_id == old_id
       assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute(old_id, vast)
-      assert {:ok, %{id: ^new_id, cost_per_hour: 0.2}} = ExAtlas.get_compute(new_id, vast)
+      assert {:ok, %{id: ^new_id, cost_per_hour: 0.21}} = ExAtlas.get_compute(new_id, vast)
 
       subscribe(new_id)
       :ok = Callback.ingest(prepared[:callback].task_id, :finish, %{"exit_code" => 0})
