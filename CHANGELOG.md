@@ -7,6 +7,28 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Changed: credentials travel as `ExAtlas.Secret` (#76)
+
+A tracker or provider crash printed the per-call `api_key:` in its
+stacktrace: OTP prints a crashed function's arguments outside
+`format_status/1`. The new `ExAtlas.Secret` prints as
+`#ExAtlas.Secret<redacted>`. `Orchestrator.spawn/1` and
+`Config.build_ctx/2` wrap `api_key:` and the `:auth`, `:headers` and
+`:aws_sigv4` entries of `req_options:` in it before anything else reads them.
+An `api_key:` that is not a string, or a `req_options:` that is not a keyword
+list, raises (or, from `spawn/1`, returns) a `NimbleOptions.ValidationError`
+with `value: nil`. `inspect/1` of a `Spec.Compute` leaves out `auth`, which
+holds the pod's bearer token. `Spec.Staging` holds its three credentials as
+Secrets, so `inspect(staging, structs: false)` and Erlang's `~p` print none of
+them. Tracking records drop `req_options: [aws_sigv4:
+...]` as they already dropped `:auth` and `:headers`.
+
+**Breaking for a host's own provider module:** `ctx.api_key` is an
+`ExAtlas.Secret` or `nil`, and the credential entries of `ctx.req_options` are
+Secrets. Read them with `ExAtlas.Secret.reveal/1` and
+`ExAtlas.Config.reveal_req_options/1` where the HTTP client needs them. See
+`guides/writing_a_provider.md`.
+
 ### Added: `s3:` puts storage credentials and URIs into the container (#71, slice 1 of #26)
 
 `spawn_compute/1`, `Orchestrator.spawn/1` and `run_task/1` take `s3:` with

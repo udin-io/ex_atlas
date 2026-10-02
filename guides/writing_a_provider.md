@@ -43,13 +43,18 @@ defmodule MyCloud.Provider do
 
   # ... implement the rest of the callbacks ...
 
-  defp build_client(%{api_key: key}) do
+  # `ctx.api_key` is an `ExAtlas.Secret`, which prints as redacted. Reveal it
+  # here, where the HTTP client reads it, and nowhere else. Req calls the
+  # function in its auth step, so the raw key sits in no request field before
+  # the `authorization` header, which Req's `inspect/1` redacts.
+  defp build_client(%{api_key: key} = ctx) do
     Req.new(
       base_url: "https://api.mycloud.example.com/v1",
-      auth: {:bearer, key},
+      auth: fn -> {:bearer, ExAtlas.Secret.reveal(key)} end,
       retry: :transient,
       receive_timeout: 30_000
     )
+    |> Req.merge(ExAtlas.Config.reveal_req_options(Map.get(ctx, :req_options, [])))
   end
 
   defp translate_gpu(canonical) do

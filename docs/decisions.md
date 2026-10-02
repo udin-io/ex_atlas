@@ -21,6 +21,9 @@ names the PR or issue that holds the reasoning.
 | A failed pull still uploads the log; an upload failure is printed and the trainer's exit code stands | Skip the upload after a failed pull; fail the task on an upload error | #26, #72 |
 | The guide states no Tigris checksum claim; it gives the generic `when_required` fix with AWS's page as source | State that Tigris accepts the default, with no source | #26, #72 |
 | The tracker holds `s3:` as a `Spec.Staging`, validated at the top of `Orchestrator.spawn/1`; `Config.build_ctx/2` drops `:s3` | Rely on `format_status/1`: OTP prints a crashing callback's arguments in the stacktrace, outside it | #75 review |
+| `api_key:` and the `:auth`, `:headers`, `:aws_sigv4` entries of `req_options:` travel as an `ExAtlas.Secret`, sealed first in `Orchestrator.spawn/1` and `Config.build_ctx/2`, revealed only in `RunPod.Client` | Re-resolve the key from app config on each call: loses per-call keys. Keep a string in the ctx: every provider frame prints it | #76 |
+| `ExAtlas.Secret` holds its value in a closure; `Spec.Staging` holds its three credentials as Secrets | A plain field: `inspect(secret, structs: false)` and Erlang's `~p` print it | #76 |
+| `inspect(%Spec.Compute{})` hides `auth` whole | A hand-written `Inspect` that shows the scheme and hides the token | #76 |
 | `persist: true` with `s3:` is refused until #74 | Store `s3:` like `env:`: a credential on disk | #26, #75 |
 | URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
 | ExAtlas never presigns and never calls S3 | Presign in ExAtlas: needs a SigV4 signer and host credentials | #26 |
