@@ -363,9 +363,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema),
-         {:ok, tracking} <- validate_persist_mode(tracking) do
-      validate_persist_staging(tracking, Keyword.get(opts, :s3))
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
+      validate_persist_mode(tracking)
     end
   end
 
@@ -392,25 +391,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
            "invalid value for :persist option: only mode: :task can be persisted and adopted. " <>
              "An interactive session's auth token is never stored, so an adopted one would be " <>
              "unreachable and would bill for another idle TTL."
-       }}
-    else
-      {:ok, tracking}
-    end
-  end
-
-  # A record never holds `s3:` credentials, so an adopted task would respawn
-  # with no storage access and run broken work. Refused until records can keep
-  # the non-secret fields and refuse that respawn (issue 74).
-  defp validate_persist_staging(tracking, s3) do
-    if tracking[:persist] and s3 != nil do
-      {:error,
-       %NimbleOptions.ValidationError{
-         key: :persist,
-         value: true,
-         message:
-           "invalid value for :persist option: a task with :s3 cannot be persisted yet. " <>
-             "A tracking record never stores the :s3 credentials, so an adopted task " <>
-             "would respawn without them."
        }}
     else
       {:ok, tracking}
@@ -984,7 +964,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp respawn(state, reason) do
     old_id = state.compute.id
 
-    case ExAtlas.spawn_compute(state.opts) do
+    case spawn_replacement(state.opts) do
       {:ok, replacement} ->
         # Before `release_old/1`, which deletes the old record along with the
         # old resource. The replacement inherits the original `spawned_at_ms`
@@ -1021,6 +1001,24 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:error, error} ->
         Events.broadcast(old_id, {:respawn_failed, {reason, error}})
         {:stop, :normal, state}
+    end
+  end
+
+  # An adopted task's `s3:` came from its record, which never holds the
+  # credentials or presigned URLs. A replacement without them would run blind,
+  # and `ExAtlas.spawn_compute/1` raises on the marker, so the respawn ends
+  # here, before the provider is asked for anything.
+  defp spawn_replacement(opts) do
+    if Spec.Staging.not_stored?(Keyword.get(opts, :s3)) do
+      {:error,
+       ExAtlas.Error.new(:validation,
+         provider: Keyword.get(opts, :provider),
+         message:
+           "cannot respawn: the :s3 staging credentials are not stored in a tracking " <>
+             "record, so a task adopted after a restart has none to give a replacement"
+       )}
+    else
+      ExAtlas.spawn_compute(opts)
     end
   end
 

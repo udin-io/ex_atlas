@@ -615,6 +615,33 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
                ExAtlas.Spec.Staging.env(replacement.raw.request.s3)
     end
 
+    test "a persisted task respawned before any restart keeps its s3: credentials",
+         %{base: base} do
+      # The tracker still holds the full `s3:` in memory; only the record on
+      # disk lacks the credentials.
+      s3 = %{
+        access_key_id: "tid-test-4b1e",
+        secret_access_key: "tsec-test-9f2c",
+        dataset_uri: "s3://bucket/datasets/abc/"
+      }
+
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.spawn([s3: s3, mode: :task, persist: true] ++ base)
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{compute: replacement}} = ExAtlas.Orchestrator.info(new_id)
+
+      assert %{
+               "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
+               "AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"
+             } = ExAtlas.Spec.Staging.env(replacement.raw.request.s3)
+    end
+
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do
       {:ok, _pid, compute} = ExAtlas.Orchestrator.spawn(base)
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))

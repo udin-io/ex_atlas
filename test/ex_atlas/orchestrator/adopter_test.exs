@@ -388,6 +388,55 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a task with s3: staging" do
+    @s3 %{
+      access_key_id: "tid-test-4b1e",
+      secret_access_key: "tsec-test-9f2c",
+      dataset_uri: "s3://bucket/datasets/abc/"
+    }
+
+    defp orphaned_staged_task(image) do
+      orphaned_task(
+        image: image,
+        s3: @s3,
+        spot: true,
+        on_failure: {:respawn, 1},
+        status_poll_ms: 30
+      )
+    end
+
+    defp images do
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      Enum.map(computes, & &1.image)
+    end
+
+    test "adopts, and a respawn after adoption ends the task without renting" do
+      compute = orphaned_staged_task("trainer-adopted-s3:latest")
+      id = compute.id
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      {:ok, pid} = Orchestrator.lookup(id)
+      assert {:ok, %{mode: :task}} = Orchestrator.info(id)
+      ref = Process.monitor(pid)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed,
+                       {:preempted, %ExAtlas.Error{kind: :validation, message: message}}}},
+                     2_000
+
+      assert message =~ "credentials are not stored"
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-s3:latest" in images()
+      assert :error = Memory.get(id)
+    end
+  end
+
   describe "a store that cannot account for itself" do
     test "adopts nothing and reports the failure" do
       compute = orphaned_task()

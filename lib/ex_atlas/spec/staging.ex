@@ -166,6 +166,11 @@ defmodule ExAtlas.Spec.Staging do
 
   def scrub(_unvalidated), do: %{credentials: :not_stored}
 
+  @doc "Whether `s3` is a record's scrubbed `s3:`, from `scrub/1`."
+  @spec not_stored?(term()) :: boolean()
+  def not_stored?(%{credentials: :not_stored}), do: true
+  def not_stored?(_s3), do: false
+
   # A presigned URL is a bearer credential until it expires.
   @sealed [:access_key_id, :secret_access_key, :session_token, :dataset_url, :artifact_url]
 

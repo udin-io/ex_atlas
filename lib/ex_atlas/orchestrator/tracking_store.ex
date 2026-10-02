@@ -99,9 +99,10 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Never stored: `compute.auth.token` (the raw preshared key — see
   `ExAtlas.Auth.Token`), `:api_key` (re-resolved from config at adoption,
-  exactly as a fresh spawn does), `:s3` (storage credentials; `persist: true`
-  with `s3:` is refused for now), and anything else matching
-  `:scrub_keys`. `last_activity_ms` is not stored because it is monotonic and
+  exactly as a fresh spawn does), the keys and presigned URLs of `:s3`, and
+  anything else matching `:scrub_keys`. `:s3` keeps its endpoint, region and
+  URIs beside `credentials: :not_stored`, so an adopted task with `s3:` runs
+  on, and its tracker refuses a respawn it has no credentials for. `last_activity_ms` is not stored because it is monotonic and
   nobody was touching the session while the node was down.
 
   ### Container environment is *not* scrubbed
