@@ -2398,7 +2398,12 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
                      2_000
 
       assert estimated < 1.0
-      assert spent >= 5.0
+
+      # Billed from zero, the replacement lifts the spend to the old $3 plus its
+      # own $2. A delta, not `>= 5.0`: when the respawn lands in the same
+      # millisecond as the first bill, the sum rounds to 4.999999999999999.
+      # Compared with the session's $3 instead, the spend would stay at $3.
+      assert_in_delta spent, 5.0, 0.01
     end
 
     test "a bill for the pod a respawn replaced is ignored", %{base: base} do
