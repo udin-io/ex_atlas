@@ -72,7 +72,7 @@ flowchart TD
   cs -->|"record spend"| store
   cs -->|"events"| ev["Events / PubSub"]
   ev --> host
-  cs -->|"terminate/2: ExAtlas.terminate/2"| prov
+  cs -->|"terminate/2: ExAtlas.terminate/2<br/>after idle TTL, max_runtime_ms, cost cap,<br/>or finish report + finish_grace_ms"| prov
   pod["RunPod container, or Lambda host unit"] -->|"Callback.Plug"| cb["Callback"]
   cb -->|"progress, log, finish"| cs
   boot["Boot"] --> ad["Adopter"]
@@ -190,6 +190,12 @@ callback, the host script starts the container, then a transient
 finishes on the report and terminates the instance. Without a callback,
 `self_terminate: true` is `:validation` before any request. Added in #85.
 
+An interactive `Orchestrator.spawn/1` session with the same `command:` and
+callback ends the same way, since #96: `finish_grace_ms` after the report it
+broadcasts `{:terminating, :finished}` instead of a task outcome, and
+`touch/1` does not postpone it. With `self_terminate: false` the report is
+announced and the session runs on.
+
 ```mermaid
 sequenceDiagram
   participant Host as Host app
@@ -213,6 +219,7 @@ sequenceDiagram
   U->>CB: POST /finish exit_code, token on curl stdin
   CB->>CS: finish report
   CS->>CS: finish_grace_ms, then task completed or failed
+  Note over CS: interactive spawn/1: terminating finished
   CS->>LL: terminate(id)
   CS-->>Host: task outcome event
 ```

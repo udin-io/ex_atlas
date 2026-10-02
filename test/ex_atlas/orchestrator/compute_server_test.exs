@@ -1324,6 +1324,47 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_receive {:atlas_compute, ^id, {:task, _}}, 200
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
+
+    test "an interactive session past max_runtime_ms terminates with no task event",
+         %{base: base} do
+      {pid, compute} =
+        start_task(base,
+          mode: :interactive,
+          idle_ttl_ms: 60_000,
+          heartbeat_ms: 60_000,
+          max_runtime_ms: 50
+        )
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :max_runtime}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:task, _}}
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "an interactive session stuck provisioning terminates :never_ready, no task event",
+         %{base: base} do
+      {pid, compute} =
+        start_task(base,
+          mode: :interactive,
+          idle_ttl_ms: 60_000,
+          heartbeat_ms: 60_000,
+          ready_timeout_ms: 300
+        )
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Mock.set_status(id, :provisioning)
+      assert_receive {:atlas_compute, ^id, {:status, :provisioning}}, 2_000
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :never_ready}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:task, _}}
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
   end
 
   describe "task option validation" do
@@ -1581,6 +1622,100 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       refute_receive {:atlas_compute, ^id, {:task_report, _}}, 200
       refute_received {:DOWN, ^ref, :process, ^pid, _}
+    end
+
+    test "an interactive session with a self-terminating command ends on the report",
+         %{base: base} do
+      {pid, compute, task_id} =
+        start_reporting_task(base, mode: :interactive, finish_grace_ms: 100)
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+
+      # The report says the command is over: activity does not buy more time.
+      :ok = ExAtlas.Orchestrator.touch(id)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :finished}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:terminating, :normal}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:status, :terminated}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:task, _}}
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "an interactive session ends on a non-zero exit report too", %{base: base} do
+      {pid, compute, task_id} =
+        start_reporting_task(base, mode: :interactive, finish_grace_ms: 50)
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 3})
+
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 3}}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:terminating, :finished}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:task, _}}
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "control: self_terminate: false keeps an interactive session up after the report",
+         %{base: base} do
+      {pid, compute, task_id} =
+        start_reporting_task(base,
+          mode: :interactive,
+          self_terminate: false,
+          finish_grace_ms: 50
+        )
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+      refute_received {:atlas_compute, ^id, {:terminating, _}}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "control: an interactive session with no command stays up after a report",
+         %{base: base} do
+      {pid, compute, task_id} =
+        start_reporting_task(Keyword.delete(base, :command),
+          mode: :interactive,
+          finish_grace_ms: 50
+        )
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+      refute_received {:atlas_compute, ^id, {:terminating, _}}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    # `command: []` runs the image's own command, which nothing asked to end.
+    test "control: an interactive session with command: [] stays up after a report",
+         %{base: base} do
+      {pid, compute, task_id} =
+        start_reporting_task(base, command: [], mode: :interactive, finish_grace_ms: 50)
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+      refute_received {:atlas_compute, ^id, {:terminating, _}}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
     end
   end
 

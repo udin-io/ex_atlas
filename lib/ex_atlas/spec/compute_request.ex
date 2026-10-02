@@ -26,14 +26,16 @@ defmodule ExAtlas.Spec.ComputeRequest do
   A provider without the `:self_terminate` capability cannot do this. Lambda
   Labs refuses `:command` with `self_terminate: true` unless a `:callback` is
   set: its host then reports the exit code, and the tracker deletes the
-  instance.
+  instance, in an interactive session from `ExAtlas.Orchestrator.spawn/1` as
+  in a task.
 
   Set `self_terminate: false` for an image with no shell or no `curl`, or when
   you want to keep the resource up for inspection after the command ends. Then
   the only thing that will ever stop it is
   `ExAtlas.Orchestrator.run_task/1`'s `:max_runtime_ms`, or you — unless a
   `:callback` is configured, in which case the container still reports its exit
-  code and `:finish_grace_ms` ends the task on that.
+  code and `:finish_grace_ms` ends the task on that. An interactive session
+  with `self_terminate: false` announces the report and stays up.
 
   ## Reporting back
 

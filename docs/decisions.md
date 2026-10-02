@@ -155,3 +155,5 @@ names the PR or issue that holds the reasoning.
 | The spawn checks that the resolver function is exported | Check the shape only: a typo would surface hours later, at the respawn | #87 |
 | Only a module that declares `ExAtlas.Orchestrator.RespawnCredentials` is called, on the spawn option, an adopted record and the app config | Call any exported function: write access to the store would run `{:os, :cmd, [...]}` on the node | #87 |
 | The resolver's result is checked inside its task | Check in the tracker: a check that raises on a value would crash it and print the value | #87 |
+| A finish report ends an interactive session whose non-empty `command:` self-terminates, after `finish_grace_ms`; `touch/1` does not postpone it | Refuse interactive `command:` on Lambda: breaks interactive Mock and RunPod sessions with a command, and a finished instance still bills | #96 |
+| Interactive `max_runtime_ms` and `ready_timeout_ms` announce `{:terminating, :max_runtime \| :never_ready}` | Keep `{:task, _}`: `Events` reserves task events for `mode: :task` | #96 |
