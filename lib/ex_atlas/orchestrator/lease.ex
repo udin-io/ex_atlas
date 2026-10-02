@@ -87,6 +87,7 @@ defmodule ExAtlas.Orchestrator.Lease do
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
       renewed_at: nil,
       held_since: nil,
+      adopting: nil,
       skipped: MapSet.new()
     }
 
@@ -101,6 +102,9 @@ defmodule ExAtlas.Orchestrator.Lease do
     Process.send_after(self(), :tick, div(state.ttl_ms, 3))
     {:noreply, state}
   end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{adopting: ref} = state),
+    do: {:noreply, %{state | adopting: nil}}
 
   def handle_info({:skipped, id, owner, why}, state) do
     if MapSet.member?(state.skipped, id) do
@@ -121,8 +125,7 @@ defmodule ExAtlas.Orchestrator.Lease do
       :ok ->
         state = hold(state, now)
         release_lost_trackers(state)
-        if now - state.held_since >= state.ttl_ms, do: claim(state, now)
-        state
+        if claiming?(state, now), do: claim(state, now), else: state
 
       other ->
         Logger.warning(
@@ -134,13 +137,18 @@ defmodule ExAtlas.Orchestrator.Lease do
     end
   end
 
+  # One takeover at a time: records claimed while an adoption runs would
+  # wait behind it anyway.
+  defp claiming?(state, now),
+    do: is_nil(state.adopting) and now - state.held_since >= state.ttl_ms
+
   defp claim(state, now) do
     lease = self()
     rewrite = &rewrite(&1, state.owner, lease)
 
     case safely(fn -> state.store.claim_expired(state.owner, now, rewrite) end) do
       {:ok, []} ->
-        :ok
+        state
 
       {:ok, records} ->
         Logger.info(
@@ -148,13 +156,28 @@ defmodule ExAtlas.Orchestrator.Lease do
             "owners: #{Enum.map_join(records, ", ", &inspect(&1.id))}"
         )
 
-        Adopter.adopt_claimed(records, state.owner, state.store)
+        adopt(state, records)
 
       other ->
         Logger.warning(
           "[ExAtlas.Orchestrator.Lease] could not claim expired owners' records (#{inspect(other)})"
         )
+
+        state
     end
+  end
+
+  # One provider call per record: in a task, so a slow provider never holds
+  # back the next renewal.
+  defp adopt(state, records) do
+    %{owner: owner, store: store} = state
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(ComputeServer.task_supervisor_name(), fn ->
+        Adopter.adopt_claimed(records, owner, store)
+      end)
+
+    %{state | adopting: Process.monitor(pid)}
   end
 
   # Runs inside the store's claim, once per candidate record.

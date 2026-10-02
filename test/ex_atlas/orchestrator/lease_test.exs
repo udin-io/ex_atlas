@@ -50,12 +50,12 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
   # A persisted task of `owner` whose node then dies: the pod runs on, the
   # record is all that is left.
-  defp orphaned_task(owner) do
+  defp orphaned_task(owner, provider \\ :mock) do
     as_owner(owner)
 
     {:ok, pid, compute} =
       Orchestrator.spawn(
-        provider: :mock,
+        provider: provider,
         gpu: :h100,
         image: "trainer:latest",
         name: "atlas-lease",
@@ -93,6 +93,21 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     end
 
     pid
+  end
+
+  # Polls `fun` every 10 ms for up to 3 s: adoption runs in its own task.
+  defp await(fun, tries \\ 300) do
+    cond do
+      fun.() ->
+        true
+
+      tries == 0 ->
+        false
+
+      true ->
+        Process.sleep(10)
+        await(fun, tries - 1)
+    end
   end
 
   defp tick!(pid) do
@@ -187,7 +202,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       held_lease!("m2")
 
-      assert Orchestrator.list_ids() == [id]
+      assert await(fn -> Orchestrator.list_ids() == [id] end)
       assert {:ok, record} = Store.get(id)
       assert record.owner == "m2"
       assert TrackingStore.sealed?(record)
@@ -196,7 +211,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
     test "control: claims nothing while the owner's lease is live" do
       %{id: id} = orphaned_task("m1")
-      :ok = Store.renew_lease("m1", now() + @ttl)
+      :ok = Store.renew_lease("m1", now() + 10 * @ttl)
 
       held_lease!("m2")
 
@@ -211,8 +226,8 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       held_lease!("m2")
 
+      assert await(fn -> Store.get(id) == :error end)
       assert Orchestrator.list_ids() == []
-      assert Store.get(id) == :error
     end
 
     test "a node that cannot renew its own lease claims nothing" do
@@ -286,6 +301,27 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       tick_at!(lease, clock, lapsed + @ttl)
       assert {:ok, %{owner: "m2"}} = Store.get(id)
+    end
+  end
+
+  describe "adopting what it claimed" do
+    # One provider call per claimed record. A large takeover on a slow
+    # provider must not hold back the next renewal, or this node's own lease
+    # lapses and a third node takes everything again.
+    test "runs outside the renewal loop: the Lease ticks while a provider call hangs" do
+      %{id: id} = orphaned_task("m1", ExAtlas.Test.FaultyProvider)
+      expire!("m1")
+      ExAtlas.Test.FaultyProvider.arm(:get_compute, {:block, self()})
+
+      capture_log(fn ->
+        lease = held_lease!("m2")
+        assert_receive {:blocked, :get_compute, call}, 2_000
+
+        tick!(lease)
+
+        send(call, :release)
+        assert await(fn -> Orchestrator.list_ids() == [id] end)
+      end)
     end
   end
 
