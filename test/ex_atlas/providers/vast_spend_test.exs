@@ -197,9 +197,9 @@ defmodule ExAtlas.Providers.VastSpendTest do
       end)
 
       assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
-               ExAtlas.compute_spend(@id, Keyword.delete(opts, :from))
+               ExAtlas.compute_spend(@id, Keyword.drop(opts, [:from, :to]))
 
-      assert message =~ ":from"
+      assert message =~ "start_date"
     end
 
     test "a `from` after `to` is :validation, with no request", %{bypass: bypass, opts: opts} do
@@ -295,6 +295,12 @@ defmodule ExAtlas.Providers.VastSpendTest do
           "description" => "Instance #{@id} #{@marker}",
           "metadata" => %{"label" => @marker}
         })
+        |> update_in(["items"], fn items ->
+          Enum.map(
+            items,
+            &Map.merge(&1, %{"description" => @marker, "metadata" => %{"x" => @marker}})
+          )
+        end)
 
       charges(bypass, [page([row, charge_row("999", gpu: 9.0)])])
 
@@ -306,6 +312,8 @@ defmodule ExAtlas.Providers.VastSpendTest do
 
       assert [%{"type" => "gpu", "amount" => 0.6}, %{"type" => "disk", "amount" => 0.2}] =
                Enum.map(items, &Map.take(&1, ["type", "amount"]))
+
+      assert Enum.all?(items, &(Map.keys(&1) -- ~w(start end type amount) == []))
 
       refute inspect(spend, structs: false) =~ @marker
       refute inspect(spend, structs: false) =~ "999"
