@@ -36,14 +36,12 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   @typedoc """
   What a launch needs from the request alone: the `user_data` script as a
-  `Secret` (`nil` with no image), the tags, the `Compute.auth` handle, and
-  every value the script carries, as a `Secret`, for scrubbing an error.
+  `Secret` (`nil` with no image), the tags and the `Compute.auth` handle.
   """
   @type parts :: %{
           user_data: Secret.t() | nil,
           tags: [%{String.t() => String.t()}],
-          auth: Spec.Compute.auth_handle() | nil,
-          secret_values: Secret.t()
+          auth: Spec.Compute.auth_handle() | nil
         }
 
   @doc """
@@ -70,8 +68,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
          %{
            user_data: Secret.wrap(user_data),
            tags: tags,
-           auth: auth,
-           secret_values: Secret.wrap(Map.values(env))
+           auth: auth
          }}
       end
     end

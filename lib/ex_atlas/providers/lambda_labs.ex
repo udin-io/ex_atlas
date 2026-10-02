@@ -32,7 +32,7 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   @behaviour ExAtlas.Provider
 
-  alias ExAtlas.{Error, Secret, Spec}
+  alias ExAtlas.{Error, Spec}
   alias ExAtlas.Providers.HTTP
   alias ExAtlas.Providers.LambdaLabs.{Client, Translate}
 
@@ -48,7 +48,7 @@ defmodule ExAtlas.Providers.LambdaLabs do
          {:ok, type} <- Translate.instance_type(request, types),
          {:ok, region} <- Translate.region(type, types[type], request.region_hints),
          body = Translate.launch_body(request, parts, type, region, ssh_key),
-         {:ok, id} <- launch(ctx, body, parts) do
+         {:ok, id} <- launch(ctx, body) do
       {:ok, Translate.launched_compute(id, request, parts, types[type], region)}
     end
   end
@@ -141,7 +141,7 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   # Retried on a 429 only: a launch that answered 5xx or timed out may have
   # rented an instance already.
-  defp launch(ctx, body, parts) do
+  defp launch(ctx, body) do
     case Client.post(ctx, "/instance-operations/launch", body, retry: &HTTP.retry_rate_limited/2) do
       {:ok, %{"instance_ids" => [id | _]}} when is_binary(id) ->
         {:ok, id}
@@ -150,24 +150,26 @@ defmodule ExAtlas.Providers.LambdaLabs do
         unexpected_body("POST /instance-operations/launch")
 
       {:error, %Error{} = error} ->
-        {:error, scrub(error, Secret.reveal(parts.secret_values))}
+        {:error, withhold_echo(error)}
     end
   end
 
-  # Lambda may echo a refused field in its error. A message that holds a value
-  # of the script is withheld, and `raw` keeps only Lambda's error code.
-  defp scrub(%Error{} = error, values) do
+  # Lambda may echo a refused field, `user_data` included, in its error text,
+  # quoted, escaped or cut short, so no substring check can find every echo.
+  # An answered launch error keeps only its status and Lambda's error code.
+  defp withhold_echo(%Error{status: status} = error) when is_integer(status) do
     code = code(error.raw)
 
-    message =
-      if is_binary(error.message) and Enum.any?(values, &echoes?(error.message, &1)),
-        do: "Lambda refused the launch (#{code || "no code"}); its message is withheld",
-        else: error.message
-
-    %{error | message: message, raw: code && %{"error" => %{"code" => code}}}
+    %{
+      error
+      | message:
+          "Lambda refused the launch (#{code || "no error code"}); ExAtlas withholds " <>
+            "Lambda's message, which can echo the request",
+        raw: code && %{"error" => %{"code" => code}}
+    }
   end
 
-  defp echoes?(message, value), do: value != "" and String.contains?(message, value)
+  defp withhold_echo(%Error{} = error), do: error
 
   defp code(%{"error" => %{"code" => code}}) when is_binary(code), do: code
   defp code(_raw), do: nil

@@ -463,20 +463,33 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       refute Exception.message(error) =~ @hf_token
     end
 
-    test "control: a launch error that echoes no value keeps Lambda's message", %{
+    # An echo need not hold the value as given: the script holds it shell-quoted,
+    # JSON escapes it, and Lambda may cut it short.
+    test "a launch error that echoes a quoted, escaped or cut value withholds it too", %{
       bypass: bypass,
       opts: opts
     } do
-      expect_types(bypass)
+      value = "p'ss\nw0rd-#{@hf_token}"
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
-        json(conn, 400, %{
-          "error" => %{"code" => "global/invalid-parameters", "message" => "Invalid tag key"}
-        })
-      end)
+      for echo <- [
+            "export DB_PASS='p'\\''ss",
+            Jason.encode!(value),
+            "value starting #{String.slice(value, 0, 6)} is invalid"
+          ] do
+        expect_types(bypass)
 
-      assert {:error, %ExAtlas.Error{message: "Invalid tag key"}} =
-               ExAtlas.spawn_compute(opts ++ [env: %{"HF_TOKEN" => @hf_token}])
+        Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+          json(conn, 400, %{
+            "error" => %{"code" => "global/invalid-parameters", "message" => echo}
+          })
+        end)
+
+        assert {:error, %ExAtlas.Error{kind: :provider, status: 400} = error} =
+                 ExAtlas.spawn_compute(opts ++ [env: %{"DB_PASS" => value}])
+
+        assert error.message =~ "global/invalid-parameters"
+        refute inspect(error) =~ echo
+      end
     end
 
     test "the returned Compute prints no auth token and no env value", %{
