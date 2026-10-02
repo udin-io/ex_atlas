@@ -172,8 +172,45 @@ On every renewal a node releases its trackers of records another node now
 owns: `ComputeServer.release/1` stops the tracker with `{:shutdown,
 :released}`, which keeps the pod and writes nothing. The claim skips a row
 whose `owner` column differs from the record's signed `:owner`, and a signed
-record this build would not adopt (`Adopter.refusal/1`). The Reaper does not change: a claimed pod is in m2's
-Registry, and pods named with a dead owner are still only logged.
+record this build would not adopt (`Adopter.refusal/1`). A claimed pod is in
+m2's Registry, so the Reaper leaves it alone.
+
+### A dead owner's untracked pods
+
+A pod m1 spawned without `persist: true` has no record to claim. Each
+renewal also reads the expired leases (`expired_leases/1`, #144) and watches
+each owner with its expiry on m2's monotonic clock. Once m1's expiry has
+stayed the same for `:reap_dead_owner_after_ms`, m2's Reaper deletes m1's
+untracked pods:
+
+```mermaid
+sequenceDiagram
+  participant L2 as Lease on m2
+  participant Store as TrackingStore.Ecto
+  participant R2 as Reaper on m2
+  participant Peers as connected nodes
+  participant P as Provider
+  L2->>Store: renew_lease(m2, now + ttl), every ttl / 3
+  L2->>Store: expired_leases(now)
+  Store-->>L2: m1 expires_at T
+  Note over L2: watch m1 with T on the monotonic clock. A moved T, a failed renewal or read, or a ttl gap starts it again
+  R2->>Peers: Ownership.owner() over erpc
+  Peers-->>R2: owners of live connected nodes, or no answer
+  R2->>L2: dead_owners()
+  L2->>Store: expired_leases(now), to confirm T
+  L2-->>R2: m1 with T, or none when a window has not passed or m2 last renewed a ttl ago
+  R2->>P: list_compute()
+  P-->>R2: atlas-m1-notebook-3 billing, untracked, no record, past grace
+  alt m1 dead, no peer reports m1, every peer answered
+    R2->>P: ExAtlas.terminate(id)
+    R2->>R2: warning, deleted pod of dead owner m1
+  else otherwise
+    R2->>R2: leave alone, log once per boot
+  end
+```
+
+A pod whose record still names m1 stays: the store shields it (slice 2,
+#145).
 
 ## The orchestrator at runtime
 

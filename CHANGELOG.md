@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added: a live node deletes a dead owner's untracked pods (#144)
+
+A machine destroyed while it ran `spawn/1` sessions left their pods billing
+with no tracker, and every other node only logged them. With
+`TrackingStore.Ecto`, `:reap_owner` and a callback secret, the Reaper now
+deletes an untracked pod named with another owner once that owner's lease has
+stayed expired, unchanged, for `:reap_dead_owner_after_ms` (15 minutes by
+default, from two `lease_ttl_ms` to 24 hours):
+
+    [warning] [ExAtlas.Orchestrator.Reaper] deleted pod-9 (atlas-m1-notebook-3):
+    owner "m1" has not renewed its lease since 2026-10-02T21:00:00Z, and no
+    connected node reports it
+
+It keeps the pod when a connected node reports that owner, when any
+connected node cannot report its owner, and when this node has not renewed
+its own lease for the whole window. A node that just booted waits a full
+window. A store of your own opts in with the optional `expired_leases/1`
+callback.
+
+- **Upgrade:** an unclustered node cut off from the database for the whole
+  window, or one that stopped renewing its lease (its callback secret
+  removed), loses its untracked pods to the other nodes. Cluster the nodes,
+  or raise `:reap_dead_owner_after_ms`.
+
 ## v0.9.0 — 2026-10-02
 
 ### Upgrading

@@ -205,8 +205,10 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     * A dead owner's records stay until another node takes them over. A store
       that implements `c:renew_lease/2` and `c:claim_expired/3` (the Ecto
       store does) lets a live node adopt the signed records of an owner whose
-      lease expired; see `ExAtlas.Orchestrator.Lease`. With any other store,
-      a dead owner's pods and records stay until an operator deletes them.
+      lease expired; see `ExAtlas.Orchestrator.Lease`. With
+      `c:expired_leases/1` too, the Reaper deletes a dead owner's untracked
+      pods. With any other store, a dead owner's pods and records stay until
+      an operator deletes them.
 
   A store that maps record fields to columns needs a nullable `owner` column.
   Without it every record comes back unowned, and every node adopts it. It

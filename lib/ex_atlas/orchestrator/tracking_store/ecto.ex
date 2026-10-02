@@ -69,7 +69,10 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     row every `lease_ttl_ms / 3` (every 30 s at the default 90 s) and takes over the signed
     records of an owner whose lease expired. Each record is claimed by one
     conditional `UPDATE` that re-checks the old owner and its expired lease,
-    so two live nodes never both adopt it. A host that ran step 1 adds a
+    so two live nodes never both adopt it. `expired_leases/1` lists the
+    expired rows for the Lease's dead-owner watch, and the Reaper deletes the
+    untracked pods of an owner that stays dead (`:reap_dead_owner_after_ms`).
+    A host that ran step 1 adds a
     migration calling `Migration.up(version: 2)`; until then the lease
     renewal logs a warning every tick and claims nothing.
 

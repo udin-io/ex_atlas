@@ -48,10 +48,30 @@ defmodule ExAtlas.Orchestrator.Lease do
   track the pod: up to `lease_ttl_ms / 3` while the losing node can renew,
   and for as long as it cannot.
 
+  ## Dead owners
+
+  When the store exports `expired_leases/1` (the Ecto store does), each
+  successful renewal also reads the expired leases and watches every owner
+  with its expiry. An owner whose expiry stays the same for
+  `:reap_dead_owner_after_ms` on this node's monotonic clock is dead
+  (`dead_owners/0`), and `ExAtlas.Orchestrator.Reaper` deletes its untracked
+  pods.
+
+      config :ex_atlas, :orchestrator, reap_dead_owner_after_ms: :timer.minutes(15)
+
+  The window runs from two `lease_ttl_ms` to 24 hours. The default is 15
+  minutes, or two ttls when that is longer. The watch starts again when an
+  owner's expiry moves (it renewed), when this node fails to renew or to read
+  the leases, and when a ttl passes between two of its renewals on either
+  clock. A restarted Lease starts with no watch, so a node that just booted
+  reads no owner as dead for a full window.
+
   ## Clocks
 
   Expiry is the renewing node's wall clock; a claimer compares it with its
-  own. Keep clock skew between nodes well under `lease_ttl_ms`.
+  own. Keep clock skew between nodes well under `lease_ttl_ms`. The dead-owner
+  window runs on the monotonic clock, so skew moves only when the watch
+  starts, never how long it lasts.
   """
 
   use GenServer

@@ -83,8 +83,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   (`atlas-train-42` becomes `atlas-m1-train-42`), and the Reaper deletes only
   untracked pods named with its own owner. It leaves every other pod alone and
   logs each one once per boot: another node's pods, pods named before the
-  owner was set, and pods of a node that is gone. Those last ones are the
-  operator's to delete. See `ExAtlas.Orchestrator.Ownership`.
+  owner was set, and pods of a node that is gone. With the Ecto store it
+  deletes that last kind once their owner is dead (below); otherwise they are
+  the operator's to delete. See `ExAtlas.Orchestrator.Ownership`.
 
   The Reaper reaps nothing, and logs an error, when:
 
@@ -103,6 +104,25 @@ defmodule ExAtlas.Orchestrator.Reaper do
   pods of machines that share the account without clustering. An owner set
   on only some machines therefore protects nothing: the machines without one
   still delete the others' pods.
+
+  ## A dead owner's pods
+
+  With `ExAtlas.Orchestrator.TrackingStore.Ecto` and a running
+  `ExAtlas.Orchestrator.Lease`, the Reaper also deletes an untracked pod
+  whose name carries another owner, once `ExAtlas.Orchestrator.Lease.dead_owners/0`
+  reports that owner dead: its lease stayed expired, with the same expiry,
+  for `:reap_dead_owner_after_ms` (15 minutes by default) while this node
+  renewed its own. The rules above still hold: the pod bills, is in neither
+  the Registry nor the store, carries the prefix and is past grace. The
+  Reaper keeps the pod when a connected node reports that owner, and when
+  any connected node cannot report its owner. Each deletion logs a warning
+  with the owner and its lease's expiry.
+
+  A node that is alive but cut off from the database, and connected to no
+  other node, reads as dead after the window, and so does a node that once
+  renewed and now runs no Lease (its callback secret removed, say). Their
+  untracked pods go. Cluster the nodes, or raise `:reap_dead_owner_after_ms`.
+  A pod a dead owner's record still names stays, as today.
 
   ## The grace window
 

@@ -5,6 +5,20 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Dead owner's pods (milestone 11)
+
+| Decision | Alternative not taken | Where |
+|---|---|---|
+| The Lease decides who is dead; the Reaper deletes | A sweep inside the Lease: the Reaper already owns listing, grace, status and prefix | #143 |
+| Dead means the owner's expiry stayed the same for `:reap_dead_owner_after_ms` on this node's monotonic clock | `now - expires_at >= window`: a lease row edited into the past would delete a live node's pods at once | #143 |
+| `Lease.dead_owners/0` re-reads the leases at the call and keeps only an expiry that has not moved | Trust the last tick's watch: an owner back from the dead renews up to a third of a ttl before the watch sees it | #144 |
+| A failed renewal, a failed lease read, or a ttl gap between renewals on either clock clears the watch | Keep it across one failure: a node back from its own outage would carry the old watch's age | #144 |
+| A connected node that cannot report its owner stops dead-owner deletion for that tick | Go on, as the duplicate-owner check does: the silent node may be the dead owner itself, slow or on an old release | #144 |
+| An expired owner whose name `:reap_owner` refuses (`M1`, `a-b`) is never watched | Watch every row: a row added as `M1` would match a pod named `atlas-M1-...` that ExAtlas never stamped | #144 |
+| Window default 15 minutes, or two ttls when that is longer; bounds two ttls to 24 hours | A fixed 15-minute default: at a ttl over 7.5 minutes it is under the floor, and the Lease would refuse to start with no window set | #144 |
+| `dead_owners/0` answers `%{owner => expires_at_ms}` | A list: the deletion log names the expiry | #144 |
+| The Ecto store only | DETS: it has no shared lease table, so no node sees another's liveness | #143 |
+
 ## Release 0.9.0 (#141)
 
 | Decision | Alternative not taken | Where |

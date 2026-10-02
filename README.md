@@ -1240,7 +1240,9 @@ With an owner set:
   every other prefixed pod alone and logs each once per boot, with its id and
   the owner it carries. With the Ecto store, another machine takes over a
   gone machine's persisted tasks once its lease expires (see "In your own
-  database"); other pods of a machine that is gone are yours to delete.
+  database"), and deletes its untracked pods once the lease has stayed
+  expired for `:reap_dead_owner_after_ms` (15 minutes by default). With any
+  other store, the pods of a machine that is gone are yours to delete.
 - The Adopter adopts only the tracking records that carry its own owner, so
   machines can share one database-backed store (see "Surviving a deploy").
 
@@ -1363,8 +1365,9 @@ Seven things to know before you rely on it:
   of another owner stays untouched and the boot logs its id. The first node to
   adopt an unowned record (one written before v0.8.0) claims it. With the
   Ecto store, a live node takes over a dead owner's signed records once its
-  lease expires; with DETS or a store of your own, a dead owner's pods and
-  records stay until you delete them. A store that maps fields to
+  lease expires, and deletes its untracked pods once the lease stays expired
+  for `:reap_dead_owner_after_ms`; with DETS or a store of your own, a dead
+  owner's pods and records stay until you delete them. A store that maps fields to
   columns needs a nullable `owner` column, and from v0.8.0 the four cost
   columns `max_cost`, `spent_usd`, `cost_rate` and `cost_since_ms` (the last
   two nullable). It needs a nullable integer `respawning` column too: without
