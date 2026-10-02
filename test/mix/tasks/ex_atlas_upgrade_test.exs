@@ -179,10 +179,12 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
     end
 
+    # The alias line names only `ExAtlas.Orchestrator`, so the match needs
+    # alias expansion on `Orchestrator.Supervisor`.
     test "finds the supervisor child through an alias" do
       files =
-        IgniterProject.app_with_children("Supervisor",
-          alias: "alias ExAtlas.Orchestrator.Supervisor"
+        IgniterProject.app_with_children("Orchestrator.Supervisor",
+          alias: "alias ExAtlas.Orchestrator"
         )
 
       assert_has_notice(upgrade_0_7(files), &(&1 =~ ":reap_owner"))

@@ -407,7 +407,7 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
     test "stops when --repo names a module that is not a repo" do
       igniter = install_ecto(host(), ["--repo", "Test.Missing"])
 
-      assert_has_issue(igniter, &(&1 =~ "Test.Missing"))
+      assert_has_issue(igniter, &(&1 =~ "--repo Test.Missing is not an Ecto repo"))
     end
 
     test "stops on a store other than ecto" do
