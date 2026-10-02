@@ -3,8 +3,9 @@ defmodule ExAtlas.Provider do
   Behaviour every compute provider must implement.
 
   A "provider" is any module that can spawn, control, and terminate GPU (or
-  CPU) compute resources on some cloud. ExAtlas ships a full RunPod implementation
-  and stubs for Fly.io Machines, Lambda Labs, and Vast.ai. Users can supply
+  CPU) compute resources on some cloud. ExAtlas ships a full RunPod implementation,
+  a Lambda Labs implementation of the compute callbacks, and stubs for Fly.io
+  Machines and Vast.ai. Users can supply
   their own module — the top-level `ExAtlas` API accepts any module name as a
   `:provider` value, so in-house clouds or test doubles plug in without a PR.
 

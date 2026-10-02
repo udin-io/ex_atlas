@@ -2,8 +2,7 @@ defmodule ExAtlas.Providers.Stub do
   @moduledoc """
   Shared base for placeholder providers that haven't been implemented yet.
 
-  Future `ExAtlas.Providers.Fly`, `ExAtlas.Providers.LambdaLabs`, `ExAtlas.Providers.Vast`
-  modules `use` this to reserve the provider atom in `ExAtlas.Config`, expose an
+  `ExAtlas.Providers.Fly` and `ExAtlas.Providers.Vast` `use` this to reserve the provider atom in `ExAtlas.Config`, expose an
   accurate `capabilities/0` list, and fail every other callback with a clear
   `{:error, :not_implemented}` so callers get a helpful message rather than a
   `FunctionClauseError`.
