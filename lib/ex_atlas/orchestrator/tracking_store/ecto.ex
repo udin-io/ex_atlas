@@ -1,0 +1,224 @@
+if Code.ensure_loaded?(Ecto.Adapters.SQL) do
+  defmodule ExAtlas.Orchestrator.TrackingStore.Ecto.Row do
+    @moduledoc false
+    # The table `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration` creates.
+
+    use Ecto.Schema
+
+    @primary_key {:id, :string, autogenerate: false}
+    schema "atlas_tracking_records" do
+      field(:owner, :string)
+      field(:record, :binary)
+      timestamps(type: :utc_datetime_usec)
+    end
+  end
+
+  defmodule ExAtlas.Orchestrator.TrackingStore.Ecto do
+    @moduledoc """
+    `ExAtlas.Orchestrator.TrackingStore` in a table of the host's own Ecto repo.
+
+    A database outlives a deploy where a machine's filesystem does not: on a
+    Fly machine with no volume, the DETS default comes up empty and the Reaper
+    deletes the pods it should adopt. This store keeps the records where the
+    host keeps the rest of its data.
+
+    ## Setup
+
+        # config/runtime.exs
+        config :ex_atlas, start_orchestrator: false   # the host starts the tree
+        config :ex_atlas, :orchestrator,
+          tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto,
+          repo: MyApp.Repo,
+          reap_owner: "web-1"
+
+        # priv/repo/migrations/20261002000000_add_atlas_tracking.exs
+        def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()
+        def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down()
+
+        # lib/my_app/application.ex
+        children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
+
+    The orchestrator must start after the repo, so the host starts
+    `ExAtlas.Orchestrator.Supervisor` itself instead of setting
+    `start_orchestrator: true`: ExAtlas's own tree boots before the host's, and
+    the Adopter's `all/0` would find no repo. Shutdown runs in reverse, so the
+    trackers write their records while the repo is still up.
+
+    Starting the store with no `:repo` configured raises `ArgumentError`.
+    Postgres and SQLite work; MySQL does not, since its upsert takes no
+    conflict target.
+
+    ## What a row holds
+
+    The whole record is one `:erlang.term_to_binary/1` blob in `record`, so
+    every field and nested opt round-trips and a new record version needs no
+    migration. `owner` repeats the record's `:owner` for queries.
+
+    ## Reading a row is a boundary
+
+    Anyone who can write the host's database can write these rows. A row is
+    decoded with `Plug.Crypto.non_executable_binary_to_term/2` and `[:safe]`,
+    which refuses atoms this node does not have and any function. A row that
+    is not a map with its own `id` is refused too.
+
+      * `all/0` answers `{:error, {:undecodable, ids}}` when any row is
+        refused. The Adopter then adopts nothing and the Reaper reaps nothing
+        this boot, as for a corrupt DETS file. Skipping the row instead would
+        leave its pod with no record, and the Reaper would delete it.
+      * `get/1` raises on a refused row. The Reaper reads a raise as "ours,
+        leave it alone"; `:error` would read as "not ours".
+
+    ## When the database is down
+
+      * `all/0` answers `{:error, _}`, with the same effect as above.
+      * `get/1` raises, so the Reaper leaves the pod alone.
+      * `put/1` and `delete/1` log the failure and return `:ok`, so a running
+        tracker carries on. A record that was not written is not adopted at
+        the next boot, as with the DETS store when it is not running.
+    """
+
+    @behaviour ExAtlas.Orchestrator.TrackingStore
+
+    import Ecto.Query, only: [from: 2]
+
+    require Logger
+
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto.Row
+
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def child_spec(opts) do
+      %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
+    end
+
+    @doc """
+    Checks that `:repo` is configured, and starts no process.
+
+    Raises `ArgumentError` when it is not, so a host that forgot it finds out
+    at boot rather than at its first deploy.
+    """
+    @spec start_link(keyword()) :: :ignore
+    def start_link(_opts \\ []) do
+      _ = repo!()
+      :ignore
+    end
+
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def put(%{id: id} = record) do
+      repo = repo!()
+      now = DateTime.utc_now()
+
+      row = %{
+        id: id,
+        owner: owner_column(record),
+        record: :erlang.term_to_binary(record),
+        inserted_at: now,
+        updated_at: now
+      }
+
+      try do
+        repo.insert_all(Row, [row],
+          on_conflict: {:replace, [:owner, :record, :updated_at]},
+          conflict_target: [:id]
+        )
+
+        :ok
+      rescue
+        error ->
+          Logger.error(
+            "[ExAtlas.Orchestrator.TrackingStore.Ecto] could not write the tracking record " <>
+              "for #{id} (#{Exception.message(error)}). It will not be adopted at the next " <>
+              "boot, and the Reaper will treat it as an orphan."
+          )
+
+          :ok
+      end
+    end
+
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def get(id) do
+      case repo!().one(from(r in Row, where: r.id == ^id, select: r.record)) do
+        nil ->
+          :error
+
+        blob ->
+          case decode(id, blob) do
+            {:ok, record} ->
+              {:ok, record}
+
+            :error ->
+              raise ArgumentError,
+                    "the tracking record row #{id} will not decode safely; it is kept"
+          end
+      end
+    end
+
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def delete(id) do
+      repo = repo!()
+
+      try do
+        _ = repo.delete_all(from(r in Row, where: r.id == ^id))
+        :ok
+      rescue
+        error ->
+          Logger.error(
+            "[ExAtlas.Orchestrator.TrackingStore.Ecto] could not delete the tracking record " <>
+              "for #{id} (#{Exception.message(error)}). The next boot finds the pod gone " <>
+              "and deletes the record then."
+          )
+
+          :ok
+      end
+    end
+
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def all do
+      rows = repo!().all(from(r in Row, select: {r.id, r.record}))
+
+      case Enum.reduce(rows, {[], []}, &decode_row/2) do
+        {records, []} -> {:ok, records}
+        {_records, refused} -> {:error, {:undecodable, Enum.sort(refused)}}
+      end
+    rescue
+      error -> {:error, error}
+    end
+
+    defp decode_row({id, blob}, {records, refused}) do
+      case decode(id, blob) do
+        {:ok, record} -> {[record | records], refused}
+        :error -> {records, [id | refused]}
+      end
+    end
+
+    # `[:safe]` refuses atoms this node does not have; the Plug.Crypto walk
+    # refuses functions. Neither error is logged: its message prints the term.
+    defp decode(id, blob) do
+      case Plug.Crypto.non_executable_binary_to_term(blob, [:safe]) do
+        %{id: ^id} = record -> {:ok, record}
+        _not_this_record -> :error
+      end
+    rescue
+      _error -> :error
+    end
+
+    defp owner_column(%{owner: owner}) when is_binary(owner), do: owner
+    defp owner_column(_record), do: nil
+
+    defp repo! do
+      case Keyword.get(Application.get_env(:ex_atlas, :orchestrator, []), :repo) do
+        nil ->
+          raise ArgumentError,
+                "#{inspect(__MODULE__)} needs a repo: set " <>
+                  "`config :ex_atlas, :orchestrator, repo: MyApp.Repo`"
+
+        repo when is_atom(repo) ->
+          repo
+
+        _other ->
+          raise ArgumentError,
+                "#{inspect(__MODULE__)} needs `config :ex_atlas, :orchestrator, repo:` " <>
+                  "to name an Ecto repo module"
+      end
+    end
+  end
+end
