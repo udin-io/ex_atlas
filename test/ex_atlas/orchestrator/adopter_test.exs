@@ -1795,6 +1795,39 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       {pod_a, pod_b}
     end
 
+    test "the orphan's report gets 410, before and after the adopted task respawns" do
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      # Hold the adopted tracker's first poll, so the task is adopted and has
+      # not respawned yet: the window in which only the Registry decides.
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      me = self()
+      adopter = Task.async(fn -> Adopter.run(notify: me) end)
+      assert_receive {:blocked, :get_compute, observer}, 2_000
+      send(observer, :release)
+      assert_receive {:blocked, :get_compute, poller}, 2_000
+      FaultyProvider.reset()
+      assert :ok = Task.await(adopter)
+      assert_receive :adoption_complete, 2_000
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      assert post_finish(pod_token(pod_a), 0).status == 410
+
+      send(poller, :release)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_c} = Mock.get_compute(new_id, %{})
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
+
+      assert post_finish(pod_token(pod_c), 4).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
     test "the interrupted attempt counts as spent, so a spent budget rents nothing more" do
       {pod_a, _pod_b} = died_mid_respawn(1)
       old_id = pod_a.id

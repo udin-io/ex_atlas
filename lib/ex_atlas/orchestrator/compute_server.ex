@@ -558,6 +558,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       %{
         new_state(compute, opts, tracking)
         | respawns: spent_respawns(record),
+          interrupted_respawn?: is_integer(Map.get(record, :respawning)),
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
@@ -609,6 +610,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       upstream_deletable?: true,
       respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
+      interrupted_respawn?: false,
       last_activity_ms: now_ms(),
       mode: tracking[:mode],
       deadline_at_ms: deadline_at(tracking[:max_runtime_ms]),
@@ -1167,6 +1169,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
               opts: opts,
               cost_meter: new_pod(state.cost_meter),
               respawns: state.respawns + 1,
+              interrupted_respawn?: false,
               poll_failures: 0,
               upstream_deletable?: true,
               last_activity_ms: now_ms()
@@ -1745,6 +1748,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # A callback descriptor stored by 0.8.0 has no `:attempt`, and neither does
   # the token minted from it. A respawn writes one (`next_attempt/2`).
+  #
+  # An adopted task whose node died mid-respawn has no current pod: its record
+  # names the preempted pod, and the orphan holds the spent attempt's token.
+  # `:none` matches no token until the next respawn registers its attempt.
+  defp callback_value(%{interrupted_respawn?: true}), do: :none
+
   defp callback_value(%{opts: opts, respawns: respawns}) do
     case Keyword.get(opts, :callback) do
       %{attempt: attempt} when is_integer(attempt) -> respawns
