@@ -4,10 +4,23 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
 
   import Igniter.Test
 
+  # Igniter's test mode matches `lib/**/*.{ex,exs}` against each test file's
+  # absolute path, and GlobEx's `**` skips a dot directory. A checkout under
+  # `~/.claude_worktrees` finds no module, so the project runs from a temp
+  # directory with no dot segment in its path.
   defp upgrade(argv \\ [], files \\ %{}) do
-    [files: files]
-    |> test_project()
-    |> Igniter.compose_task("ex_atlas.upgrade", argv)
+    dir = Path.join(System.tmp_dir!(), "ex_atlas_upgrade_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+
+    try do
+      File.cd!(dir, fn ->
+        [files: files]
+        |> test_project()
+        |> Igniter.compose_task("ex_atlas.upgrade", argv)
+      end)
+    after
+      File.rm_rf!(dir)
+    end
   end
 
   defp unloaded(fun) do
@@ -74,6 +87,30 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
         })
 
       assert [_] = warnings_naming(igniter, "MyCloud.Provider")
+    end
+
+    test "finds the behaviour when the process starts under a dot directory" do
+      dot_dir =
+        Path.join([System.tmp_dir!(), ".ex_atlas_dot_#{System.unique_integer([:positive])}"])
+
+      File.mkdir_p!(dot_dir)
+
+      try do
+        igniter =
+          File.cd!(dot_dir, fn ->
+            upgrade_0_7(%{
+              "lib/my_cloud/provider.ex" => """
+              defmodule MyCloud.Provider do
+                @behaviour ExAtlas.Provider
+              end
+              """
+            })
+          end)
+
+        assert [_] = warnings_naming(igniter, "MyCloud.Provider")
+      after
+        File.rm_rf!(dot_dir)
+      end
     end
 
     test "does not warn about a module that implements only another behaviour" do
