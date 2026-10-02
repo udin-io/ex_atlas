@@ -7,6 +7,11 @@ defmodule ExAtlas.Spec.StagingTest do
   @key_id "tid-test-4b1e"
   @secret "tsec-test-9f2c"
   @token "tses-test-0d7a"
+  # Presigned URLs are bearer credentials: the signature is the secret part.
+  @get_sig "getsig-5d0c91"
+  @put_sig "putsig-a7e3b2"
+  @get_url "https://bucket.s3.amazonaws.com/datasets/abc.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=#{@get_sig}"
+  @put_url "http://minio.local:9000/bucket/artifacts/run-123.tar.gz?X-Amz-Signature=#{@put_sig}"
 
   @full %{
     endpoint: "https://t3.storage.dev",
@@ -15,11 +20,13 @@ defmodule ExAtlas.Spec.StagingTest do
     secret_access_key: @secret,
     session_token: @token,
     dataset_uri: "s3://bucket/datasets/abc/",
-    artifact_uri: "s3://bucket/artifacts/run-123/"
+    artifact_uri: "s3://bucket/artifacts/run-123/",
+    dataset_url: @get_url,
+    artifact_url: @put_url
   }
 
   defp refute_secrets(text) do
-    for secret <- [@key_id, @secret, @token], do: refute(text =~ secret)
+    for secret <- [@key_id, @secret, @token, @get_sig, @put_sig], do: refute(text =~ secret)
   end
 
   describe "new/1 and env/1" do
@@ -34,8 +41,27 @@ defmodule ExAtlas.Spec.StagingTest do
                "AWS_SECRET_ACCESS_KEY" => @secret,
                "AWS_SESSION_TOKEN" => @token,
                "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
-               "ATLAS_ARTIFACT_URI" => "s3://bucket/artifacts/run-123/"
+               "ATLAS_ARTIFACT_URI" => "s3://bucket/artifacts/run-123/",
+               "ATLAS_DATASET_URL" => @get_url,
+               "ATLAS_ARTIFACT_URL" => @put_url
              }
+    end
+
+    test "two presigned URLs set two variables and no AWS_* one" do
+      assert {:ok, staging} = Staging.new(dataset_url: @get_url, artifact_url: @put_url)
+
+      assert Staging.env(staging) == %{
+               "ATLAS_DATASET_URL" => @get_url,
+               "ATLAS_ARTIFACT_URL" => @put_url
+             }
+    end
+
+    test "one presigned URL alone is enough, on either side" do
+      assert {:ok, staging} = Staging.new(artifact_url: @put_url)
+      assert Staging.env(staging) == %{"ATLAS_ARTIFACT_URL" => @put_url}
+
+      assert {:ok, staging} = Staging.new(dataset_url: @get_url)
+      assert Staging.env(staging) == %{"ATLAS_DATASET_URL" => @get_url}
     end
 
     test "a keyword list works like a map" do
@@ -75,7 +101,7 @@ defmodule ExAtlas.Spec.StagingTest do
   end
 
   describe "inspect/1" do
-    test "shows the URIs and the endpoint and none of the three secrets" do
+    test "shows the URIs and the endpoint and none of the secrets or URLs" do
       {:ok, staging} = Staging.new(@full)
       text = inspect(staging)
 
@@ -84,7 +110,7 @@ defmodule ExAtlas.Spec.StagingTest do
       refute_secrets(text)
     end
 
-    test "a printer that skips Inspect shows none of the three secrets either" do
+    test "a printer that skips Inspect shows none of the secrets or URLs either" do
       {:ok, staging} = Staging.new(@full)
 
       for text <- [
@@ -102,6 +128,8 @@ defmodule ExAtlas.Spec.StagingTest do
 
       assert {:ok, again} = Staging.new(staging)
       assert Staging.env(again)["AWS_SECRET_ACCESS_KEY"] == @secret
+      assert Staging.env(again)["ATLAS_DATASET_URL"] == @get_url
+      assert Staging.env(again)["ATLAS_ARTIFACT_URL"] == @put_url
     end
   end
 
@@ -123,8 +151,25 @@ defmodule ExAtlas.Spec.StagingTest do
       {"bad artifact URI", %{@full | artifact_uri: "/local/out"},
        ":artifact_uri must start with s3://"},
       {"unknown key", Map.put(@full, :bucket, "b"), "unknown key :bucket"},
-      {"neither URI", Map.drop(@full, [:dataset_uri, :artifact_uri]),
-       "needs :dataset_uri or :artifact_uri"},
+      {"no URI and no URL",
+       Map.drop(@full, [:dataset_uri, :artifact_uri, :dataset_url, :artifact_url]),
+       "needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url"},
+      {"an empty map", %{}, "needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url"},
+      {"ftp dataset URL", %{@full | dataset_url: "ftp://x/#{@get_sig}"},
+       ":dataset_url must be an http:// or https:// URL"},
+      {"dataset URL with no host", %{@full | dataset_url: "https://"},
+       ":dataset_url must be an http:// or https:// URL"},
+      {"s3 artifact URL", %{@full | artifact_url: "s3://bucket/a?#{@put_sig}"},
+       ":artifact_url must be an http:// or https:// URL"},
+      {"artifact URL with a bad port",
+       %{@full | artifact_url: "http://minio.local:0/a?#{@put_sig}"},
+       ":artifact_url must be an http:// or https:// URL"},
+      {"user info in a URL",
+       %{@full | dataset_url: "https://u:#{@get_sig}@bucket.s3.amazonaws.com/d"},
+       ":dataset_url must not carry user info"},
+      {"newline in a URL", %{@full | artifact_url: @put_url <> "\nX=1"},
+       ":artifact_url must not hold control characters"},
+      {"empty URL", %{@full | dataset_url: ""}, ":dataset_url must be a non-empty string"},
       {"ftp endpoint", %{@full | endpoint: "ftp://t3.storage.dev"},
        ":endpoint must be an http:// or https:// URL"},
       {"endpoint with no host", %{@full | endpoint: "https://"},
@@ -171,6 +216,7 @@ defmodule ExAtlas.Spec.StagingTest do
     test "the full input with the same secrets is accepted (control)" do
       assert {:ok, staging} = Staging.new(@full)
       assert Staging.env(staging)["AWS_SECRET_ACCESS_KEY"] == @secret
+      assert Staging.env(staging)["ATLAS_DATASET_URL"] == @get_url
     end
   end
 end
