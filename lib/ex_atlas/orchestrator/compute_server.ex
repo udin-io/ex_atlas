@@ -547,7 +547,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Process.flag(:trap_exit, true)
 
     %{compute: compute} = record
-    opts = record.opts |> adopted_staging() |> adopted_resolver(record.id)
+
+    opts =
+      record |> TrackingStore.observe_opts() |> adopted_staging() |> adopted_resolver(record.id)
 
     tracking =
       opts |> Keyword.take(@option_keys) |> bound_timers() |> NimbleOptions.validate!(@schema)
@@ -1533,7 +1535,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp update_record(%{store: store} = state, fun) do
     contain_store(state.compute.id, :ok, fn ->
       case store.get(state.compute.id) do
-        {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_env())
+        {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_record())
         :error -> :ok
       end
     end)
@@ -1555,7 +1557,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           attempt = state.respawns + 1
 
           store.put(
-            TrackingStore.scrub_env(
+            TrackingStore.scrub_record(
               Map.merge(record, %{
                 id: new_id,
                 respawns: attempt,

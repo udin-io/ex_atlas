@@ -64,9 +64,12 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     or one over 1 MiB (1,048,576 bytes): a compressed term declares its own decoded
     size, up to 4 GB. `put/1` logs a record over that size and writes nothing.
 
-    A row that decodes is still not trusted input. Its opts steer the provider
-    calls an adopted task makes with this node's API key, `:base_url` among
-    them (issue 125). Let only the app write `atlas_tracking_records`.
+    A row that decodes is still not trusted input. An adopted task takes its
+    provider's URL and Req options from config, never from the row, and runs
+    only a provider that declares `ExAtlas.Provider` (see "Where an adopted
+    task's calls go" in `ExAtlas.Orchestrator.TrackingStore`). The row still
+    chooses what a respawn after adoption rents. Let only the app write
+    `atlas_tracking_records`.
 
       * `all/0` answers `{:error, {:undecodable, ids}}` when any row is
         refused. The Adopter then adopts nothing and the Reaper reaps nothing

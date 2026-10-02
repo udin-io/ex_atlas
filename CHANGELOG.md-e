@@ -60,6 +60,7 @@ one only when the config set `start_orchestrator: true`. It now also fires
 when a module names `ExAtlas.Orchestrator.Supervisor`, and the installer shows
 the same notice.
 
+<<<<<<< HEAD
 ### Fixed: `Endpoint.raw` and `Template.raw` no longer hold RunPod's `env` (#133)
 
 RunPod echoes an endpoint's or template's `env` (a Hugging Face token, a

@@ -119,7 +119,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Never stored: `compute.auth.token` (the raw preshared key — see
   `ExAtlas.Auth.Token`), `:api_key` (re-resolved from config at adoption,
-  exactly as a fresh spawn does), the keys and presigned URLs of `:s3`, the
+  exactly as a fresh spawn does), `:base_url` and `:req_options` (read from
+  `config :ex_atlas, <provider>` at adoption, see "Where an adopted task's
+  calls go"), the keys and presigned URLs of `:s3`, the
   values of `:env`, and anything else matching `:scrub_keys`. `:s3` keeps its endpoint, region and
   URIs beside `credentials: :not_stored`, so an adopted task with `s3:` runs
   on, and its respawn asks the `respawn_credentials:` resolver for the
@@ -154,6 +156,29 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   the respawn the same way. A host store that drops `:env` from the opts
   leaves nothing to refuse on, and its adopted respawn runs with no
   environment.
+
+  ## Where an adopted task's calls go
+
+  Whoever can write the store writes the record the next boot adopts, and the
+  adopted task calls its provider with this node's API key. So the record
+  steers neither where those calls go nor which code makes them:
+
+    * `:api_key`, `:base_url` and `:req_options` come from
+      `config :ex_atlas, <provider>`, never from the record: a stored key
+      would point every call at the writer's own account. A record does not store them; one written before this
+      rule keeps them, the adopted task ignores them, and the first rewrite of
+      the record drops them. A host that passes either per call to a
+      `persist: true` spawn sets them in config too, or its adopted tasks call
+      the provider's public URL.
+    * The provider is adopted only when it is a built-in name or a module
+      that declares `@behaviour ExAtlas.Provider`. Any other record is
+      skipped, kept, and logged.
+
+  The record still chooses what a respawn after adoption rents (the image,
+  command, GPU and env names) and the callback descriptor its token is minted
+  over. With `respawn_credentials:`, the resolver's secrets go into that
+  image. A writer needs a live pod of this account that then fails for it to
+  come to that (issue 131).
 
   ## A store shared by several nodes
 
@@ -199,7 +224,6 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   an operator reading the warning; the alternative is destroying live work.
   """
 
-  alias ExAtlas.Config
   alias ExAtlas.Orchestrator.{CostMeter, Ownership}
   alias ExAtlas.Spec
 
@@ -263,9 +287,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     cost_since_ms: nil
   }
 
-  # Opts that are credentials, or that could carry one. `:req_options` and
-  # `:s3` get their own treatment below because the secret is nested inside.
+  # Opts that are credentials, or that could carry one. `:s3` gets its own
+  # treatment below because the secret is nested inside.
   @secret_opts [:api_key, :api_secret, :secret, :token, :password]
+
+  # Opts that say where a provider call goes and how it is sent. Whoever can
+  # write the store could point them, with this node's key, at any host, so an
+  # adopted task reads them from app config, as it reads `:api_key`.
+  @endpoint_opts [:base_url, :req_options]
+
+  # What an adopted record's opts never supply. A stored key would point every
+  # call, and a respawn's rent, at the writer's own account.
+  @ignored_opts @secret_opts ++ @endpoint_opts
 
   @doc "The current record schema version."
   @spec version() :: version()
@@ -348,9 +381,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   Remove credentials from a spawn keyword list before it reaches disk.
 
   Drops `#{inspect(@secret_opts)}`, anything named by
-  `config :ex_atlas, :orchestrator, scrub_keys: [...]`, and the
-  `#{inspect(Config.secret_req_options())}` entries of `:req_options`,
-  where a hand-rolled bearer header or AWS signing key would be. `:s3` keeps
+  `config :ex_atlas, :orchestrator, scrub_keys: [...]`, and
+  `#{inspect(@endpoint_opts)}`: an adopted task takes those from
+  `config :ex_atlas, <provider>`. `:s3` keeps
   its endpoint, region and URIs, and `credentials: :not_stored` in place of
   the keys and presigned URLs (`ExAtlas.Spec.Staging.scrub/1`); with
   `scrub_keys: [:s3]` it keeps the marker alone. `:env` keeps its names, each
@@ -362,45 +395,48 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     scrub_keys = configured_scrub_keys()
 
     opts
-    |> Keyword.drop(@secret_opts ++ scrub_keys)
-    |> scrub_req_options()
+    |> Keyword.drop(@secret_opts ++ @endpoint_opts ++ scrub_keys)
     |> put_staging(Keyword.get(opts, :s3), :s3 in scrub_keys)
     |> put_env(Keyword.get(opts, :env), :env in scrub_keys)
   end
 
   @doc """
-  `record` with its `:env` values left out, as `scrub_opts/1` leaves them.
+  `record` with its `:env` values, its credentials, `:base_url` and
+  `:req_options` left out, as `scrub_opts/1` leaves them.
 
-  A record written before env values were left out still holds them; every
-  rewrite of it goes through here, so no write lays them down again.
+  A record written before these rules, or by someone other than this app, can
+  hold them; every rewrite of it goes through here, so no write lays them
+  down again.
   """
-  @spec scrub_env(record()) :: record()
-  def scrub_env(%{opts: opts} = record) do
+  @spec scrub_record(record()) :: record()
+  def scrub_record(%{opts: opts} = record) do
+    opts = Keyword.drop(opts, @ignored_opts)
     %{record | opts: put_env(opts, Keyword.get(opts, :env), :env in configured_scrub_keys())}
   end
 
   @doc """
-  The opts to re-observe an adopted record with.
+  The opts an adopted record is observed and tracked with.
 
-  The provider comes back from the record — `:api_key` was scrubbed, so it is
-  re-resolved from application config, exactly as a fresh spawn resolves it.
+  The provider comes back from the record. `:api_key`, `:base_url` and
+  `:req_options` come from application config, exactly as a fresh spawn
+  without them resolves them. `scrub_opts/1` never stores them, so a record
+  that holds one was written before that rule or by someone else, who chose
+  it: a stored key would point every call at the writer's own account.
   """
   @spec observe_opts(record()) :: keyword()
-  def observe_opts(record), do: Keyword.put_new(record.opts, :provider, record.provider)
-
-  defp scrub_req_options(opts) do
-    case Keyword.fetch(opts, :req_options) do
-      {:ok, req_options} when is_list(req_options) ->
-        Keyword.put(
-          opts,
-          :req_options,
-          Keyword.drop(req_options, Config.secret_req_options())
-        )
-
-      _not_a_keyword_list ->
-        opts
-    end
+  def observe_opts(record) do
+    record.opts
+    |> Keyword.drop(@ignored_opts)
+    |> Keyword.put_new(:provider, record.provider)
   end
+
+  @doc """
+  The `#{inspect(@ignored_opts)}` keys `record` holds a value for, which
+  `observe_opts/1` leaves out.
+  """
+  @spec ignored_opts(record()) :: [atom()]
+  def ignored_opts(%{opts: opts}),
+    do: Enum.filter(@ignored_opts, &(Keyword.get(opts, &1) != nil))
 
   # `scrub_keys: [:s3]` keeps the marker alone, never nothing: a record with no
   # `s3:` would let an adopted task respawn with no staging at all.

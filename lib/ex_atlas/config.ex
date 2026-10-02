@@ -17,6 +17,14 @@ defmodule ExAtlas.Config do
     3. Environment variable (e.g. `RUNPOD_API_KEY`, `LAMBDA_LABS_API_KEY`).
     4. `nil` (providers decide whether to raise).
 
+  `:base_url` and `:req_options` come from opts, else from
+  `config :ex_atlas, <provider>, base_url: ..., req_options: [...]`. A
+  per-call `req_options` merges over the configured one, key by key: a
+  per-call `headers:` replaces a configured `headers:` whole. A task
+  adopted after a restart gets them from config alone: its tracking record
+  holds neither, so a forged record cannot point the node's key at another
+  host.
+
   The ctx holds the key as an `ExAtlas.Secret`; a provider reads it with
   `ExAtlas.Secret.reveal/1` where its HTTP client needs it.
 
@@ -219,11 +227,17 @@ defmodule ExAtlas.Config do
       # => ctx is %{provider: :runpod, api_key: ..., endpoint: "abc123", ...}
 
   The keys ExAtlas resolves itself (`:provider`, `:api_key`, `:base_url`,
-  `:req_options`) always win over the pass-through values.
+  `:req_options`) always win over the pass-through values. `:base_url` and
+  `:req_options` fall back to the provider's app config, as `:api_key` does.
   """
   @spec build_ctx(atom() | module(), opts()) :: ExAtlas.Provider.ctx()
   def build_ctx(provider, opts) do
-    opts = ok!(seal_credentials(opts))
+    opts =
+      ok!(
+        with :ok <- check_keyword(opts),
+             do: opts |> put_configured(provider) |> seal_credentials()
+      )
+
     # A key from app config or the environment gets the same check.
     api_key = ok!(provider |> resolve_api_key(opts) |> seal_api_key())
 
@@ -240,6 +254,49 @@ defmodule ExAtlas.Config do
       req_options: Keyword.get(opts, :req_options, [])
     })
   end
+
+  # `config :ex_atlas, <provider>, base_url:, req_options:` serve every call,
+  # as `:api_key` does. An adopted task's record holds neither, so this is the
+  # only place its endpoint comes from. Per-call values win, key by key for
+  # `req_options`: the tracker's poll adds its own timeouts per call.
+  defp put_configured(opts, provider) do
+    config = provider_config(provider)
+
+    opts
+    |> put_configured_base_url(Keyword.get(config, :base_url))
+    |> merge_req_options(Keyword.get(config, :req_options))
+  end
+
+  defp put_configured_base_url(opts, nil), do: opts
+
+  defp put_configured_base_url(opts, base_url) do
+    if Keyword.get(opts, :base_url), do: opts, else: Keyword.put(opts, :base_url, base_url)
+  end
+
+  defp merge_req_options(opts, nil), do: opts
+
+  defp merge_req_options(opts, configured) do
+    case Keyword.fetch(opts, :req_options) do
+      {:ok, per_call} ->
+        if keyword?(configured) and keyword?(per_call),
+          do: Keyword.put(opts, :req_options, Keyword.merge(configured, per_call)),
+          else: put_malformed(opts, configured)
+
+      :error ->
+        Keyword.put(opts, :req_options, configured)
+    end
+  end
+
+  # `seal_credentials/1` refuses a `req_options` that is not a keyword list,
+  # with no value in the message. Hand it the malformed one.
+  defp put_malformed(opts, configured) do
+    if keyword?(configured), do: opts, else: Keyword.put(opts, :req_options, configured)
+  end
+
+  defp keyword?(value), do: is_list(value) and Keyword.keyword?(value)
+
+  defp provider_config(provider) when is_atom(provider),
+    do: Application.get_env(:ex_atlas, provider, [])
 
   defp ok!({:ok, value}), do: value
   defp ok!({:error, error}), do: raise(error)
@@ -287,9 +344,5 @@ defmodule ExAtlas.Config do
     end
   end
 
-  defp app_config_key(provider) when is_atom(provider) do
-    :ex_atlas
-    |> Application.get_env(provider, [])
-    |> Keyword.get(:api_key)
-  end
+  defp app_config_key(provider), do: provider |> provider_config() |> Keyword.get(:api_key)
 end

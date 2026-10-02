@@ -28,8 +28,6 @@ defmodule ExAtlas.Providers.Vast.Client do
   @doc "Base URL of the API."
   def base_url, do: @base_url
 
-  defp configured_base_url, do: Application.get_env(:ex_atlas, :vast, [])[:base_url]
-
   @doc """
   A Req client with the Bearer key, JSON headers, `retry: :safe_transient`
   (a `GET` only) and a 30 s receive timeout. The base URL is `ctx.base_url`,
@@ -39,7 +37,7 @@ defmodule ExAtlas.Providers.Vast.Client do
   @spec api(ExAtlas.Provider.ctx()) :: Req.Request.t()
   def api(ctx) do
     Req.new(
-      base_url: Map.get(ctx, :base_url) || configured_base_url() || @base_url,
+      base_url: Map.get(ctx, :base_url) || @base_url,
       auth: bearer(ctx),
       headers: [{"content-type", "application/json"}, {"accept", "application/json"}],
       retry: :safe_transient,
