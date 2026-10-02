@@ -175,6 +175,7 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.TrackingStore.Dets,
           ExAtlas.Orchestrator.TrackingStore.Ecto,
           ExAtlas.Orchestrator.TrackingStore.Ecto.Migration,
+          ExAtlas.Orchestrator.TrackingStoreConformance,
           ExAtlas.Orchestrator.Events,
           ExAtlas.Orchestrator.UpstreamStatus,
           ExAtlas.Orchestrator.CostMeter,

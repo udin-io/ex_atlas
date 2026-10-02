@@ -8,9 +8,10 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
   every field intact, `all/0` enumerates exactly what is stored, and `all/0`
   answers `{:ok, records}` on a store that can account for its contents.
 
-  A host swapping in a Postgres- or Redis-backed store can `use` this suite to
-  inherit parity tests for free — the behaviour, not the DETS default, is the
-  contract this feature ships.
+  A host that writes its own store `use`s this suite in a test module, which
+  must `use ExUnit.Case` first. The suite's tests expand there; this module
+  calls no ExUnit function itself, so it compiles in a host's prod build.
+  ExAtlas runs it against the DETS and Ecto stores.
 
   ## Usage
 
