@@ -74,7 +74,10 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       Version 1 records carry no owner.
     * `:id`, `:provider` — what to re-observe, and where.
     * `:opts` — **scrubbed** spawn opts. `ComputeServer` re-validates them and
-      `ExAtlas.terminate/2` needs them.
+      `ExAtlas.terminate/2` needs them. Keep `opts[:callback]` whole, its
+      `:attempt` included: a descriptor without an integer `:attempt` reads as
+      a pod rented by 0.8.0, whose token signs none, and the adopted task
+      refuses the current pod's reports once a respawn gave it one.
     * `:spawned_at_ms` — `System.system_time(:millisecond)`, wall clock. The
       tracker's own `deadline_at_ms` is `System.monotonic_time/1`, which means
       nothing across a VM restart; this is the anchor that lets a carried

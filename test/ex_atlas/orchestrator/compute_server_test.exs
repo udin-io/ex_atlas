@@ -1920,16 +1920,20 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       end
     end
 
-    # 0.8.0 minted no attempt, and a pod it rented may still be running. Its
-    # report is accepted unchecked, even after a respawn: see #100.
-    test "a token with no attempt, as 0.8.0 minted it, is still accepted after a respawn",
+    # 0.8.0 minted no attempt. Once this version respawned the task, the
+    # current pod's token signs one, so a claim-less token is a replaced pod's.
+    test "a token with no attempt, as 0.8.0 minted it, gets 410 after a respawn",
          %{base: base} do
-      {_pid, _pod_a, pod_b, task_id} = respawned_task(base)
+      {pid, _pod_a, pod_b, task_id} = respawned_task(base)
       new_id = pod_b.id
-      token = Token.mint(task_id, Callback.kinds())
+      ref = Process.monitor(pid)
+      claimless = Token.mint(task_id, Callback.kinds())
 
-      assert post_report("/finish", token, ~s({"exit_code":0})).status == 202
-      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 0}}}, 2_000
+      assert post_report("/finish", claimless, ~s({"exit_code":0})).status == 410
+
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
     end
   end
 

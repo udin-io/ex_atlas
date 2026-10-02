@@ -94,7 +94,8 @@ Not using Plug at all? `ExAtlas.Callback` is framework-free — `verify/1`,
 `take/2`, `body_limit/1` and `ingest/3` are all you need for a hand-rolled
 handler, and `:plug` stays an optional dependency you never pull in. Pass
 `ingest/3` the claims `verify/1` returned, not `claims.task_id`: only the
-claims carry the pod's attempt, which refuses a pod that a respawn replaced.
+claims carry the pod's attempt, which refuses a pod that a respawn replaced
+(and a token with no attempt, once a respawn happened).
 
 ### 4. Spawn with a callback
 
@@ -288,8 +289,10 @@ you do not control. What the library does about that:
   * **Bound to an attempt.** The first pod's token signs attempt 0, the
     `n`th replacement's signs `n`. After a respawn, a late report from the
     preempted pod gets `410`, and one already queued in the tracker is
-    dropped. A token minted by 0.8.0 has no attempt and is accepted
-    unchecked.
+    dropped. A token minted by 0.8.0 has no attempt. It is accepted only
+    while the task's current pod holds such a token too (the task was stored
+    by 0.8.0 and no respawn has replaced the pod since); after a respawn it
+    gets `410`.
   * **A different credential from `ATLAS_PRESHARED_KEY`.** That one is handed
     to a browser in the interactive flow, and a browser-held secret must never
     also authorize writing into your orchestrator.

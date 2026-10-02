@@ -88,9 +88,30 @@ nothing; move a hand-rolled controller to the claims form:
 :ok <- ExAtlas.Callback.ingest(claims, :progress, json)
 ```
 
-A pod rented by 0.8.0 holds a token with no attempt. It is accepted
-unchecked, so its late report after a respawn still ends the replacement,
-until those pods end.
+A pod rented by 0.8.0 holds a token with no attempt; see #110 below.
+
+### Fixed: a token with no attempt is refused once a respawn replaced the pod (#110)
+
+A pod rented by 0.8.0 holds a callback token with no attempt claim. Before,
+`ingest/3` accepted it unchecked, so after a respawn the replaced pod's late
+`finish` still ended the replacement and deleted it. Now a token with no
+attempt is accepted only while the tracker's current pod holds such a token
+too: a task 0.8.0 stored, adopted after the upgrade and not respawned since,
+or one 0.8.0 itself respawned. The first respawn this version makes gives the
+replacement a token that signs its attempt, and from then on a claim-less
+token gets `410`.
+
+The respawn also writes the attempt into the stored record, so a restart
+after it keeps refusing the replaced pod. A host `TrackingStore` must return
+`opts[:callback]` with its `:attempt`; without it the adopted task reads as
+0.8.0's and refuses the current pod's reports.
+
+No setting changes: a running 0.8.0 pod reports as before until the task
+respawns. A bare `task_id` passed to `ingest/3` still checks nothing.
+
+One case stays open: a task that 0.8.0 respawned before the upgrade has two
+claim-less pods, and nothing tells them apart, so the replaced one's late
+report passes until the task ends.
 
 ### Fixed: a replaced pod's refused reports no longer spend its replacement's rate budget (#107)
 

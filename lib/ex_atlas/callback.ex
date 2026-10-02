@@ -136,9 +136,12 @@ defmodule ExAtlas.Callback do
   That is a `410 Gone`, and it is also the boundary's de-facto revocation: a
   leaked token stops being useful the moment its tracker stops.
 
-  A token minted by 0.8.0 carries no attempt (`attempt: nil`), and its attempt
-  goes unchecked. A bare `task_id` string, as 0.8.0 took, is checked the same
-  way: never.
+  A token minted by 0.8.0 carries no attempt (`attempt: nil`). It is accepted
+  only while the tracker's current pod holds such a token too: a task stored by
+  0.8.0 and not respawned since. Once a respawn gave the task a pod whose
+  token signs its attempt, a claim-less token is a replaced pod's, and gets the
+  same `{:error, :not_tracked}`. A bare `task_id` string, as 0.8.0 took, has no
+  claims to check and is never checked.
 
   Uses `send/2`, never `GenServer.call/3`. A web request that blocked on the
   tracker would turn a slow provider poll into an HTTP timeout and would hand
@@ -149,14 +152,19 @@ defmodule ExAtlas.Callback do
   def ingest(%{task_id: task_id} = claims, kind, payload) when is_binary(task_id) do
     with {:ok, normalized} <- normalize(kind, payload),
          attempt = Map.get(claims, :attempt),
-         {:ok, pid} <- lookup(task_id, attempt) do
-      send(pid, message(kind, normalized, attempt))
+         {:ok, pid} <- lookup(task_id, {:claims, attempt}) do
+      send(pid, {:atlas_callback, kind, normalized, attempt})
       :ok
     end
   end
 
-  def ingest(task_id, kind, payload) when is_binary(task_id),
-    do: ingest(%{task_id: task_id, attempt: nil}, kind, payload)
+  def ingest(task_id, kind, payload) when is_binary(task_id) do
+    with {:ok, normalized} <- normalize(kind, payload),
+         {:ok, pid} <- lookup(task_id, :bare_id) do
+      send(pid, {:atlas_callback, kind, normalized})
+      :ok
+    end
+  end
 
   @doc """
   Spend one unit of the rate budget for `kind` of the pod `claims` names.
@@ -254,10 +262,11 @@ defmodule ExAtlas.Callback do
   # The Registry drops a dead owner's entry asynchronously, so an entry can name
   # a pid that already exited. The registry is node-local, so the pid is too.
   # The entry's value is the tracker's current attempt; `ComputeServer` moves
-  # it before it rents a replacement.
-  defp lookup(task_id, attempt) do
+  # it before it rents a replacement. It is `:claimless` while the current
+  # pod's own token signs no attempt (a task adopted from 0.8.0).
+  defp lookup(task_id, presented) do
     with {pid, current} <- owner(task_id),
-         true <- current_attempt?(attempt, current),
+         true <- current_attempt?(presented, current),
          true <- Process.alive?(pid) do
       {:ok, pid}
     else
@@ -274,13 +283,12 @@ defmodule ExAtlas.Callback do
     end
   end
 
-  # The tracker checks the attempt again: a report can pass `lookup/2` just
-  # before a respawn moves the Registry value, and wait in the mailbox behind it.
-  defp message(kind, payload, nil), do: {:atlas_callback, kind, payload}
-  defp message(kind, payload, attempt), do: {:atlas_callback, kind, payload, attempt}
-
-  defp current_attempt?(nil, _current), do: true
-  defp current_attempt?(attempt, current), do: attempt === current
+  # The tracker checks the attempt again, a claim-less one included: a report
+  # can pass `lookup/2` just before a respawn moves the Registry value, and wait
+  # in the mailbox behind it.
+  defp current_attempt?(:bare_id, _current), do: true
+  defp current_attempt?({:claims, nil}, :claimless), do: true
+  defp current_attempt?({:claims, attempt}, current), do: attempt === current
 
   # A progress or log body is whatever the container wants to say, so the only
   # rule is that it is a JSON object — anything else means the pod and the host
