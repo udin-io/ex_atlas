@@ -250,7 +250,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
           required(:max_cost) => number() | false,
           required(:spent_usd) => float(),
           required(:cost_rate) => float() | nil,
-          required(:cost_since_ms) => integer() | nil
+          required(:cost_since_ms) => integer() | nil,
+          optional(:mac) => binary() | nil
         }
 
   @doc "Write `record`, replacing any record with the same `:id`."

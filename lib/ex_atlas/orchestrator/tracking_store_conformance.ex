@@ -98,6 +98,22 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
           assert {:ok, ^record} = @store.get("compute-a")
         end
 
+        # An adopted task respawns only from a record whose `:mac` checks,
+        # over every field (issue 131). Every byte value, so a store that
+        # keeps it as text fails here, not at a respawn.
+        test "put/1 round-trips the node's signature, byte for byte" do
+          record =
+            Map.put(
+              conformance_record("compute-signed"),
+              :mac,
+              :binary.list_to_bin(Enum.to_list(0..255))
+            )
+
+          assert :ok = @store.put(record)
+
+          assert {:ok, ^record} = @store.get("compute-signed")
+        end
+
         test "put/1 round-trips the owner, including none" do
           :ok = @store.put(conformance_record("compute-o1", %{owner: "b"}))
           :ok = @store.put(conformance_record("compute-o2", %{owner: nil}))
