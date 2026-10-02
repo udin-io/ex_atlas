@@ -175,7 +175,6 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.TrackingStore.Dets,
           ExAtlas.Orchestrator.TrackingStore.Ecto,
           ExAtlas.Orchestrator.TrackingStore.Ecto.Migration,
-          ExAtlas.Orchestrator.TrackingStoreConformance,
           ExAtlas.Orchestrator.Events,
           ExAtlas.Orchestrator.UpstreamStatus,
           ExAtlas.Orchestrator.CostMeter,
@@ -183,6 +182,7 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.RespawnCredentials,
           ExAtlas.Orchestrator.TaskOutcome
         ],
+        Testing: [ExAtlas.Test.ProviderConformance, ExAtlas.Orchestrator.TrackingStoreConformance],
         "Mix tasks": [Mix.Tasks.ExAtlas.Install, Mix.Tasks.ExAtlas.Upgrade]
       ]
     ]
