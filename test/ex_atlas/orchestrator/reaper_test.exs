@@ -169,6 +169,18 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
 
+    # Another tool's pod on the same account: not ours, not logged either.
+    test "a pod without the prefix is neither touched nor logged" do
+      {:ok, compute} = spawn_untracked(name: "billing-db")
+      {:ok, control} = spawn_untracked(name: "atlas-a-train-1")
+
+      log = capture_log(fn -> :ok = Reaper.reap_now("atlas-", [:mock]) end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ "leaving #{control.id}"
+      refute log =~ "leaving #{compute.id}"
+    end
+
     test "a name with no dash after the owner carries no owner and is left alone" do
       {:ok, compute} = spawn_untracked(name: "atlas-b")
 
