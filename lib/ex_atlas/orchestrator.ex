@@ -104,6 +104,15 @@ defmodule ExAtlas.Orchestrator do
   `ExAtlas.Orchestrator.Ownership`. An invalid `:reap_owner` returns
   `{:error, %ExAtlas.Error{kind: :validation}}` before the provider is called.
 
+  ## A command that reports its exit
+
+  With a non-empty `:command`, a `:callback` and `self_terminate: true` (the
+  default), the container's finish report ends the session:
+  `:finish_grace_ms` (default 60 s) after `{:task_report, report}`, the
+  tracker broadcasts `{:terminating, :finished}` and deletes the resource.
+  `touch/1` does not postpone it. With `self_terminate: false` the report is
+  announced and the session runs on until its idle TTL.
+
   ## `max_cost` — a cost cap in US dollars
 
       {:ok, _pid, compute} =

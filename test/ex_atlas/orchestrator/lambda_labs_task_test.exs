@@ -98,6 +98,39 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
     end
   end
 
+  describe "an interactive session with a command" do
+    test "a finish report ends the session and the tracker terminates the instance" do
+      lambda = [provider: :lambda_labs] ++ start()
+
+      opts =
+        lambda ++
+          [
+            gpu: :h100,
+            image: "ghcr.io/acme/server:latest",
+            command: ["python", "serve_once.py"],
+            callback: "https://app.example.com/atlas/cb",
+            finish_grace_ms: 50,
+            status_poll_ms: 20
+          ]
+
+      {:ok, prepared} = Callback.prepare(opts)
+      assert {:ok, pid, %{id: id}} = ExAtlas.Orchestrator.spawn(prepared)
+      subscribe(id)
+      ref = Process.monitor(pid)
+
+      assert {:ok, %{id: ^id}} = ExAtlas.get_compute(id, lambda)
+
+      :ok = Callback.ingest(prepared[:callback].task_id, :finish, %{"exit_code" => 0})
+
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:terminating, :finished}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      refute_received {:atlas_compute, ^id, {:task, _}}
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute(id, lambda)
+    end
+  end
+
   describe "Reaper" do
     setup do
       bypass = Bypass.open()

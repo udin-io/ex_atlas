@@ -40,7 +40,9 @@ defmodule ExAtlas.Orchestrator.Events do
       before going away. Fires the moment the callback lands, so a subscriber
       learns the exit code without waiting for the resource to disappear. In
       `mode: :task` it also ends the task: either the usual disappearance
-      confirms it, or a `:finish_grace_ms` timer does.
+      confirms it, or a `:finish_grace_ms` timer does. An interactive session
+      whose `:command` self-terminates ends on it too, after
+      `:finish_grace_ms`, with `{:terminating, :finished}`.
     * `{:task, outcome}` — a `mode: :task` session ended, and this is what
       happened: `:completed`, `:timed_out`, or `{:failed, reason}`, where
       `reason` is `:cost_cap` when the spend reached `:max_cost`. Sent
@@ -64,11 +66,12 @@ defmodule ExAtlas.Orchestrator.Events do
       `:shutdown` when its supervisor stops it (a node stop), `:normal` when
       the session ended itself, and anything else on a crash. A session that
       ends itself for a reason of its own announces that reason first:
-      `{:terminating, :idle_timeout}` or `{:terminating, :cost_cap}`, then
-      `{:terminating, :normal}`. An interactive session past
-      `:max_runtime_ms` announces `{:terminating, :max_runtime}`, and one
-      still provisioning at `:ready_timeout_ms` announces
-      `{:terminating, :never_ready}`; a task reports both as `{:task, _}`.
+      `{:terminating, :idle_timeout}`, `{:terminating, :cost_cap}` or
+      `{:terminating, :finished}`, then `{:terminating, :normal}`. An
+      interactive session past `:max_runtime_ms` announces
+      `{:terminating, :max_runtime}`, and one still provisioning at
+      `:ready_timeout_ms` announces `{:terminating, :never_ready}`; a task
+      reports both as `{:task, _}`.
     * `{:terminate_failed, error}` — the upstream `terminate` call errored.
 
   Statuses are ordinary state changes, not necessarily endings: a session that

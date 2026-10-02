@@ -61,6 +61,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   too. It has no task to fail, so it announces `{:terminating, :max_runtime}`
   or `{:terminating, :never_ready}` and stops, sending no `{:task, _}` event.
 
+  An interactive session whose non-empty `:command` self-terminates (the
+  `ExAtlas.Spec.ComputeRequest` default) also ends on its container's finish
+  report, after `:finish_grace_ms`, with `{:terminating, :finished}`. A Lambda
+  instance cannot delete itself, so without this it would bill until the idle
+  TTL. `touch/1` does not postpone that end: the report says the command is
+  over.
+
   ## The cost cap
 
   With `max_cost: dollars` the server keeps an `ExAtlas.Orchestrator.CostMeter`
@@ -847,9 +854,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # here.
   #
   # Progress deliberately does not `touch/1`. It would let a compromised pod
-  # postpone its own idle TTL indefinitely, and in `:task` mode — the only mode
-  # that arms a deadline — there is no idle clock to postpone anyway. The
-  # option would carry risk exactly where it carries no benefit.
+  # postpone its own idle TTL indefinitely, and in `:task` mode there is no
+  # idle clock to postpone anyway.
   def handle_info({:atlas_callback, :progress, payload}, state) do
     Events.broadcast(state.compute.id, {:progress, payload})
     {:noreply, state}
@@ -883,7 +889,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def handle_info(:finish_grace, %{report: nil} = state), do: {:noreply, state}
 
   def handle_info(:finish_grace, state),
-    do: finish(TaskOutcome.from_report(state.report), state)
+    do: end_session(TaskOutcome.from_report(state.report), :finished, state)
 
   # Late replies from a poll we already gave up on, and anything else. Because
   # this server traps exits, an unmatched message would run `terminate/2` and
@@ -1627,14 +1633,26 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp schedule_ready_timeout(_state, ms), do: Process.send_after(self(), :ready_timeout, ms)
 
   # One-shot, and armed only by the first report — see the `finish` clause of
-  # `handle_info/2`. Interactive sessions have no task to end, so a report
-  # there is announced and nothing more.
-  defp arm_finish_grace(%{mode: :task, finish_grace_ms: ms} = state) when is_integer(ms) do
-    Process.send_after(self(), :finish_grace, ms)
+  # `handle_info/2`. An interactive session ends on a report only when its
+  # command was asked to self-terminate; `self_terminate: false` keeps the
+  # resource up after the command, which is what that option is for.
+  defp arm_finish_grace(%{finish_grace_ms: ms} = state) when is_integer(ms) do
+    if state.mode == :task or self_terminating_command?(state.opts),
+      do: Process.send_after(self(), :finish_grace, ms)
+
     state
   end
 
   defp arm_finish_grace(state), do: state
+
+  # `self_terminate` is in the opts only when the caller set it, so the
+  # `ExAtlas.Spec.ComputeRequest` default of `true` applies here too.
+  defp self_terminating_command?(opts) do
+    case Keyword.get(opts, :command) do
+      [_ | _] -> Keyword.get(opts, :self_terminate, true) == true
+      _none -> false
+    end
+  end
 
   # The bill raises the meter's spend, so there is nothing to reconcile without
   # a meter. An adopted record decides that, not its opts: a store without the
