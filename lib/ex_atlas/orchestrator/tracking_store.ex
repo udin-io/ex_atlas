@@ -115,8 +115,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   `scrub_keys: [:env]` the record holds `env: :not_stored`, which refuses the
   same respawn.
 
-  A record written before this rule holds the values, and its adopted respawn
-  still sends them. A host store that drops `:env`
+  A record written before this rule holds the values: its adopted tracker
+  seals them, and its respawn still sends them. A host store that drops `:env`
   from the opts leaves nothing to refuse on, and its adopted respawn runs with
   no environment.
 

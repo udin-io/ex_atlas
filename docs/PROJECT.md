@@ -59,7 +59,7 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Public API for network volumes, templates, endpoints, spend | Shipped (feature #27, PRs #60 to #63) |
 | Orchestrator: polling, task mode, callbacks, adoption, multi-node | Shipped |
 | Cost caps with billing reconciliation (feature #28) | Shipped in #70 (slices #67, #69, #70) |
-| S3-compatible data staging (#26) | Shipped in four slices: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods (#75); a guide and a tested entrypoint script say what the container does with them (PR #77); credentials print redacted in crash reports (#78); presigned URLs put no storage key on the pod (#80); `persist: true` with `s3:` stores no credential, and an adopted task cannot respawn (#81) |
+| S3-compatible data staging (#26) | Shipped in four slices: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods (#75); a guide and a tested entrypoint script say what the container does with them (PR #77); credentials print redacted in crash reports (#78); presigned URLs put no storage key on the pod (#80); `persist: true` with `s3:` stores no credential, and an adopted task cannot respawn (#81); `env:` values print redacted and records keep names only (#82) |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages

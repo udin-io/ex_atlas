@@ -7,6 +7,32 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Changed: `env:` values print redacted and stay off disk (#79)
+
+A tracker crash printed every `env:` value, and a `persist: true` record
+wrote them to disk. Now:
+
+- `Orchestrator.spawn/1`, `run_task/1`, a directly started tracker and
+  `ComputeRequest.new/1` hold each `env:` value as an `ExAtlas.Secret`.
+  `ComputeRequest.container_env/1` returns the values for the provider body.
+  An `env:` that is not a map is refused by name with `value: nil`.
+- No provider ctx carries `env:`; it belongs to the request alone.
+- A tracking record keeps the names: `%{"HF_TOKEN" => :not_stored}`. With
+  `scrub_keys: [:env]` it keeps `env: :not_stored`, where it used to drop
+  `env:` and let an adopted respawn run with no environment. An empty `env:`
+  is stored as `%{}`.
+- An adopted task whose record left out values refuses a respawn with
+  `{:respawn_failed, {reason, %ExAtlas.Error{kind: :validation}}}`, naming
+  the variables, and rents no pod. A respawn before any restart still sends
+  every value. A record written by an earlier build keeps its values: the
+  adopted tracker seals them and its respawn sends them.
+- `inspect/1` of a `Spec.TemplateRequest` leaves out `env`, and an invalid
+  template `env:` is an error with `value: nil`.
+
+The record schema stays at version 3. Rolling back: an earlier build reads
+`:not_stored` values, and that task's respawn fails `ComputeRequest`
+validation and deletes the pod.
+
 ### Added: `persist: true` with `s3:` (#74, slice 4 of #26)
 
 `persist: true` with `s3:` is no longer refused. The tracking record keeps
