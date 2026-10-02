@@ -7,7 +7,7 @@ defmodule ExAtlas.Callback.Limiter do
   the rate limit ships with the endpoint.
 
   One ETS-backed bucket per `{task_id, attempt, kind}`, sized from the budgets
-  in `burst/1` and `rate_per_second/1`. Keying by task rather than by IP is
+  in `burst/1` and `rate_per_second/1`. Keying by pod rather than by IP is
   what makes it useful — a pod's egress IP is the provider's, shared with every
   other tenant, and the task id is the only thing that identifies the caller
   we actually care about.

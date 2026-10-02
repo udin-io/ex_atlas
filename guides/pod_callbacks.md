@@ -299,9 +299,9 @@ you do not control. What the library does about that:
   * **Capped before decode.** `read_body/2` carries the limit; the declared
     `content-length` is never consulted, because a hostile caller writes that
     header too.
-  * **Rate limited in the library**, per pod (task and attempt) and per kind, because
-    "put a limiter in front of it" is not an adequate answer for an endpoint
-    the library tells you to expose.
+  * **Rate limited in the library**, per pod (task and attempt) and per
+    kind, because "put a limiter in front of it" is not an adequate answer for
+    an endpoint the library tells you to expose.
   * **Never blocks the orchestrator.** Delivery is a `send`, never a
     `GenServer.call`, so a slow provider poll cannot become an HTTP timeout and
     an untrusted pod gets no lever on the tracker's mailbox.

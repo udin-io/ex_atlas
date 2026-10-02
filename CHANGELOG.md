@@ -65,8 +65,8 @@ spent it before it checked the attempt. Three late `/finish` posts from A
 to a minute.
 
 `ExAtlas.Callback.take/2` takes the claims `verify/1` returned, as `ingest/3`
-does. A bare `task_id` still works and keys as a token with no attempt, so a
-hand-rolled controller keeps compiling. Move it to the claims form:
+does. A bare `task_id` string still works and keys as a token with no
+attempt, so a hand-rolled controller keeps compiling. Move it to the claims form:
 
 ```elixir
 :ok <- ExAtlas.Callback.take(claims, :progress)
