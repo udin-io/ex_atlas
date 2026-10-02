@@ -129,7 +129,7 @@ previous and current atlas version.
     │         │             │              │             │
  ┌──▼───┐ ┌──▼───┐ ┌───────▼────────┐ ┌──▼─────┐ ┌──────▼──────┐
  │RunPod│ │ Fly  │ │  Lambda Labs   │ │ Vast   │ │  Mock (test)│
- │ v0.1 │ │ v0.2 │ │     v0.2       │ │ v0.3   │ │    v0.1     │
+ │ v0.1 │ │ stub │ │     v0.8       │ │ stub   │ │    v0.1     │
  └──────┘ └──────┘ └────────────────┘ └────────┘ └─────────────┘
 
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -496,12 +496,9 @@ ExAtlas.stream_job(job.id, provider: :runpod, endpoint: "abc123")
 ```elixir
 # Today
 ExAtlas.spawn_compute(provider: :runpod,      gpu: :h100, image: "...")
-
-# v0.2
-ExAtlas.spawn_compute(provider: :fly,         gpu: :a100_80g, image: "...")
 ExAtlas.spawn_compute(provider: :lambda_labs, gpu: :h100, image: "...")
 
-# v0.3
+# Planned
 ExAtlas.spawn_compute(provider: :vast,        gpu: :rtx_4090, image: "...")
 
 # Your in-house cloud, today:
@@ -521,7 +518,8 @@ config :ex_atlas, default_provider: :runpod
 # API keys: per-call :api_key > :ex_atlas / :<provider> config > env var
 config :ex_atlas, :runpod,      api_key: System.get_env("RUNPOD_API_KEY")
 config :ex_atlas, :fly,         api_key: System.get_env("FLY_API_TOKEN")
-config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY")
+config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY"),
+                                ssh_key_name: "deploy"   # Lambda requires one SSH key
 config :ex_atlas, :vast,        api_key: System.get_env("VAST_API_KEY")
 
 # Start the orchestrator (Registry + Task.Supervisor + DynamicSupervisor +
@@ -560,14 +558,49 @@ config :ex_atlas, :orchestrator,
 | Provider      | Module                           | Version shipped | Capabilities                                                                        |
 | ------------- | -------------------------------- | --------------- | ----------------------------------------------------------------------------------- |
 | `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
-| `:fly`        | `ExAtlas.Providers.Fly`            | v0.2 (stub)     | `:http_proxy, :raw_tcp, :global_networking`                                         |
-| `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.2 (stub)     | `:raw_tcp`                                                                          |
-| `:vast`       | `ExAtlas.Providers.Vast`           | v0.3 (stub)     | `:spot, :raw_tcp`                                                                   |
+| `:fly`        | `ExAtlas.Providers.Fly`            | stub            | `:http_proxy, :raw_tcp, :global_networking`                                         |
+| `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.8 (compute)  | `:raw_tcp`                                                                          |
+| `:vast`       | `ExAtlas.Providers.Vast`           | stub            | `:spot, :raw_tcp`                                                                   |
 | `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
 Stub modules return `{:error, %ExAtlas.Error{kind: :unsupported}}` from every
 non-`capabilities/0` callback so the name is reserved and callers get a clear
 error — no `FunctionClauseError`s.
+
+### Lambda Labs
+
+Lambda rents VMs, not containers. ExAtlas hands the VM a cloud-init
+`user_data` script that runs your `image` with `docker run`, passing `env:`,
+`s3:`, `auth:` and `ports:` (`-p 8000:8000`). Values reach `docker` through
+its environment, never its argv.
+
+```elixir
+{:ok, compute} =
+  ExAtlas.spawn_compute(
+    provider: :lambda_labs,
+    gpu: :h100,              # gpu_1x_h100_pcie; gpu_count: 8 launches gpu_8x_...
+    image: "vllm/vllm-openai:latest",
+    ports: [{8000, :http}],
+    region_hints: ["us-east-1"],
+    auth: :bearer
+  )
+# => %Compute{status: :provisioning, cost_per_hour: 2.49, region: "us-east-1"}
+
+{:ok, compute} = ExAtlas.get_compute(compute.id, provider: :lambda_labs)
+compute.ports
+# => [%{internal: 8000, external: 8000, protocol: :http, url: "http://198.51.100.2:8000"}]
+```
+
+- Lambda's firewall admits only port 22 by default. Open your `ports:` in
+  the Lambda dashboard; ExAtlas does not change firewall rules yet.
+- The spawn picks the first of `region_hints` with capacity, else Lambda's
+  first region with capacity. `provider_opts: %{instance_type: "..."}` names
+  the type directly.
+- `stop/2`, `start/2`, `spot: true`, `template_id:`, `network_volume_id:`
+  and `command:` return `:unsupported`. The Reaper does not cover Lambda yet.
+- `env:` names starting `DOCKER_` or `LD_` are refused: the script exports
+  each value for `docker run` on the host, where docker and the loader read
+  them.
 
 ### Canonical GPU atoms
 
@@ -578,7 +611,7 @@ to each provider's native identifier.
 | ------------------- | -------------------------------- | ------------------------ | ----------------- | -------------- |
 | `:h200`             | `"NVIDIA H200"`                  | —                        | —                 | `"H200"`       |
 | `:h100`             | `"NVIDIA H100 80GB HBM3"`        | `"gpu_1x_h100_pcie"`     | —                 | `"H100"`       |
-| `:a100_80g`         | `"NVIDIA A100 80GB PCIe"`        | `"gpu_1x_a100_sxm4_80gb"`| `"a100-80gb"`     | `"A100_80GB"`  |
+| `:a100_80g`         | `"NVIDIA A100 80GB PCIe"`        | `"gpu_1x_a100_80gb_sxm4"`| `"a100-80gb"`     | `"A100_80GB"`  |
 | `:a100_40g`         | `"NVIDIA A100-SXM4-40GB"`        | `"gpu_1x_a100_sxm4"`     | `"a100-pcie-40gb"`| `"A100"`       |
 | `:l40s`             | `"NVIDIA L40S"`                  | —                        | `"l40s"`          | —              |
 | `:l4`               | `"NVIDIA L4"`                    | —                        | —                 | —              |
@@ -1479,8 +1512,11 @@ mandate Req — it's an implementation choice of the bundled providers.
 
 - **v0.1** — RunPod (full surface), Mock provider, orchestrator, auth,
   LiveDashboard page.
-- **v0.2** — Fly.io Machines, Lambda Labs.
-- **v0.3** — Vast.ai.
+- **v0.8** — Lambda Labs compute: spawn, get, list, terminate. Next: `command:`,
+  `run_task/1` and the Reaper, then firewall ports.
+- Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
+  compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
+- Vast.ai.
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.

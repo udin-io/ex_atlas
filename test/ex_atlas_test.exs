@@ -103,11 +103,6 @@ defmodule AtlasTest do
       assert :http_proxy in ExAtlas.capabilities(:fly)
     end
 
-    test "LambdaLabs returns :unsupported" do
-      assert {:error, %ExAtlas.Error{kind: :unsupported}} =
-               ExAtlas.spawn_compute(provider: :lambda_labs, gpu: :h100, image: "x")
-    end
-
     test "Vast returns :unsupported" do
       assert {:error, %ExAtlas.Error{kind: :unsupported}} =
                ExAtlas.spawn_compute(provider: :vast, gpu: :h100, image: "x")

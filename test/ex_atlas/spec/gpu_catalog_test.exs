@@ -10,6 +10,14 @@ defmodule ExAtlas.Spec.GpuCatalogTest do
     assert :rtx_4090 in gpus
   end
 
+  # Lambda's own names: the 1x form is the family key, even where Lambda sells
+  # only the 8x type (A100 80 GB).
+  test "maps Lambda GPUs to the instance type names Lambda lists" do
+    assert GpuCatalog.for_provider(:rtx_6000, :lambda_labs) == {:ok, "gpu_1x_rtx6000"}
+    assert GpuCatalog.for_provider(:a100_80g, :lambda_labs) == {:ok, "gpu_1x_a100_80gb_sxm4"}
+    assert GpuCatalog.for_provider(:gh200, :lambda_labs) == {:ok, "gpu_1x_gh200"}
+  end
+
   test "unknown providers return empty supported list" do
     assert GpuCatalog.supported_gpus(:bogus) == []
   end

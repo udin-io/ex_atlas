@@ -55,7 +55,7 @@ defmodule ExAtlas do
   ## Swapping providers
 
       ExAtlas.spawn_compute(provider: :runpod, gpu: :h100, ...)
-      ExAtlas.spawn_compute(provider: :lambda_labs, gpu: :h100, ...)  # v0.2
+      ExAtlas.spawn_compute(provider: :lambda_labs, gpu: :h100, ...)
       ExAtlas.spawn_compute(provider: MyInternalCloud.Provider, gpu: :h100, ...)
 
   See `ExAtlas.Provider` for the behaviour contract and `ExAtlas.Config` for how

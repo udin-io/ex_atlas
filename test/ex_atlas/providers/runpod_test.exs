@@ -303,6 +303,33 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:error, %ExAtlas.Error{kind: :provider, status: 503}} =
                ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
     end
+
+    # A 429 means RunPod made nothing, so a retry cannot rent a second pod.
+    test "a 429 on create is retried, and the second answer makes one pod", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      calls = :counters.new(1, [])
+
+      Bypass.expect(bypass, "POST", "/pods", fn conn ->
+        :counters.add(calls, 1, 1)
+
+        case :counters.get(calls, 1) do
+          1 ->
+            conn
+            |> Plug.Conn.put_resp_header("retry-after", "0")
+            |> json(429, %{"title" => "Too Many Requests", "status" => 429})
+
+          _ ->
+            json(conn, 201, %{"id" => "pod_after_429", "status" => "RUNNING"})
+        end
+      end)
+
+      assert {:ok, %ExAtlas.Spec.Compute{id: "pod_after_429"}} =
+               ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
+
+      assert :counters.get(calls, 1) == 2
+    end
   end
 
   # Telemetry calls a remote capture faster than an anonymous function.

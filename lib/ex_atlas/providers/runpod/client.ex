@@ -12,6 +12,8 @@ defmodule ExAtlas.Providers.RunPod.Client do
   `Req.merge/2` or pass extra options per call.
   """
 
+  alias ExAtlas.Providers.HTTP
+
   @management_url "https://api.runpod.io/v2"
   @runtime_url "https://api.runpod.ai/v2"
 
@@ -43,8 +45,8 @@ defmodule ExAtlas.Providers.RunPod.Client do
       max_retries: 3,
       receive_timeout: 30_000
     )
-    |> attach_telemetry(:management)
-    |> merge_user_options(ctx)
+    |> HTTP.attach_telemetry(@telemetry_prefix, :management)
+    |> HTTP.merge_user_options(ctx)
   end
 
   @doc """
@@ -64,8 +66,8 @@ defmodule ExAtlas.Providers.RunPod.Client do
       max_retries: 3,
       receive_timeout: 120_000
     )
-    |> attach_telemetry(:runtime)
-    |> merge_user_options(ctx)
+    |> HTTP.attach_telemetry(@telemetry_prefix, :runtime)
+    |> HTTP.merge_user_options(ctx)
   end
 
   @doc """
@@ -75,28 +77,8 @@ defmodule ExAtlas.Providers.RunPod.Client do
   """
   @spec handle_response({:ok, Req.Response.t()} | {:error, term()}, integer() | Range.t()) ::
           {:ok, term()} | {:error, ExAtlas.Error.t()}
-  def handle_response(result, expected \\ 200..299)
-
-  def handle_response({:ok, %Req.Response{status: status, body: body}}, expected) do
-    if status_in?(status, expected) do
-      {:ok, body}
-    else
-      {:error, ExAtlas.Error.from_response(status, body, :runpod)}
-    end
-  end
-
-  def handle_response({:error, %{__exception__: true} = exception}, _expected) do
-    {:error,
-     ExAtlas.Error.new(:transport,
-       provider: :runpod,
-       message: Exception.message(exception),
-       raw: exception
-     )}
-  end
-
-  def handle_response({:error, other}, _expected) do
-    {:error, ExAtlas.Error.new(:transport, provider: :runpod, raw: other)}
-  end
+  def handle_response(result, expected \\ 200..299),
+    do: HTTP.handle_response(result, expected, :runpod)
 
   # 1000 entries a page, RunPod's maximum. The page cap stops a cursor that
   # never ends from looping forever.
@@ -160,44 +142,12 @@ defmodule ExAtlas.Providers.RunPod.Client do
   defp list_error(message, raw),
     do: {:error, ExAtlas.Error.new(:provider, provider: :runpod, message: message, raw: raw)}
 
-  defp status_in?(status, %Range{} = range), do: status in range
-  defp status_in?(status, expected) when is_integer(expected), do: status == expected
-
-  defp attach_telemetry(req, api) do
-    Req.Request.append_response_steps(req, [
-      {:atlas_telemetry,
-       fn {request, response} ->
-         :telemetry.execute(
-           @telemetry_prefix ++ [:request],
-           %{status: response.status},
-           %{api: api, method: request.method, url: telemetry_url(request.url)}
-         )
-
-         {request, response}
-       end}
-    ])
+  defp bearer!(ctx) do
+    HTTP.bearer(
+      ctx,
+      :runpod,
+      "no RunPod API key configured. Pass `api_key:` per call, set " <>
+        "`config :ex_atlas, :runpod, api_key: \"...\"`, or set RUNPOD_API_KEY."
+    )
   end
-
-  # The query string carries request filters, so telemetry never logs it.
-  defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
-
-  defp merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
-    Req.merge(req, ExAtlas.Config.reveal_req_options(opts))
-  end
-
-  defp merge_user_options(req, _ctx), do: req
-
-  # `ctx.api_key` is an `ExAtlas.Secret`. Req calls the function in its `auth`
-  # step, so the raw key sits in no `Req.Request` field before the header,
-  # which Req's `inspect/1` redacts.
-  defp bearer!(%{api_key: nil}) do
-    raise ExAtlas.Error,
-      kind: :unauthorized,
-      provider: :runpod,
-      message:
-        "no RunPod API key configured. Pass `api_key:` per call, set " <>
-          "`config :ex_atlas, :runpod, api_key: \"...\"`, or set RUNPOD_API_KEY."
-  end
-
-  defp bearer!(%{api_key: secret}), do: fn -> {:bearer, ExAtlas.Secret.reveal(secret)} end
 end

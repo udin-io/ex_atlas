@@ -166,6 +166,11 @@ The suite asserts:
 - `spawn_compute/1` with `auth: :bearer` returns a token handle.
 - `list_compute/0` returns a list.
 
+When the `:reset` call returns a keyword list, the suite adds it to every
+call. A provider tested against Bypass returns `base_url:` and `api_key:`
+from it; `ExAtlas.Test.FakeLambda.start/0` in ExAtlas's own tests does this
+for Lambda.
+
 If your provider passes these, it's wired correctly.
 
 ## Error normalization
@@ -176,9 +181,19 @@ work against your provider the same way they work against RunPod.
 
 ## `:raw` field
 
-Every normalized struct has a `:raw` field. Put the provider's full
-response body there so callers can reach for fields you haven't
-normalized yet — this is the forward-compatibility lever.
+Every normalized struct has a `:raw` field. Put the provider's response
+body there so callers can reach for fields you haven't normalized yet —
+this is the forward-compatibility lever. Drop the fields that are
+credentials: Lambda's `jupyter_token` and `jupyter_url` stay out of `raw`.
+
+## HTTP plumbing and spawn retries
+
+`ExAtlas.Providers.HTTP` holds the shared `Req` pieces: the Bearer
+credential from `ctx.api_key`, telemetry, the caller's `req_options`, and
+response normalization. A request that rents something passes
+`retry: &ExAtlas.Providers.HTTP.retry_rate_limited/2`: it retries a 429
+only, because a 5xx or a timeout can arrive after the cloud rented the
+resource.
 
 ## Reference implementations
 
@@ -186,5 +201,8 @@ normalized yet — this is the forward-compatibility lever.
   production provider against REST.
 - `ExAtlas.Providers.Mock` — minimal in-memory implementation, good for
   understanding the callback shapes.
-- `ExAtlas.Providers.Stub` — the macro used by Fly/Lambda/Vast placeholders
+- `ExAtlas.Providers.LambdaLabs` (+ `LambdaLabs.Translate`, `LambdaLabs.Client`)
+  — a provider whose cloud rents VMs: it runs the container through cloud-init
+  `user_data` and rebuilds the `Compute` from instance tags.
+- `ExAtlas.Providers.Stub` — the macro used by the Fly and Vast placeholders
   to reserve names before their real implementations land.

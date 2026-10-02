@@ -8,7 +8,6 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   `ExAtlas.Spec.*` structs.
   """
 
-  alias ExAtlas.Auth.Token, as: AuthToken
   alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Spec
 
@@ -34,7 +33,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   """
   @spec compute_request_to_pod_create(Spec.ComputeRequest.t()) :: {map(), map() | nil}
   def compute_request_to_pod_create(%Spec.ComputeRequest{} = req) do
-    {auth_env, auth_handle} = build_auth(req.auth)
+    {auth_env, auth_handle} = ExAtlas.Auth.for_scheme(req.auth)
 
     env = req |> Spec.ComputeRequest.container_env() |> Map.merge(auth_env)
 
@@ -333,22 +332,6 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp job_status("CANCELLED"), do: :cancelled
   defp job_status("TIMED_OUT"), do: :timed_out
   defp job_status(_), do: :in_queue
-
-  # --- auth helpers ---
-
-  defp build_auth(:none), do: {%{}, nil}
-
-  defp build_auth(:bearer) do
-    mint = AuthToken.mint()
-    {mint.env, %{scheme: :bearer, token: mint.token, hash: mint.hash, header: mint.header}}
-  end
-
-  defp build_auth(:signed_url) do
-    secret = 32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-
-    {%{"ATLAS_SIGNING_SECRET" => secret},
-     %{scheme: :signed_url, token: secret, hash: nil, header: nil}}
-  end
 
   # --- generic helpers ---
 

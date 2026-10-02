@@ -19,6 +19,8 @@ until they describe `main` as it is.
 ```sh
 bin/ci                     # every CI step; run before each push
 RUNPOD_API_KEY=... mix test --only runpod_live   # rents a real RunPod pod
+LAMBDA_LABS_API_KEY=... LAMBDA_SSH_KEY_NAME=... mix test --only lambda_live
+                           # rents Lambda's cheapest instance type
 bin/audit                  # the weekly mix_audit run, not part of bin/ci
 ```
 
@@ -26,7 +28,7 @@ bin/audit                  # the weekly mix_audit run, not part of bin/ci
   warnings as errors, credo, `hex.audit`, sobelow, a sobelow gate on
   `lib/ex_atlas/callback*`, then `mix test`. `.github/workflows/ci.yml` only
   calls it.
-- `test/test_helper.exs` excludes `:runpod_live`. Those tests spend real
+- `test/test_helper.exs` excludes `:runpod_live` and `:lambda_live`. Those tests spend real
   money, so only the owner runs them, with their own key. A plain `mix test`
   and CI never run them.
 - The repo has no database, so a worktree needs no partition DBs.
