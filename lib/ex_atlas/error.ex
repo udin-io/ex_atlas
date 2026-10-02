@@ -117,16 +117,20 @@ defmodule ExAtlas.Error do
   defp extract_message(_), do: nil
 
   # An RFC 9457 error object's `value` echoes the rejected input, which can be
-  # a secret from the request body; `raw` keeps everything else.
-  defp drop_error_values(%{"errors" => errors} = body) when is_list(errors) do
-    %{body | "errors" => Enum.map(errors, &drop_value/1)}
+  # a secret from the request body; `raw` keeps everything else. A body can wrap
+  # its `errors` list, so the walk goes to every depth.
+  defp drop_error_values(%{} = map) when not is_struct(map) do
+    Map.new(map, fn
+      {key, errors} when key in ["errors", :errors] and is_list(errors) ->
+        {key, Enum.map(errors, &(&1 |> drop_value() |> drop_error_values()))}
+
+      {key, value} ->
+        {key, drop_error_values(value)}
+    end)
   end
 
-  defp drop_error_values(%{errors: errors} = body) when is_list(errors) do
-    %{body | errors: Enum.map(errors, &drop_value/1)}
-  end
-
-  defp drop_error_values(body), do: body
+  defp drop_error_values(list) when is_list(list), do: Enum.map(list, &drop_error_values/1)
+  defp drop_error_values(other), do: other
 
   defp drop_value(%{} = error), do: Map.drop(error, ["value", :value])
   defp drop_value(error), do: error
