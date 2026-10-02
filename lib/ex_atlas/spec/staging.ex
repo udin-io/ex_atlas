@@ -165,6 +165,12 @@ defmodule ExAtlas.Spec.Staging do
       not Enum.all?(pairs, fn {key, _} -> is_atom(key) end) ->
         error("keys must be atoms")
 
+      {:credentials, :not_stored} in pairs ->
+        error(
+          "credentials: :not_stored marks a tracking record's :s3, which never holds the " <>
+            "credentials or presigned URLs; pass the full :s3 again"
+        )
+
       unknown = Enum.find(pairs, fn {key, _} -> key not in @keys end) ->
         error("unknown key #{inspect(elem(unknown, 0))}; known keys are #{inspect(@keys)}")
 
