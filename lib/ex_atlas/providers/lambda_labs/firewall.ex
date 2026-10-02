@@ -4,11 +4,13 @@ defmodule ExAtlas.Providers.LambdaLabs.Firewall do
 
   Lambda's firewall admits only SSH by default. A spawn with `:ports` creates
   a ruleset named `atlas-<instance name>-<suffix>` and launches the instance
-  with it attached. A failed launch deletes the ruleset, and `terminate/2`
+  with it attached. A launch Lambda refuses with a 4xx deletes the ruleset; after a 5xx or a
+  timeout the instance may hold it, so the sweep deletes it later. And `terminate/2`
   deletes it after the instance. Lambda refuses while the instance still uses
   it (`firewall-rulesets/firewall-ruleset-in-use`), which is usual right after
-  a terminate, so every spawn first deletes `atlas-` rulesets that no
-  instance uses.
+  a terminate, so every spawn first deletes the rulesets it named (`atlas-`,
+  then 8 hex characters) that no instance uses. A ruleset you name `atlas-prod`
+  is yours.
 
   The sweep skips a ruleset younger than 5 minutes: another spawn may have
   created it a moment ago and not launched yet. It deletes at most 10 per
@@ -25,6 +27,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Firewall do
   alias ExAtlas.Spec
 
   @prefix "atlas-"
+  @owned ~r/\Aatlas-(.*-)?[0-9a-f]{8}\z/
   @max_name 64
   @no_firewall_region "us-south-1"
   @grace_seconds 300
@@ -116,8 +119,10 @@ defmodule ExAtlas.Providers.LambdaLabs.Firewall do
     :ok
   end
 
+  # Ours end in the 8 hex characters `name/1` appends, so a ruleset the caller
+  # named `atlas-prod` stays theirs.
   defp atlas?(%{"name" => name, "id" => id}) when is_binary(name) and is_binary(id),
-    do: String.starts_with?(name, @prefix)
+    do: Regex.match?(@owned, name)
 
   defp atlas?(_ruleset), do: false
 

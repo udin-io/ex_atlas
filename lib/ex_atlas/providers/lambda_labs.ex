@@ -158,10 +158,14 @@ defmodule ExAtlas.Providers.LambdaLabs do
         unexpected_body("POST /instance-operations/launch")
 
       {:error, %Error{} = error} ->
-        Firewall.delete(ctx, ruleset)
+        if refused?(error), do: Firewall.delete(ctx, ruleset)
         {:error, withhold_echo(error)}
     end
   end
+
+  # Only a 4xx says Lambda rented nothing. After a 5xx or a timeout the
+  # instance may hold the ruleset, so the sweep deletes it later.
+  defp refused?(%Error{status: status}), do: is_integer(status) and status in 400..499
 
   # Lambda may echo a refused field, `user_data` included, in its error text,
   # quoted, escaped or cut short, so no substring check can find every echo.

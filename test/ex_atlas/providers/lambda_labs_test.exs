@@ -247,8 +247,16 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       log: log
     } do
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-other", "name" => "atlas-other", "instance_ids" => ["inst-2"]}),
-        ruleset(%{"id" => "rs-mine", "name" => "atlas-mine-1a2b", "instance_ids" => ["inst-1"]})
+        ruleset(%{
+          "id" => "rs-other",
+          "name" => "atlas-other-0a0a0a0a",
+          "instance_ids" => ["inst-2"]
+        }),
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
       ])
 
       expect_terminate(bypass, log)
@@ -265,7 +273,13 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     } do
       # No DELETE route: a delete fails the test.
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "instance_ids" => ["inst-1"]})
+        ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "instance_ids" => ["inst-1"]}),
+        # Prefixed like ours but without the 8-hex suffix ExAtlas appends.
+        ruleset(%{
+          "id" => "rs-handmade",
+          "name" => "atlas-handmade",
+          "instance_ids" => ["inst-1"]
+        })
       ])
 
       expect_terminate(bypass, log)
@@ -278,7 +292,11 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       log: log
     } do
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-mine", "name" => "atlas-mine", "instance_ids" => ["inst-1"]})
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
       ])
 
       expect_terminate(bypass, log)
@@ -298,7 +316,11 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       log: log
     } do
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-mine", "name" => "atlas-mine", "instance_ids" => ["inst-1"]})
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
       ])
 
       expect_terminate(bypass, log)
@@ -318,7 +340,11 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       log: log
     } do
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-mine", "name" => "atlas-mine", "instance_ids" => ["inst-1"]})
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
       ])
 
       expect_terminate(bypass, log)
@@ -356,7 +382,11 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       opts: opts
     } do
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-mine", "name" => "atlas-mine", "instance_ids" => ["inst-1"]})
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
       ])
 
       Bypass.expect_once(bypass, "POST", @terminate, fn conn ->

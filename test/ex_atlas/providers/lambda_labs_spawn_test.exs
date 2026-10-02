@@ -690,6 +690,21 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert message =~ "refused the launch"
     end
 
+    test "a launch answered 503 keeps the ruleset, since the instance may hold it", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_types(bypass)
+      # No DELETE route: a delete fails the test.
+      expect_ruleset_flow(bypass, log, 503)
+
+      assert {:error, %ExAtlas.Error{status: 503}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      assert Agent.get(log, &Enum.reverse/1) == [:create, :launch]
+    end
+
     test "a launch answered 200 with no instance id deletes the ruleset it created", %{
       bypass: bypass,
       opts: opts
@@ -791,7 +806,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       for {:deleted, id} <- Process.info(self(), :messages) |> elem(1), do: id
     end
 
-    test "deletes old atlas- rulesets with no instance; keeps one in use, a young one and a foreign one",
+    test "deletes old atlas- rulesets with no instance; keeps one in use, a young one and foreign ones",
          %{bypass: bypass, opts: opts} do
       young = DateTime.utc_now() |> DateTime.to_iso8601()
 
@@ -801,16 +816,19 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       track_deletes(bypass)
 
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-unused", "name" => "atlas-old-a", "created" => @old}),
-        ruleset(%{"id" => "rs-unused-2", "name" => "atlas-old-b", "created" => @old}),
+        ruleset(%{"id" => "rs-unused", "name" => "atlas-old-a-0a0a0a0a", "created" => @old}),
+        ruleset(%{"id" => "rs-unused-2", "name" => "atlas-old-b-0a0a0a0a", "created" => @old}),
         ruleset(%{
           "id" => "rs-busy",
-          "name" => "atlas-busy",
+          "name" => "atlas-busy-0a0a0a0a",
           "created" => @old,
           "instance_ids" => ["inst-1"]
         }),
-        ruleset(%{"id" => "rs-young", "name" => "atlas-young", "created" => young}),
-        ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "created" => @old})
+        ruleset(%{"id" => "rs-young", "name" => "atlas-young-0a0a0a0a", "created" => young}),
+        ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "created" => @old}),
+        # Prefixed like ours but without the 8-hex suffix ExAtlas appends.
+        ruleset(%{"id" => "rs-handmade", "name" => "atlas-handmade", "created" => @old}),
+        ruleset(%{"id" => "rs-short", "name" => "atlas-x-0a0a0a", "created" => @old})
       ])
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
@@ -828,14 +846,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
       expect_list(bypass, [
         Map.delete(
-          ruleset(%{"id" => "rs-a", "name" => "atlas-a", "created" => @old}),
+          ruleset(%{"id" => "rs-a", "name" => "atlas-a-0a0a0a0a", "created" => @old}),
           "instance_ids"
         ),
         Map.delete(
-          ruleset(%{"id" => "rs-b", "name" => "atlas-b", "instance_ids" => []}),
+          ruleset(%{"id" => "rs-b", "name" => "atlas-b-0a0a0a0a", "instance_ids" => []}),
           "created"
         ),
-        ruleset(%{"id" => "rs-c", "name" => "atlas-c", "created" => "not a time"})
+        ruleset(%{"id" => "rs-c", "name" => "atlas-c-0a0a0a0a", "created" => "not a time"})
       ])
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
@@ -852,7 +870,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
         bypass,
         for(
           n <- 1..12,
-          do: ruleset(%{"id" => "rs-#{n}", "name" => "atlas-#{n}", "created" => @old})
+          do: ruleset(%{"id" => "rs-#{n}", "name" => "atlas-#{n}-0a0a0a0a", "created" => @old})
         )
       )
 
@@ -870,8 +888,8 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       track_deletes(bypass, 400)
 
       expect_list(bypass, [
-        ruleset(%{"id" => "rs-1", "name" => "atlas-1", "created" => @old}),
-        ruleset(%{"id" => "rs-2", "name" => "atlas-2", "created" => @old})
+        ruleset(%{"id" => "rs-1", "name" => "atlas-1-0a0a0a0a", "created" => @old}),
+        ruleset(%{"id" => "rs-2", "name" => "atlas-2-0a0a0a0a", "created" => @old})
       ])
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
