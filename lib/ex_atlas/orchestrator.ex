@@ -197,7 +197,7 @@ defmodule ExAtlas.Orchestrator do
   # A node that dies while a respawn rents leaves the replacement running with
   # no record and no tracker. Only the Reaper deletes it (risk 51).
   defp warn_unreaped_respawn(opts, tracking) do
-    provider = Keyword.get(opts, :provider) || Application.get_env(:ex_atlas, :default_provider)
+    {provider, _opts} = Config.pop_provider!(opts)
 
     with {:respawn, max} when max > 0 <- tracking[:on_failure],
          false <- Reaper.covers?(provider) do

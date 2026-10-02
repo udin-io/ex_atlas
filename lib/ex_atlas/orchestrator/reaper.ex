@@ -295,7 +295,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
   It applies the owner rules of a periodic tick, but not the adoption gate, and
   it logs every pod it leaves alone.
   """
-  def reap_now(prefix \\ "atlas-", providers \\ [:runpod]) do
+  def reap_now(prefix \\ "atlas-", providers \\ @default_providers) do
     grace_ms = config().grace_ms
 
     {result, silent} = ownership_gate(Ownership.owner())
