@@ -563,7 +563,7 @@ config :ex_atlas, :orchestrator,
 | `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
 | `:fly`        | `ExAtlas.Providers.Fly`            | stub            | `:http_proxy, :raw_tcp, :global_networking`                                         |
 | `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.8 (compute)  | `:raw_tcp`                                                                          |
-| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:raw_tcp, :self_terminate`                                                    |
+| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:raw_tcp, :self_terminate, :spot`                                             |
 | `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
 The `:fly` stub returns `{:error, %ExAtlas.Error{kind: :unsupported}}` from
@@ -670,8 +670,14 @@ compute.ports
   ```
 - The Reaper covers Vast with `reap_providers: [:vast]`. It lists with no
   per-call options, so set `config :ex_atlas, :vast, api_key:`.
-- `spot: true`, `template_id:`, `network_volume_id:`, `stop/2` and `start/2`
-  return `:unsupported` for now.
+- `spot: true` rents the cheapest interruptible offer by `min_bid`, bidding
+  exactly that price; `cost_per_hour` is the bid. An outbid instance reads
+  `exited`, so `on_failure: {:respawn, n}` rents a replacement. Pass a
+  `callback:` to a spot task you respawn, or a finished task (which deletes
+  its instance) reads as outbid and runs again. `provider_opts: %{offer_id: id}`
+  with `spot: true` is `:validation`.
+- `template_id:`, `network_volume_id:`, `stop/2` and `start/2` return
+  `:unsupported` for now.
 
 ### Canonical GPU atoms
 
@@ -970,8 +976,9 @@ expensive than noticing a death a minute late.
 
 **Preemption is inferred, not reported.** No provider publishes a "you were
 outbid" signal, and Runpod no longer sells spot pods at all (`spot: true` on
-`:runpod` returns `{:error, %ExAtlas.Error{kind: :unsupported}}`). So a resource
-on a provider that still sells spot, spawned with `spot: true`, that stops, is terminated, or vanishes without
+`:runpod` returns `{:error, %ExAtlas.Error{kind: :unsupported}}`). On Vast an
+outbid instance reads `exited`, which the same inference calls `:preempted`.
+So a resource on a provider that still sells spot, spawned with `spot: true`, that stops, is terminated, or vanishes without
 you asking is reported as `{:status, :preempted}`. On-demand resources keep
 the literal reason (`:stopped`, `:terminated`, `:vanished`).
 
@@ -1599,8 +1606,7 @@ mandate Req — it's an implementation choice of the bundled providers.
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
 - **Unreleased** — Vast.ai compute: spawn, get, list, terminate and GPU types
   for on-demand offers (#99); `command:`, `run_task/1` and the Reaper (#105).
-  Next on Vast: interruptible offers with `spot: true`, then `stop/2`,
-  `start/2` and the bill (#98).
+  `spot: true` (#112). Next on Vast: `stop/2`, `start/2` and the bill (#98).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.

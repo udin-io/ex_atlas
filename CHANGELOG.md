@@ -7,6 +7,37 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: Vast.ai `spot: true` rents interruptible offers (#112)
+
+`spot: true` on `provider: :vast` searches `type: "bid"` offers and rents the
+cheapest by `min_bid`, bidding exactly that price. An outbid instance reads
+`exited`, which the orchestrator already classes as `:preempted`, so
+`on_failure: {:respawn, n}` rents a replacement and destroys the old instance:
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  provider: :vast, gpu: :rtx_4090, image: "pytorch/pytorch",
+  command: ["python", "train.py"], spot: true,
+  callback: "https://app.example.com/atlas/cb",
+  on_failure: {:respawn, 3}, max_runtime_ms: :timer.hours(4)
+)
+# compute.cost_per_hour => the offer's min_bid, below its on-demand dph_total
+```
+
+- An offer with no positive numeric `min_bid` is skipped; Vast is never
+  asked to rent an interruptible instance at `dph_total`. No such offer is
+  `:provider`.
+- `provider_opts: %{offer_id: id}` with `spot: true` is `:validation`: that
+  rent searches nothing, so it has no `min_bid`.
+- `capabilities/0` adds `:spot`. `list_gpu_types/1` fills
+  `spot_price_per_hour` from a second, `type: "bid"` search per GPU, so it
+  sends 26 searches, not 13.
+- Pass a `callback:` to a spot task you respawn. A finished task deletes
+  its instance, which reads like an outbid one; the finish report tells the
+  tracker the task completed.
+- A bid at `min_bid` loses to any higher bid. `provider_opts: %{bid_price: n}`
+  is not in this release.
+
 ### Added: Vast.ai `command:`, `run_task/1` and the Reaper (#105)
 
 `provider: :vast` takes `command:`. With the default `self_terminate: true`
@@ -68,9 +99,8 @@ instances, and `list_gpu_types/1` reads Vast's offers.
 - An `env:` name that is not `[A-Za-z_][A-Za-z0-9_]*`, or a value that holds
   a NUL byte or is not UTF-8, is `:validation`: Vast reads other names as
   Docker flags.
-- `spot: true`, `template_id:`, `network_volume_id:`, `stop/2` and `start/2`
-  return `:unsupported`. `capabilities/0` drops `:spot` until interruptible
-  offers land.
+- `template_id:`, `network_volume_id:`, `stop/2` and `start/2` return
+  `:unsupported`.
 
 ### Fixed: a late report from a replaced pod no longer ends the replacement (#100)
 
