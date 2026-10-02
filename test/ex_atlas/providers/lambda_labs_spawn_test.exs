@@ -593,7 +593,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     # `docker wait` prints an error, not a code, when the container is gone.
     @tag :tmp_dir
-    test "with a callback, a docker wait that prints no exit code POSTs nothing", %{
+    test "with a callback, a docker wait that prints no exit code POSTs 125", %{
       bypass: bypass,
       opts: opts,
       tmp_dir: dir,
@@ -606,10 +606,49 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
       run = run_with_stubs(launched_body()["user_data"], dir, wait_code: "no-such-container")
 
-      # Control: the unit ran as far as docker wait.
       assert run.wait_argv == ["wait", "atlas"]
-      assert run.unit_status == 1
-      assert run.curl_argv == nil
+      assert ["-d", ~s({"exit_code":125})] in Enum.chunk_every(run.curl_argv, 2, 1)
+    end
+
+    # The container never started, so nothing would end the instance before
+    # max_runtime_ms: the report ends the task at once instead.
+    @tag :tmp_dir
+    test "with a callback, a docker run that fails still POSTs 125", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: dir,
+      callback: callback
+    } do
+      expect_types(bypass)
+      expect_launch(bypass)
+
+      assert {:ok, _} =
+               ExAtlas.spawn_compute(opts ++ [command: ["true"], callback: callback])
+
+      run =
+        run_with_stubs(launched_body()["user_data"], dir, run_exit: 125, wait_code: :no_container)
+
+      # Control: docker run was called and failed.
+      assert hd(run.argv) == "run"
+      assert run.wait_argv == ["wait", "atlas"]
+      assert run.unit_status == 0, run.unit_output
+      assert ["-d", ~s({"exit_code":125})] in Enum.chunk_every(run.curl_argv, 2, 1)
+    end
+
+    @tag :tmp_dir
+    test "without a callback, a docker run that fails fails the script", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: dir
+    } do
+      expect_types(bypass)
+      expect_launch(bypass)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts)
+
+      run = run_with_stubs(launched_body()["user_data"], dir, run_exit: 125, script_exit: 125)
+
+      assert run.systemd_run_argv == nil
     end
 
     test "command: without image: is :validation, and no launch", %{opts: opts} do
@@ -776,7 +815,19 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
   defp run_with_stubs(script, dir, opts \\ []) do
     bin = Path.join(dir, "bin")
     File.mkdir_p!(bin)
-    wait_code = Keyword.get(opts, :wait_code, 0)
+
+    wait_body =
+      case Keyword.get(opts, :wait_code, 0) do
+        :no_container -> "echo 'Error response from daemon: No such container: atlas' >&2; exit 1"
+        code -> "echo #{code}; exit 0"
+      end
+
+    run_body =
+      case Keyword.get(opts, :run_exit, 0) do
+        0 -> "echo 4f1c0ffee"
+        code -> "echo 'docker: Error response from daemon: pull access denied' >&2; exit #{code}"
+      end
+
     # ExUnit's tmp_dir name holds the test name, `;` and `'` included.
     out = ExAtlas.Providers.Shell.quote_arg(dir)
 
@@ -793,8 +844,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     fi
     if [ "$1" = wait ]; then
       printf '%s\\0' "$@" > "$OUT/wait.argv"
-      echo #{wait_code}
-      exit 0
+      #{wait_body}
     fi
     printf '%s\\0' "$@" > "$OUT/argv"
     prev=""
@@ -802,7 +852,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       if [ "$prev" = "-e" ]; then printf '%s' "${!arg}" > "$OUT/env.$arg"; fi
       prev="$arg"
     done
-    echo 4f1c0ffee
+    #{run_body}
     """)
 
     stub!(bin, "systemd-run", """
@@ -831,7 +881,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
         stderr_to_stdout: true
       )
 
-    assert status == 0, output
+    assert status == Keyword.get(opts, :script_exit, 0), output
 
     # systemd starts the unit after `systemd-run` returns, in an environment
     # holding only systemd's default PATH, with our stubs first.

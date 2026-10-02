@@ -354,7 +354,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         " ",
         Shell.quote_arg(image),
         command_args(request.command),
-        "\n)\n",
+        # With a reporter, a failed `docker run` goes on to start the unit,
+        # which reports 125 for the missing container.
+        if(reporter, do: "\n) || true\n", else: "\n)\n"),
         if(reporter, do: reporter.start, else: [])
       ])
 
@@ -377,6 +379,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   # systemd unit runs `docker wait atlas` and POSTs the exit code, and the
   # tracker deletes the instance on that report. A unit, not a wait in this
   # script, because cloud-init's final stage would wait on the whole task.
+  # With no container to wait on (`docker run` failed, or a `dockerd` restart
+  # removed it), the unit reports 125, docker's code for a failed run, so the
+  # task ends now instead of at `max_runtime_ms`.
   #
   # The unit's script holds the callback URL and token. `printf` is a bash
   # builtin, so the token never appears on an argv; `mktemp` makes the file
@@ -395,8 +400,8 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         Shell.quote_arg(env["ATLAS_CALLBACK_TOKEN"]),
         "\n",
         ~S"""
-        code=$("$1" wait atlas) || exit 1
-        case "$code" in ''|*[!0-9]*) exit 1 ;; esac
+        code=$("$1" wait atlas) || code=125
+        case "$code" in ''|*[!0-9]*) code=125 ;; esac
         printf 'Authorization: Bearer %s\n' "$ATLAS_CALLBACK_TOKEN" |
           curl -fsS -m 10 --retry 5 --retry-connrefused -H @- \
             -H 'Content-Type: application/json' -d "{\"exit_code\":$code}" \
