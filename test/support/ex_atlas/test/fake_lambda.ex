@@ -100,8 +100,8 @@ defmodule ExAtlas.Test.FakeLambda do
   end
 
   @doc """
-  Start a fake Lambda on Bypass that keeps launched instances in an Agent.
-  Returns the opts every conformance call needs.
+  Start a fake Lambda on Bypass that keeps launched instances and firewall
+  rulesets in Agents. Returns the opts every conformance call needs.
   """
   def start do
     bypass = Bypass.open()
@@ -109,29 +109,37 @@ defmodule ExAtlas.Test.FakeLambda do
     {:ok, rulesets} = Agent.start_link(fn -> %{} end)
 
     Bypass.stub(bypass, "GET", "/instance-types", &json(&1, 200, %{"data" => instance_types()}))
+    stub_instances(bypass, store, rulesets)
+    stub_rulesets(bypass, store, rulesets)
 
+    [
+      base_url: "http://localhost:#{bypass.port}",
+      api_key: "lambda-test-key",
+      provider_opts: %{ssh_key_name: "deploy"}
+    ]
+  end
+
+  defp stub_instances(bypass, store, rulesets) do
     Bypass.stub(bypass, "POST", "/instance-operations/launch", fn conn ->
       {body, conn} = read_json(conn)
-      id = "inst#{System.unique_integer([:positive])}"
       attached = Enum.map(body["firewall_rulesets"] || [], & &1["id"])
-      known = Agent.get(rulesets, &Map.keys/1)
 
-      case attached -- known do
-        [] ->
-          launched =
-            instance(%{
-              "id" => id,
-              "name" => body["name"],
-              "status" => "booting",
-              "tags" => body["tags"] || [],
-              "firewall_ruleset_ids" => attached
-            })
+      if attached -- Agent.get(rulesets, &Map.keys/1) == [] do
+        id = "inst#{System.unique_integer([:positive])}"
 
-          Agent.update(store, &Map.put(&1, id, launched))
-          json(conn, 200, %{"data" => %{"instance_ids" => [id]}})
+        launched =
+          instance(%{
+            "id" => id,
+            "name" => body["name"],
+            "status" => "booting",
+            "tags" => body["tags"] || [],
+            "firewall_ruleset_ids" => attached
+          })
 
-        _missing ->
-          json(conn, 404, not_found())
+        Agent.update(store, &Map.put(&1, id, launched))
+        json(conn, 200, %{"data" => %{"instance_ids" => [id]}})
+      else
+        json(conn, 404, not_found())
       end
     end)
 
@@ -151,7 +159,10 @@ defmodule ExAtlas.Test.FakeLambda do
       Agent.update(store, &Map.drop(&1, ids))
       json(conn, 200, %{"data" => %{"terminated_instances" => []}})
     end)
+  end
 
+  # Lambda refuses to delete a ruleset an instance still uses.
+  defp stub_rulesets(bypass, store, rulesets) do
     Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
       {body, conn} = read_json(conn)
       id = "rs#{System.unique_integer([:positive])}"
@@ -182,17 +193,17 @@ defmodule ExAtlas.Test.FakeLambda do
       id = List.last(conn.path_info)
 
       cond do
-        not Agent.get(rulesets, &Map.has_key?(&1, id)) -> json(conn, 404, not_found())
-        instances_using(store, id) != [] -> json(conn, 400, ruleset_in_use())
-        true -> Agent.update(rulesets, &Map.delete(&1, id)) && json(conn, 200, %{"data" => %{}})
+        not Agent.get(rulesets, &Map.has_key?(&1, id)) ->
+          json(conn, 404, not_found())
+
+        instances_using(store, id) != [] ->
+          json(conn, 400, ruleset_in_use())
+
+        true ->
+          Agent.update(rulesets, &Map.delete(&1, id))
+          json(conn, 200, %{"data" => %{}})
       end
     end)
-
-    [
-      base_url: "http://localhost:#{bypass.port}",
-      api_key: "lambda-test-key",
-      provider_opts: %{ssh_key_name: "deploy"}
-    ]
   end
 
   defp instances_using(store, ruleset_id) do
