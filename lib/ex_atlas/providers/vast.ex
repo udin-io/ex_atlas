@@ -1,9 +1,10 @@
 defmodule ExAtlas.Providers.Vast do
   @moduledoc """
   `ExAtlas.Provider` implementation for [Vast.ai](https://vast.ai) on-demand
-  instances.
+  and interruptible instances.
 
-  Vast is a marketplace: a spawn searches the on-demand offers that match
+  Vast is a marketplace: a spawn searches the on-demand offers (interruptible
+  with `spot: true`, below) that match
   `:gpu`, `:gpu_count`, `:container_disk_gb` (default 20 GB) and the number
   of `:ports`, and rents the cheapest. It runs `:image` with its own
   entrypoint and passes `:env`, `:s3`, `:auth` and `:ports`.
@@ -162,7 +163,8 @@ defmodule ExAtlas.Providers.Vast do
   end
 
   # An `offer_id` rent searches nothing, so it has no `min_bid` to bid.
-  defp check_bid(%Spec.ComputeRequest{spot: true, provider_opts: %{offer_id: _}}) do
+  defp check_bid(%Spec.ComputeRequest{spot: true, provider_opts: %{offer_id: id}})
+       when not is_nil(id) do
     {:error,
      Error.new(:validation,
        provider: :vast,
@@ -239,7 +241,8 @@ defmodule ExAtlas.Providers.Vast do
   defp rent_first(ctx, request, [offer | rest], body) do
     case rent(ctx, offer, Translate.priced(body, request, offer)) do
       {:ok, id} ->
-        {:ok, id, if(Map.has_key?(offer, "dph_total"), do: offer)}
+        # A searched offer has fields; the `offer_id` stub holds only its id.
+        {:ok, id, if(map_size(offer) > 1, do: offer)}
 
       {:error, error} ->
         if rest != [] and next_offer?(error),

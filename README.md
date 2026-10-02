@@ -622,7 +622,7 @@ compute.ports
 
 ### Vast.ai
 
-Vast is a marketplace of hosts. A spawn searches Vast's on-demand offers for
+Vast is a marketplace of hosts. A spawn searches Vast's on-demand (or, with `spot: true`, interruptible) offers for
 `gpu:`, `gpu_count:`, `container_disk_gb:` (default 20) and enough open ports,
 rents the cheapest, and runs your `image` with its own entrypoint, passing
 `env:`, `s3:`, `auth:` and `ports:`.

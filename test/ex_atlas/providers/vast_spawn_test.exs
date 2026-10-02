@@ -590,6 +590,27 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert rent_ids() == ["4"]
     end
 
+    test "an offer without dph_total still sets cost_per_hour from its min_bid", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_search(bypass, [Map.delete(bid_offer(7, 0.18), "dph_total")])
+      expect_rents(bypass, fn _ -> rented(1) end)
+
+      assert {:ok, %{cost_per_hour: 0.18}} = rent_spawn(opts, spot: true)
+    end
+
+    test "provider_opts.offer_id: nil with spot: true searches, as on-demand does", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_search(bypass, [bid_offer(7, 0.18)])
+      expect_rents(bypass, fn _ -> rented(1) end)
+
+      assert {:ok, %{cost_per_hour: 0.18}} =
+               rent_spawn(opts, spot: true, provider_opts: %{offer_id: nil})
+    end
+
     test "no offer with a min_bid is a :provider error, and no rent", %{
       bypass: bypass,
       opts: opts
