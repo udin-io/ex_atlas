@@ -129,13 +129,16 @@ Every pod of a task shares its `task_id`; its token also signs its attempt
 (#100). `ComputeServer` keeps the current attempt as the Registry value of
 `{:callback, task_id}` and moves it before it rents a replacement. A report
 already queued in the tracker carries its attempt, and the tracker drops it
-when the attempt is stale.
+when the attempt is stale. `Callback.take/2` spends a bucket keyed by task and
+attempt before `ingest/3` runs, so the replaced pod's refused reports never
+spend the replacement's budget (#107).
 
 ```mermaid
 sequenceDiagram
   participant A as Pod A, attempt 0
   participant B as Pod B, attempt 1
   participant Pl as Callback.Plug
+  participant L as Callback.take/2, Limiter
   participant Cb as Callback.ingest/3
   participant CS as ComputeServer
   participant P as Provider
@@ -145,10 +148,14 @@ sequenceDiagram
   CS->>P: spawn_compute, callback attempt 1
   P-->>CS: pod B, its token signs attempt 1
   A->>Pl: POST /finish, token for attempt 0
+  Pl->>L: take claims, :finish
+  Note over L: spends the bucket of task and attempt 0
   Pl->>Cb: ingest claims
   Cb-->>Pl: not_tracked, 0 is not 1
   Pl-->>A: 410
   B->>Pl: POST /finish, token for attempt 1
+  Pl->>L: take claims, :finish
+  Note over L: bucket of task and attempt 1 is untouched
   Pl->>Cb: ingest claims
   Cb->>CS: atlas_callback finish, attempt 1
   Note over CS: a queued message with attempt 0 is dropped

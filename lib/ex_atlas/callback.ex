@@ -10,9 +10,9 @@ defmodule ExAtlas.Callback do
       def handle(conn) do
         with {:ok, claims} <- ExAtlas.Callback.verify(bearer_token(conn)),
              true <- ExAtlas.Callback.Token.permits?(claims, :progress),
+             :ok <- ExAtlas.Callback.take(claims, :progress),
              {:ok, body} <- read_at_most(conn, ExAtlas.Callback.body_limit(:progress)),
              {:ok, json} <- Jason.decode(body),
-             :ok <- ExAtlas.Callback.Limiter.take(claims.task_id, :progress),
              :ok <- ExAtlas.Callback.ingest(claims, :progress, json) do
           send_resp(conn, 202, "")
         end
@@ -159,13 +159,17 @@ defmodule ExAtlas.Callback do
     do: ingest(%{task_id: task_id, attempt: nil}, kind, payload)
 
   @doc """
-  Spend one unit of `task_id`'s rate budget for `kind`.
+  Spend one unit of the rate budget for `kind` of the pod `claims` names.
+
+  The budget is per pod: task and attempt. A pod a respawn replaced spends its
+  own budget, never its replacement's. A bare `task_id`, as 0.8.0 took, keys
+  as a token with no attempt.
 
   Re-exported so a hand-rolled controller gets the same limiter the shipped
   plug uses rather than inventing its own.
   """
-  @spec take(Token.task_id(), kind()) :: :ok | {:error, :rate_limited}
-  defdelegate take(task_id, kind), to: Limiter
+  @spec take(Token.claims() | Token.task_id(), kind()) :: :ok | {:error, :rate_limited}
+  def take(claims_or_task_id, kind), do: Limiter.take(claims_or_task_id, kind)
 
   # --- spawn side ---
 
