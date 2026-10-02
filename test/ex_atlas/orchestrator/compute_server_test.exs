@@ -257,6 +257,126 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  describe "env: values beyond the State line" do
+    @env_secret "hf-tracker-probe-6c2d"
+    @env %{"HF_TOKEN" => @env_secret, "WANDB_API_KEY" => "wandb-tracker-probe-91fe"}
+
+    defp refute_env_values(text) do
+      refute text =~ @env_secret
+      refute text =~ "wandb-tracker-probe-91fe"
+    end
+
+    defp env_crash_log(pid) do
+      ref = Process.monitor(pid)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      end)
+    end
+
+    test "a function clause crash prints the names and no value" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          env: @env
+        )
+
+      log = env_crash_log(pid)
+
+      # The stacktrace printed the opts, so the refutes are not vacuous.
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      assert log =~ "HF_TOKEN"
+      refute_env_values(log)
+    end
+
+    test "a run_task/1 tracker prints no value either" do
+      {:ok, pid, _compute} =
+        ExAtlas.Orchestrator.run_task(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          env: @env
+        )
+
+      log = env_crash_log(pid)
+
+      assert log =~ "HF_TOKEN"
+      refute_env_values(log)
+    end
+
+    test "a tracker started without Orchestrator.spawn/1 prints no value" do
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      opts = [provider: :mock, env: @env, status_poll_ms: false]
+
+      {:ok, pid} =
+        DynamicSupervisor.start_child(ComputeSupervisor, {ComputeServer, {compute, opts}})
+
+      log = env_crash_log(pid)
+
+      assert log =~ "HF_TOKEN"
+      refute_env_values(log)
+    end
+
+    test "a crash on stop and :sys.get_status/1 print no value" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          env: @env
+        )
+
+      status = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+      assert status =~ compute.id
+      assert status =~ "HF_TOKEN"
+      refute_env_values(status)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> GenServer.stop(pid, :boom) end)
+
+      assert log =~ "terminating"
+      assert log =~ compute.id
+      refute_env_values(log)
+    end
+
+    test "an env: that is not a map is refused by name, before the provider is called" do
+      for spawn <- [&ExAtlas.Orchestrator.spawn/1, &ExAtlas.Orchestrator.run_task/1] do
+        assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+                 spawn.(
+                   provider: :mock,
+                   gpu: :h100,
+                   image: "x-env-invalid",
+                   env: [{"HF_TOKEN", @env_secret}]
+                 )
+
+        refute_env_values(inspect(error))
+        refute_env_values(Exception.message(error))
+      end
+
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      refute Enum.any?(computes, &(&1.image == "x-env-invalid"))
+    end
+
+    test "control: the pod still gets every value" do
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          env: @env
+        )
+
+      assert ExAtlas.Spec.ComputeRequest.container_env(compute.raw.request) == @env
+    end
+  end
+
   # The Mock, but each status poll sends its ctx to the pid in
   # `:key_echo_pid`, so a test sees what a tracker hands the provider.
   defmodule KeyEchoProvider do
@@ -640,6 +760,22 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
                "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
                "AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"
              } = ExAtlas.Spec.Staging.env(replacement.raw.request.s3)
+    end
+
+    test "a respawn sends the env: values to the replacement", %{base: base} do
+      env = %{"HF_TOKEN" => "hf-respawn-probe-07ab"}
+
+      {:ok, _pid, compute} =
+        ExAtlas.Orchestrator.spawn([env: env, mode: :task, persist: true] ++ base)
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{compute: replacement}} = ExAtlas.Orchestrator.info(new_id)
+      assert ExAtlas.Spec.ComputeRequest.container_env(replacement.raw.request) == env
     end
 
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do

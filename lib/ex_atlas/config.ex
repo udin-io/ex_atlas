@@ -64,19 +64,21 @@ defmodule ExAtlas.Config do
 
   @doc """
   Wrap the credentials in `opts` in `ExAtlas.Secret`, so no stacktrace that
-  carries `opts` prints them: `:api_key`, and the
-  `#{inspect(@secret_req_options)}` entries of `:req_options`.
+  carries `opts` prints them: `:api_key`, the
+  `#{inspect(@secret_req_options)}` entries of `:req_options`, and every
+  `:env` value.
 
   `ExAtlas.Orchestrator.spawn/1` runs this before anything else reads its
   opts; `build_ctx/2` runs it for every provider call. An `:api_key` that is
   not a string or an `ExAtlas.Secret` of one, or a `:req_options` that is not
-  a keyword list, is a `NimbleOptions.ValidationError` with `value: nil`, so
-  no message prints it.
+  a keyword list, or an `:env` that is not a map, is a
+  `NimbleOptions.ValidationError` with `value: nil`, so no message prints it.
   """
   @spec seal_credentials(opts()) :: {:ok, opts()} | {:error, NimbleOptions.ValidationError.t()}
   def seal_credentials(opts) do
     with :ok <- check_keyword(opts),
-         {:ok, opts} <- seal(opts, :api_key, &seal_api_key/1) do
+         {:ok, opts} <- seal(opts, :api_key, &seal_api_key/1),
+         {:ok, opts} <- seal(opts, :env, &seal_env/1) do
       seal(opts, :req_options, &seal_req_options/1)
     end
   end
@@ -133,6 +135,16 @@ defmodule ExAtlas.Config do
       _other -> invalid(:api_key, "expected a string or an ExAtlas.Secret of one")
     end
   end
+
+  # `ExAtlas.Spec.ComputeRequest.new/1` checks each name and value. A tracking
+  # record's bare `:not_stored` passes: an adopted tracker hands its opts to
+  # `build_ctx/2` on every poll.
+  defp seal_env(env) when is_map(env) and not is_struct(env),
+    do: {:ok, Map.new(env, fn {name, value} -> {name, Secret.wrap(value)} end)}
+
+  defp seal_env(:not_stored), do: {:ok, :not_stored}
+
+  defp seal_env(_env), do: invalid(:env, "expected a map of string names to string values")
 
   defp seal_req_options(req_options) do
     cond do
