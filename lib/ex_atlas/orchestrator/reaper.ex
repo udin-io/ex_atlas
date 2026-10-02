@@ -26,6 +26,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   touches pods spawned by other tools on the same RunPod account. Set it to
   `""` to disable the safeguard.
 
+  `:vast` is not in the default `:reap_providers`. A Vast label is free text
+  a user types in Vast's console, so the prefix can match an instance ExAtlas
+  never rented; opt in once your own instances carry no `atlas-` label.
+  `ExAtlas.Orchestrator.spawn/1` warns when a task that can respawn runs on a
+  provider outside `:reap_providers`: a node that dies mid-respawn leaves the
+  replacement with no record, and only the Reaper deletes it.
+
   ## "Ours" means the Registry *or* the store
 
   A tracker in the Registry is the live answer, and it is the only one a node
@@ -113,9 +120,14 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   require Logger
 
+  alias ExAtlas.Config
   alias ExAtlas.Orchestrator.{ComputeRegistry, Ownership, TrackingStore}
 
   @default_interval_ms 60 * 1_000
+
+  # `:vast` stays out: a Vast label is free text a user types in Vast's
+  # console, so the `atlas-` marker can match an instance ExAtlas never rented.
+  @default_providers [:runpod]
 
   # A pod that is still booting bills too. Runpod v1's `desiredStatus=RUNNING`
   # filter included booting pods; v2's `status` splits them out.
@@ -290,7 +302,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
   It applies the owner rules of a periodic tick, but not the adoption gate, and
   it logs every pod it leaves alone.
   """
-  def reap_now(prefix \\ "atlas-", providers \\ [:runpod]) do
+  def reap_now(prefix \\ "atlas-", providers \\ @default_providers) do
     grace_ms = config().grace_ms
 
     {result, silent} = ownership_gate(Ownership.owner())
@@ -313,16 +325,36 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
     %{
       interval: interval,
-      providers: Keyword.get(cfg, :reap_providers, [:runpod]),
+      providers: providers(),
       prefix: Ownership.prefix(),
       grace_ms: Keyword.get(cfg, :reap_grace_ms, interval)
     }
   end
 
+  @doc """
+  Whether a periodic Reaper reclaims `provider`'s orphans: whether it is in
+  `:reap_providers`, by atom or by module.
+  """
+  @spec covers?(atom() | module()) :: boolean()
+  def covers?(provider) do
+    module = provider_module(provider)
+    Enum.any?(providers(), &(provider_module(&1) == module))
+  end
+
+  defp providers do
+    :ex_atlas
+    |> Application.get_env(:orchestrator, [])
+    |> Keyword.get(:reap_providers, @default_providers)
+  end
+
+  # No raise: an unknown name in `:reap_providers` is the Reaper's to report
+  # on its tick, not a spawn's.
+  defp provider_module(provider), do: Map.get(Config.builtin_providers(), provider, provider)
+
   # Returns the ids left alone so far, so a periodic Reaper logs each one once
   # per boot rather than once per tick.
   defp reap_provider(provider, prefix, grace_ms, owner, left_alone) do
-    case ExAtlas.list_compute(provider: provider) do
+    case list_compute(provider) do
       {:ok, computes} ->
         tracked = registered_ids()
         store = TrackingStore.impl()
@@ -343,6 +375,36 @@ defmodule ExAtlas.Orchestrator.Reaper do
         left_alone
     end
   end
+
+  # A list that raises (RunPod with no API key, which the default
+  # `reap_providers` lists on a Vast-only host) or exits (an HTTP pool
+  # checkout that times out) skips that provider, not the tick: a crash would
+  # restart the Reaper gated, and no Adopter signals again. The log keeps the
+  # error's kind, never its message or exit reason, which can carry a
+  # provider's response.
+  defp list_compute(provider) do
+    ExAtlas.list_compute(provider: provider)
+  rescue
+    error ->
+      Logger.warning(
+        "[ExAtlas.Orchestrator.Reaper] listing #{inspect(provider)} raised " <>
+          "#{inspect(error.__struct__)}#{error_kind(error)}; its orphans are not reaped this " <>
+          "tick. Configure its API key, or remove it from :reap_providers."
+      )
+
+      :error
+  catch
+    :exit, _reason ->
+      Logger.warning(
+        "[ExAtlas.Orchestrator.Reaper] listing #{inspect(provider)} exited; its orphans are " <>
+          "not reaped this tick."
+      )
+
+      :error
+  end
+
+  defp error_kind(%ExAtlas.Error{kind: kind}), do: " (#{inspect(kind)})"
+  defp error_kind(_error), do: ""
 
   # With no owner the gate has already checked this node is alone, and every
   # untracked prefixed pod is its own, as before owners existed.

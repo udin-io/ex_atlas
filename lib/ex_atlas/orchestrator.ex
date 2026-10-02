@@ -49,6 +49,8 @@ defmodule ExAtlas.Orchestrator do
       :ok = ExAtlas.Orchestrator.stop_tracked(compute.id)
   """
 
+  require Logger
+
   alias ExAtlas.Callback
   alias ExAtlas.Config
 
@@ -59,6 +61,7 @@ defmodule ExAtlas.Orchestrator do
     CostMeter,
     Events,
     Ownership,
+    Reaper,
     TrackingStore
   }
 
@@ -183,11 +186,30 @@ defmodule ExAtlas.Orchestrator do
          {:ok, opts} <- stage(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),
+         :ok <- warn_unreaped_respawn(opts, tracking),
          {:ok, compute} <- ExAtlas.spawn_compute(opts),
          :ok <- require_price(compute, opts, tracking) do
       persist(compute, opts, tracking)
       track(compute, opts, tracking)
     end
+  end
+
+  # A node that dies while a respawn rents leaves the replacement running with
+  # no record and no tracker. Only the Reaper deletes it (risk 51).
+  defp warn_unreaped_respawn(opts, tracking) do
+    {provider, _opts} = Config.pop_provider!(opts)
+
+    with {:respawn, max} when max > 0 <- tracking[:on_failure],
+         false <- Reaper.covers?(provider) do
+      Logger.warning(
+        "[ExAtlas.Orchestrator] #{inspect(Keyword.get(opts, :name))} can respawn, and " <>
+          "#{inspect(provider)} is not in :reap_providers. If this node dies while a respawn " <>
+          "rents, the replacement runs and bills with no tracker, and nothing deletes it. " <>
+          "Add #{inspect(provider)} to :reap_providers, or delete such a pod by hand."
+      )
+    end
+
+    :ok
   end
 
   # The tracker keeps its opts for the life of the task and passes them to every

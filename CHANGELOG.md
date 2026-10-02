@@ -7,6 +7,37 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed: a respawn the Reaper cannot clean up warns, and a revived pod reports (#118)
+
+A spawn with `on_failure: {:respawn, n}` on a provider outside
+`:reap_providers` logs a warning. A node that dies while a respawn rents leaves
+the replacement running with no record, and only the Reaper deletes it.
+`:vast` stays out of the default `reap_providers`: a Vast label is free text,
+so the `atlas-` prefix can match an instance ExAtlas never rented.
+
+```elixir
+# reap_providers: [:runpod] (the default)
+ExAtlas.Orchestrator.run_task(provider: :vast, spot: true, on_failure: {:respawn, 2}, ...)
+# [warning] [ExAtlas.Orchestrator] "atlas-train" can respawn, and :vast is not
+#   in :reap_providers. ... Add :vast to :reap_providers, or delete such a pod by hand.
+```
+
+- An adopted task whose node died mid-respawn accepts its record's pod's
+  reports again once a poll reads that pod alive (an outbid spot instance
+  that won its bid back). Before, it refused every token until its deadline.
+  The orphan's token still gets 410, and the next respawn still uses the next
+  attempt.
+- A provider whose list raises or exits no longer crashes the Reaper's tick:
+  the Reaper logs a warning with the error's kind and reaps the next
+  provider. Before, RunPod with no API key, under the default
+  `reap_providers`, crashed every tick, and the restarted Reaper stayed gated
+  for the rest of the boot.
+- A host-prepared `callback:` descriptor starts at attempt 0. A carried
+  attempt was the one the first respawn issued again, so the replaced pod's
+  report passed.
+- `ExAtlas.Orchestrator.Reaper.covers?/1` says whether a provider is in
+  `:reap_providers`, by atom or module.
+
 ### Added: Vast.ai `stop/2`, `start/2` and `compute_spend/3` (#116)
 
 `stop/2` and `start/2` pause and resume a Vast instance, and `compute_spend/3`
@@ -48,6 +79,7 @@ POST /atlas/cb/finish  Bearer <B's token, attempt 1>
 - The adopted task counts attempt `n` as spent. With `{:respawn, 1}` it rents
   nothing more and ends.
 - Until its next respawn, it accepts no token: the record's pod was preempted.
+  Since #118, a poll that reads that pod alive again lets its own token back.
 - It logs a warning naming the pod name. The orphan bills until the Reaper
   deletes it; add the provider to `reap_providers` (`:vast` is not there by
   default), or delete it by hand.
