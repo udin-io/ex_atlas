@@ -2,9 +2,9 @@ defmodule ExAtlas.Callback.Token do
   @moduledoc """
   The credential a pod presents when it calls back into the orchestrating app.
 
-  A **stateless** signed token: `Plug.Crypto.sign/4` over `%{task_id, kinds}`,
-  with the token's own maximum age baked in, verified by
-  `Plug.Crypto.verify/4`. Nothing is stored anywhere, so verification is a
+  A **stateless** signed token: `Plug.Crypto.sign/4` over
+  `%{task_id, kinds, attempt}`, with the token's own maximum age baked in,
+  verified by `Plug.Crypto.verify/4`. Nothing is stored anywhere, so verification is a
   single HMAC over data the token carries itself.
 
   ## Why not the stored hash `ExAtlas.Auth.Token` uses
@@ -36,6 +36,15 @@ defmodule ExAtlas.Callback.Token do
   reports `{:error, :expired}` separately from `{:error, :invalid}` only so the
   library can tell them apart in logs; both are a 401 to the caller.
 
+  ## Attempt
+
+  Every pod of one task shares its `task_id`, so a respawn alone cannot tell
+  the preempted pod from its replacement. The token also signs the pod's
+  `attempt`: 0 for the first pod, `n` for the `n`th replacement.
+  `ExAtlas.Callback.ingest/3` refuses a report whose attempt is not the
+  tracker's current one. A token minted by 0.8.0 has no attempt; `verify/2`
+  returns `attempt: nil` for it, and the attempt goes unchecked.
+
   ## Replay
 
   Deliberately not defended against with a nonce store. A replayed `progress`
@@ -63,7 +72,8 @@ defmodule ExAtlas.Callback.Token do
 
   @type kind :: :progress | :log | :finish
   @type task_id :: String.t()
-  @type claims :: %{task_id: task_id(), kinds: [kind()]}
+  @type attempt :: non_neg_integer()
+  @type claims :: %{task_id: task_id(), kinds: [kind()], attempt: attempt() | nil}
 
   @doc "Every callback kind the boundary knows about."
   @spec kinds() :: [kind()]
@@ -89,14 +99,21 @@ defmodule ExAtlas.Callback.Token do
     * `:max_age` — seconds the token stays valid. Baked into the token, so
       `verify/2` needs no per-task state to enforce it.
     * `:signed_at` — unix seconds the token claims to have been signed at.
+    * `:attempt` — which pod of the task holds the token, a non-negative
+      integer. Omitted, the token carries none, as 0.8.0's did.
   """
   @spec mint(task_id(), [kind()], keyword()) :: String.t()
   def mint(task_id, kinds, opts \\ []) when is_binary(task_id) and is_list(kinds) do
     secret = secret!(opts)
     sign_opts = Keyword.take(opts, [:max_age, :signed_at])
 
-    Plug.Crypto.sign(secret, @salt, %{task_id: task_id, kinds: kinds}, sign_opts)
+    Plug.Crypto.sign(secret, @salt, claims(task_id, kinds, opts[:attempt]), sign_opts)
   end
+
+  defp claims(task_id, kinds, nil), do: %{task_id: task_id, kinds: kinds}
+
+  defp claims(task_id, kinds, attempt) when is_integer(attempt) and attempt >= 0,
+    do: %{task_id: task_id, kinds: kinds, attempt: attempt}
 
   @doc """
   Verify a token presented by a pod.
@@ -110,8 +127,11 @@ defmodule ExAtlas.Callback.Token do
 
   def verify(token, opts) when is_binary(token) do
     case Plug.Crypto.verify(secret!(opts), @salt, token, []) do
-      {:ok, %{task_id: task_id, kinds: kinds}} when is_binary(task_id) and is_list(kinds) ->
-        {:ok, %{task_id: task_id, kinds: Enum.filter(kinds, &(&1 in @kinds))}}
+      {:ok, %{task_id: task_id, kinds: kinds} = claims}
+      when is_binary(task_id) and is_list(kinds) ->
+        with {:ok, attempt} <- attempt(claims) do
+          {:ok, %{task_id: task_id, kinds: Enum.filter(kinds, &(&1 in @kinds)), attempt: attempt}}
+        end
 
       {:error, :expired} ->
         {:error, :expired}
@@ -122,6 +142,10 @@ defmodule ExAtlas.Callback.Token do
   end
 
   def verify(_token, _opts), do: {:error, :invalid}
+
+  defp attempt(%{attempt: attempt}) when is_integer(attempt) and attempt >= 0, do: {:ok, attempt}
+  defp attempt(claims) when is_map_key(claims, :attempt), do: {:error, :invalid}
+  defp attempt(_claims_from_0_8_0), do: {:ok, nil}
 
   @doc "Does this token's scope cover `kind`?"
   @spec permits?(claims(), kind()) :: boolean()
