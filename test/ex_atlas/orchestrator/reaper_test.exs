@@ -432,5 +432,74 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       assert_received {:destroyed, "1"}
       refute_received {:destroyed, _}
     end
+
+    # A Vast label is free text, so `atlas-` can name an instance ExAtlas never
+    # rented. The default leaves Vast out; a host opts in (#118). A tick under
+    # the default would list the real RunPod account wherever RUNPOD_API_KEY is
+    # set, so this reads the coverage the tick uses instead.
+    test "the default :reap_providers covers :runpod and not :vast" do
+      assert Application.get_env(:ex_atlas, :orchestrator, [])[:reap_providers] == nil
+
+      refute Reaper.covers?(:vast)
+      refute Reaper.covers?(ExAtlas.Providers.Vast)
+      assert Reaper.covers?(:runpod)
+    end
+
+    test "control: a periodic Reaper with :vast in :reap_providers lists Vast", %{
+      bypass: bypass
+    } do
+      reaper = start_vast_reaper(bypass, reap_providers: [:vast])
+
+      :ok = tick(reaper)
+
+      assert_received :listed
+    end
+
+    test "with :vast opted in, an instance a live tracker holds is never destroyed", %{
+      bypass: bypass
+    } do
+      TestOrchestrator.put_env(reap_grace_ms: 0)
+      old = System.os_time(:second) - 7_200
+
+      instances = [
+        FakeVast.instance(%{"id" => 1, "label" => "atlas-tracked", "start_date" => old}),
+        FakeVast.instance(%{"id" => 2, "label" => "atlas-orphan", "start_date" => old}),
+        FakeVast.instance(%{"id" => 3, "label" => "users-own", "start_date" => old})
+      ]
+
+      {:ok, _} = Registry.register(ExAtlas.Orchestrator.ComputeRegistry, {:compute, "1"}, nil)
+
+      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+        FakeVast.json(conn, 200, %{"instances" => instances, "next_token" => nil})
+      end)
+
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
+        send(test_pid, {:destroyed, List.last(conn.path_info)})
+        FakeVast.json(conn, 200, %{"success" => true})
+      end)
+
+      :ok = Reaper.reap_now("atlas-", [:vast])
+
+      # Control: the untracked atlas- instance goes in the same pass.
+      assert_received {:destroyed, "2"}
+      refute_received {:destroyed, _}
+    end
+  end
+
+  defp start_vast_reaper(bypass, env) do
+    TestOrchestrator.put_env(
+      [tracking_store: false, reap_grace_ms: 0, reap_interval_ms: 60_000] ++ env
+    )
+
+    test_pid = self()
+
+    Bypass.stub(bypass, "GET", "/api/v1/instances", fn conn ->
+      send(test_pid, :listed)
+      FakeVast.json(conn, 200, %{"instances" => [], "next_token" => nil})
+    end)
+
+    start_supervised!(Reaper)
   end
 end
