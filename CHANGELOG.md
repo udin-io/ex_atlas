@@ -7,6 +7,29 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: Vast.ai `stop/2`, `start/2` and `compute_spend/3` (#116)
+
+`stop/2` and `start/2` pause and resume a Vast instance, and `compute_spend/3`
+reads its bill from Vast's charges API, so `max_cost` reconciles against real
+spend on Vast:
+
+```elixir
+ExAtlas.stop(id, provider: :vast)          # => :ok, the instance reads :stopped
+ExAtlas.start(id, provider: :vast)         # => :ok
+ExAtlas.compute_spend(id, provider: :vast)
+# => {:ok, %ExAtlas.Spec.Spend{total_usd: 0.84, gpu_usd: 0.60, disk_usd: 0.20}}
+```
+
+- A stopped instance still bills its disk. `start/2` fails when the host
+  rented the GPU to someone else; the error carries Vast's `error` code and
+  never its `msg`.
+- Vast bills by UTC day: `compute_spend/3` snaps `from` down to midnight and
+  returns the snapped window. With no `:from` it starts at the instance's
+  `start_date`.
+- `capabilities(:vast)` now lists `:billing`.
+- `Spend.raw` keeps an allow-list of row fields; a row's `description` and
+  `metadata` stay out.
+
 ### Fixed: an orphan of a node that died mid-respawn gets 410 (#114)
 
 A respawn writes `respawning: n` into the tracking record before it rents the

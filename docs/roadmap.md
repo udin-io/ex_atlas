@@ -7,8 +7,8 @@ next feature. Dates are merge dates.
 
 ## Next
 
-Vast.ai slice 4 (#98): stop, start and the bill. It is filed when slice 3
-(#112) merges.
+Nothing is filed for Vast.ai: its feature (#98) ships with slice 4. Templates,
+network volumes, serverless, and SSH and Jupyter modes stay out of scope.
 
 ## In progress
 
@@ -16,7 +16,6 @@ Vast.ai slice 4 (#98): stop, start and the bill. It is filed when slice 3
 |---|---|---|
 | A late report from a replaced pod no longer ends the replacement | #100 | PR #101 (merged): the callback token signs the pod's attempt, and a stale report gets 410. #110: a token with no attempt gets 410 once a respawn replaced the pod. #114 (PR #115): a pod rented by a respawn the node died in gets 410 after the next boot (risk 51) |
 | Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag after the merge |
-| Vast.ai provider (feature #98) | #99, #105 | PR #102 (slice 1, merged): spawn by renting the cheapest on-demand offer, get, list, terminate, GPU types. PR #108 (slice 2, merged): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper. PR #113 (slice 3, #112): `spot: true` rents interruptible offers at `min_bid`, and an outbid instance respawns. Then stop, start and the bill, filed when slice 3 merges |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -25,6 +24,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Vast.ai provider (feature #98) | #102 (slice 1, #99): spawn by renting the cheapest on-demand offer, get, list, terminate, GPU types. #108 (slice 2, #105): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper. #113 (slice 3, #112): `spot: true` rents interruptible offers at `min_bid`, and an outbid instance respawns. #117 (slice 4, #116): `stop/2`, `start/2` and `compute_spend/3`, so `max_cost` reconciles against Vast's bill | 2026-10-02 (#117 on merge) |
 | Lambda Labs provider (feature #83) | #89 (slice 1, #84): spawn through cloud-init, get, list, terminate, GPU types. #90 (slice 2, #85): `command:`, `run_task/1` ended by the host's report, the Reaper on Lambda. #91 (slice 3, #86): `ports:` open in Lambda's firewall. #97 (#96): an interactive session with a self-terminating command ends on the report | 2026-10-02 (#97 on merge) |
 | Test reliability | #106 (#103, #104): the respawn billing test compares the bill within float rounding; the upgrade task tests run from a temp dir, so they pass in a checkout under a dot directory | 2026-10-02 (on merge) |
 | Docs build clean for 0.8.0 | #93 (#92): `bin/ci` fails on an ExDoc warning, every module grouped | 2026-10-02 |

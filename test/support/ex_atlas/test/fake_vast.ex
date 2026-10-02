@@ -66,6 +66,41 @@ defmodule ExAtlas.Test.FakeVast do
     )
   end
 
+  @doc """
+  One contract's row from `GET /api/v0/charges/`, as Vast's OpenAPI reference
+  shows it. `items` are `{type, amount}` pairs; the row's `amount` defaults to
+  their sum.
+  """
+  def charge_row(id, items, attrs \\ %{}) do
+    amount = items |> Enum.map(&elem(&1, 1)) |> Enum.sum() |> Float.round(3)
+
+    Map.merge(
+      %{
+        "start" => 1_790_000_000,
+        "end" => 1_790_086_400,
+        "type" => "instance",
+        "source" => "instance-#{id}",
+        "description" => "Instance #{id} Charges - 1 days",
+        "amount" => amount,
+        "metadata" => %{"label" => "atlas-test"},
+        "items" =>
+          for {type, item_amount} <- items do
+            %{
+              "start" => 1_790_000_000,
+              "end" => 1_790_086_400,
+              "type" => Atom.to_string(type),
+              "source" => nil,
+              "description" => "#{type} charge",
+              "amount" => item_amount,
+              "metadata" => %{},
+              "items" => []
+            }
+          end
+      },
+      attrs
+    )
+  end
+
   @doc "A refused rent, as Vast's reference documents it."
   def refused(code, msg), do: %{"success" => false, "error" => code, "msg" => msg}
 
@@ -119,12 +154,49 @@ defmodule ExAtlas.Test.FakeVast do
       json(conn, 200, %{"success" => true})
     end)
 
+    # Not Vast's API: sets what the charges route bills an instance.
+    Bypass.stub(bypass, "POST", "/fake/bill/:id", fn conn ->
+      id = List.last(conn.path_info)
+      {%{"usd" => usd}, conn} = read_json(conn)
+      Agent.update(store, &update_in(&1[id], fn i -> Map.put(i, "fake_bill_usd", usd) end))
+      json(conn, 200, %{"success" => true})
+    end)
+
+    # The account's contract rows: one per instance with a bill set, all GPU.
+    Bypass.stub(bypass, "GET", "/api/v0/charges", fn conn ->
+      rows =
+        for %{"id" => id, "fake_bill_usd" => usd} <- Agent.get(store, &Map.values/1),
+            do: charge_row(id, gpu: usd)
+
+      json(conn, 200, %{"success" => true, "results" => rows, "next_token" => nil})
+    end)
+
     Bypass.stub(bypass, "GET", "/api/v0/instances/:id", fn conn ->
       json(conn, 200, %{"instances" => Agent.get(store, &Map.get(&1, List.last(conn.path_info)))})
     end)
 
     Bypass.stub(bypass, "GET", "/api/v1/instances", fn conn ->
       json(conn, 200, %{"instances" => Agent.get(store, &Map.values/1), "next_token" => nil})
+    end)
+
+    # `PUT {"state": "stopped" | "running"}`: a stopped instance reads
+    # `exited`, as Vast's docs say.
+    Bypass.stub(bypass, "PUT", "/api/v0/instances/:id", fn conn ->
+      id = List.last(conn.path_info)
+      {body, conn} = read_json(conn)
+
+      status =
+        case body["state"] do
+          "stopped" -> "exited"
+          "running" -> "running"
+        end
+
+      if Agent.get(store, &Map.has_key?(&1, id)) do
+        Agent.update(store, &put_in(&1[id]["actual_status"], status))
+        json(conn, 200, %{"success" => true})
+      else
+        json(conn, 404, refused("not_found", "Instance not found"))
+      end
     end)
 
     Bypass.stub(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
@@ -153,6 +225,14 @@ defmodule ExAtlas.Test.FakeVast do
         "dph_total" => Float.round(price + 0.01, 4),
         "min_bid" => price
       })
+
+  @doc "Make `vast`'s charges route bill instance `id` `usd` dollars of GPU time."
+  def bill(vast, id, usd) do
+    {:ok, %{status: 200}} =
+      Req.post("#{vast[:base_url]}/fake/bill/#{id}", json: %{"usd" => usd}, retry: false)
+
+    :ok
+  end
 
   @doc "Outbid a rented instance of `start/0`'s fake: it reads `exited` from now on."
   def outbid(vast, id) do
