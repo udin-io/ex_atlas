@@ -7,18 +7,23 @@ are merge dates.
 
 ## Next
 
-Database tracking store (milestone 9). A `persist: true` task survives a
-deploy today only when the DETS file sits on a mounted volume; on a Fly
-machine with none, adoption finds nothing and the Reaper deletes the pods
-(risk 3). We picked it because no roadmap item or open milestone is left, and
-risk 3 is the open risk with the largest cost: hours of GPU work deleted on a
-routine deploy. Three slices, each 4 to 8 hours:
+Dead owner's pods (milestone 11, parent #143). With `TrackingStore.Ecto`, a
+live node's Reaper deletes the pods a dead owner left billing, once that
+owner's lease has stayed expired for `:reap_dead_owner_after_ms` (15 minutes
+by default). Today they bill until an operator reads a log line and deletes
+them (risk 6). We picked it by the same rule as milestone 9: no milestone
+has open issues, and risk 6 is the open risk with the largest cost a feature
+can retire. Its cost has no bound: an interactive session a destroyed
+machine ran has no tracker, no deadline, and no Reaper that touches it. We
+left out risk 2 (cowlib, waits on an upstream release) and the risks only
+the owner's live tests settle. The ranking is on #143. Two slices:
 
 | Slice | What it adds | Ticket |
 |---|---|---|
-| 1 | `TrackingStore.Ecto` in the host's repo, its migration module, and `ExAtlas.Orchestrator.Supervisor`, which the host starts after its repo | #120 |
-| 2 | `mix ex_atlas.install --tracking-store ecto` writes the migration, config and child; `TrackingStoreConformance` ships in `lib`; the guides and risk 3 point at the Ecto store | #128 |
-| 3 | Leases on the Ecto store: a live node adopts the signed records of an owner whose lease expired | #132 |
+| 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods | #144 |
+| 2 | A record a dead owner still holds after the window no longer shields its pod: the Reaper deletes the pod, then the record | #145 |
+
+Release 0.9.0 (#141) goes out first.
 
 Vast.ai (#98) shipped with slice 4. Its templates, network volumes,
 serverless, and SSH and Jupyter modes stay out of scope.
