@@ -204,6 +204,8 @@ node has none of its own. Name a resolver that hands them back:
 
 ```elixir
 defmodule MyApp.Atlas do
+  @behaviour ExAtlas.Orchestrator.RespawnCredentials
+
   # info: %{id:, name:, user_id:, provider:, s3: stored_s3, env_names: [...]}
   def credentials(:trainer, info) do
     {:ok,
@@ -229,8 +231,13 @@ ExAtlas.Orchestrator.run_task(
   `info.env_names` lists the names the record kept. The resolver returns
   `{:ok, keyword}` with `:s3`, `:env` or both. `s3:` must come back whole;
   `env:` must hold every name in `env_names` and may add more.
+- The module must declare `@behaviour
+  ExAtlas.Orchestrator.RespawnCredentials`. The tuple is read back from the
+  store, so whoever can write the store picks the function; ExAtlas calls no
+  other module.
 - The record keeps the tuple, never what it returns, so the next restart
-  calls it again. The args are stored as given: put no secret in them.
+  calls it again. The args are stored as given: a closure or an
+  `ExAtlas.Secret` in them is refused, and they should hold no secret.
 - `config :ex_atlas, :orchestrator, respawn_credentials: {m, f, args}`
   serves records with no tuple, such as those written before the option
   existed.

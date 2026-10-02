@@ -119,3 +119,5 @@ names the PR or issue that holds the reasoning.
 | The resolver runs in a task under the poll `Task.Supervisor`, bounded at 30 s; a raise, throw or exit is caught inside it, so no crash report prints its value | Call inline: a hung resolver would hold the tracker forever | #87 |
 | Resolved values stay in the tracker's opts, so a second respawn in the same VM reuses them | Call the resolver on every respawn | #87 |
 | The spawn checks that the resolver function is exported | Check the shape only: a typo would surface hours later, at the respawn | #87 |
+| Only a module that declares `ExAtlas.Orchestrator.RespawnCredentials` is called, on the spawn option, an adopted record and the app config | Call any exported function: write access to the store would run `{:os, :cmd, [...]}` on the node | #87 |
+| The resolver's result is checked inside its task | Check in the tracker: a check that raises on a value would crash it and print the value | #87 |

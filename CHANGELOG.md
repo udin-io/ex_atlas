@@ -51,8 +51,10 @@ restart ended with `{:respawn_failed, ...}`, since its record holds no
 secret. Now:
 
 - `Orchestrator.spawn/1` and `run_task/1` take `respawn_credentials: {m, f,
-  args}`. It needs `persist: true`, and the function must be exported with
-  arity `length(args) + 1`; otherwise the spawn is a
+  args}`. It needs `persist: true`, a module that declares `@behaviour
+  ExAtlas.Orchestrator.RespawnCredentials`, a function exported with arity
+  `length(args) + 1`, and args with no closure or `ExAtlas.Secret`;
+  otherwise the spawn is a
   `NimbleOptions.ValidationError` on `:respawn_credentials`, before any rent.
 - The record keeps the tuple. `config :ex_atlas, :orchestrator,
   respawn_credentials:` serves records without one.
@@ -65,6 +67,8 @@ secret. Now:
   with a message that names the resolver and no value.
 - An adopted record whose tuple no longer validates adopts without it and
   logs a warning.
+- `Spec.Staging.new/1` refuses a value that is not valid UTF-8, naming the
+  key. It raised before, with the value in the stacktrace.
 
 ### Changed: `env:` values print redacted and stay off disk (#79)
 

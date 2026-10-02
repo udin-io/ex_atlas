@@ -151,7 +151,10 @@ defmodule ExAtlas.Orchestrator do
       # info: %{id:, name:, user_id:, provider:, s3: stored_s3, env_names: [...]}
       # => {:ok, s3: full_s3, env: %{"HF_TOKEN" => token}}
 
-  The record keeps the tuple, args included, and never what it returns.
+  The module must declare `@behaviour ExAtlas.Orchestrator.RespawnCredentials`,
+  since whoever writes the store picks the function. The record keeps the
+  tuple, args included, and never what it returns; args holding a closure or
+  an `ExAtlas.Secret` are refused.
   `config :ex_atlas, :orchestrator, respawn_credentials:` serves a record
   with no tuple. No resolver, another return, a raise, an exit, or no answer
   within `respawn_credentials_timeout_ms` (default 30,000) broadcasts
