@@ -77,6 +77,24 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
   end
 
+  # #124 keys the adoption outcome by the Reaper's parent supervisor, read from
+  # `$ancestors`. Under the host-started tree that parent is this module.
+  test "a Reaper that crashes after adoption restarts under this supervisor and reaps",
+       %{database: db} do
+    boot(db)
+    reaper = Process.whereis(Reaper)
+    ref = Process.monitor(reaper)
+    Process.exit(reaper, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^reaper, :killed}, 2_000
+
+    restarted = await_restart(reaper)
+    assert {:ok, orphan} = spawn_untracked()
+    :ok = tick()
+
+    assert restarted != reaper
+    assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+  end
+
   test "a row that will not decode adopts nothing and reaps nothing that boot",
        %{database: db} do
     with_repo(db, fn ->
@@ -233,6 +251,17 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
 
       _already_finished ->
         :ok
+    end
+  end
+
+  defp await_restart(old, tries \\ 200) do
+    case Process.whereis(Reaper) do
+      pid when is_pid(pid) and pid != old ->
+        pid
+
+      _not_yet when tries > 0 ->
+        Process.sleep(5)
+        await_restart(old, tries - 1)
     end
   end
 
