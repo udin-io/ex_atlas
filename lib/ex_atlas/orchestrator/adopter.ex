@@ -189,9 +189,34 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   defp adopt(record, owner, store) do
     cond do
-      not TrackingStore.readable?(record.v) -> skip(record, "unknown schema version #{record.v}")
-      record.mode != :task -> skip(record, "mode #{inspect(record.mode)} is not adoptable")
-      true -> adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
+      not TrackingStore.readable?(record.v) ->
+        skip(
+          record,
+          "unknown schema version #{record.v} " <>
+            "(this build understands versions 1 to #{TrackingStore.version()})"
+        )
+
+      record.mode != :task ->
+        skip(record, "mode #{inspect(record.mode)} is not adoptable")
+
+      true ->
+        warn_stored_endpoint(record)
+        adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
+    end
+  end
+
+  # Names the keys alone: their values came from the store's writer.
+  defp warn_stored_endpoint(record) do
+    case TrackingStore.stored_endpoint_opts(record) do
+      [] ->
+        :ok
+
+      keys ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Adopter] adopting #{inspect(record.id)} without its stored " <>
+            "#{Enum.map_join(keys, ", ", &inspect/1)}: an adopted task calls its provider " <>
+            "where config :ex_atlas, #{inspect(record.provider)} points."
+        )
     end
   end
 
@@ -217,9 +242,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # same app than to be junk.
   defp skip(record, why) do
     Logger.warning(
-      "[ExAtlas.Orchestrator.Adopter] not adopting #{Map.get(record, :id, "?")}: #{why} " <>
-        "(this build understands versions 1 to #{TrackingStore.version()}). The record is kept " <>
-        "so the Reaper still treats the resource as ours."
+      "[ExAtlas.Orchestrator.Adopter] not adopting #{Map.get(record, :id, "?")}: #{why}. " <>
+        "The record is kept so the Reaper still treats the resource as ours."
     )
   end
 

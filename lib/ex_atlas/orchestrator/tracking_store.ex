@@ -371,24 +371,40 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   end
 
   @doc """
-  `record` with its `:env` values left out, as `scrub_opts/1` leaves them.
+  `record` with its `:env` values, `:base_url` and `:req_options` left out, as
+  `scrub_opts/1` leaves them.
 
-  A record written before env values were left out still holds them; every
-  rewrite of it goes through here, so no write lays them down again.
+  A record written before these rules still holds them; every rewrite of it
+  goes through here, so no write lays them down again.
   """
   @spec scrub_record(record()) :: record()
   def scrub_record(%{opts: opts} = record) do
+    opts = Keyword.drop(opts, @endpoint_opts)
     %{record | opts: put_env(opts, Keyword.get(opts, :env), :env in configured_scrub_keys())}
   end
 
   @doc """
-  The opts to re-observe an adopted record with.
+  The opts an adopted record is observed and tracked with.
 
-  The provider comes back from the record — `:api_key` was scrubbed, so it is
-  re-resolved from application config, exactly as a fresh spawn resolves it.
+  The provider comes back from the record. `:api_key`, `:base_url` and
+  `:req_options` come from application config, exactly as a fresh spawn
+  without them resolves them: a record written before `scrub_opts/1` left the
+  last two out still holds them, and whoever wrote the store chose them.
   """
   @spec observe_opts(record()) :: keyword()
-  def observe_opts(record), do: Keyword.put_new(record.opts, :provider, record.provider)
+  def observe_opts(record) do
+    record.opts
+    |> Keyword.drop(@endpoint_opts)
+    |> Keyword.put_new(:provider, record.provider)
+  end
+
+  @doc """
+  The `#{inspect(@endpoint_opts)}` keys `record` holds a value for, which
+  `observe_opts/1` leaves out.
+  """
+  @spec stored_endpoint_opts(record()) :: [atom()]
+  def stored_endpoint_opts(%{opts: opts}),
+    do: Enum.filter(@endpoint_opts, &(Keyword.get(opts, &1) != nil))
 
   # `scrub_keys: [:s3]` keeps the marker alone, never nothing: a record with no
   # `s3:` would let an adopted task respawn with no staging at all.

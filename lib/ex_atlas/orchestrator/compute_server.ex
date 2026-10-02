@@ -547,7 +547,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Process.flag(:trap_exit, true)
 
     %{compute: compute} = record
-    opts = record.opts |> adopted_staging() |> adopted_resolver(record.id)
+
+    opts =
+      record |> TrackingStore.observe_opts() |> adopted_staging() |> adopted_resolver(record.id)
 
     tracking =
       opts |> Keyword.take(@option_keys) |> bound_timers() |> NimbleOptions.validate!(@schema)
