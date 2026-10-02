@@ -171,6 +171,38 @@ so a restart adopts the task as claim-bearing. The
 tracker repeats the test for a claim-less report already in its mailbox. A task
 that 0.8.0 itself respawned keeps two claim-less pods, which risk 49 records.
 
+A node can die after the provider rents the replacement and before
+`carry_record/3` moves the record to it (#114, risk 51). So the respawn first
+writes `respawning: n` into the old record. The next boot's tracker counts
+attempt `n` as spent and registers `:none`, which matches no token, until its
+own respawn registers `n + 1`. It logs a warning naming the pod name; the
+Reaper deletes the orphan, which no record names.
+
+```mermaid
+sequenceDiagram
+  participant CS as ComputeServer, boot 1
+  participant St as TrackingStore
+  participant P as Provider
+  participant B as Pod B, orphan, attempt 1
+  participant CS2 as ComputeServer, adopted
+  participant C as Pod C, attempt 2
+  participant Cb as Callback.ingest/3
+  P-->>CS: pod A preempted
+  CS->>St: record A gets respawning 1
+  CS->>P: spawn_compute, attempt 1
+  P-->>B: rented
+  Note over CS: node dies before carry_record
+  St-->>CS2: record A, respawns 0, respawning 1
+  Note over CS2: respawns 1, Registry value :none
+  B->>Cb: POST /finish, attempt 1
+  Cb-->>B: 410
+  CS2->>P: spawn_compute, attempt 2
+  P-->>C: rented
+  CS2->>St: record C, respawns 2, respawning nil
+  C->>Cb: POST /finish, attempt 2
+  Cb->>CS2: accepted
+```
+
 ## What a cost cap does
 
 1. `spawn/1` refuses a provider that reports no price: it deletes the pod and
