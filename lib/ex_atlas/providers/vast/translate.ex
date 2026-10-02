@@ -14,6 +14,8 @@ defmodule ExAtlas.Providers.Vast.Translate do
   """
 
   alias ExAtlas.{Error, Secret, Spec}
+  alias ExAtlas.Providers.Shell
+  alias ExAtlas.Providers.Vast.Client
 
   @default_disk_gb 20
   @ports_var "ATLAS_PORTS"
@@ -34,6 +36,14 @@ defmodule ExAtlas.Providers.Vast.Translate do
                ssh_host ssh_port disk_space is_bid)
 
   @env_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
+
+  # Vast injects `CONTAINER_ID` and `CONTAINER_API_KEY`, a key that can only
+  # start, stop or destroy this instance, into every container. The id is
+  # read at run time: it exists only after the rent answers.
+  @self_delete Shell.delete_request(
+                 "#{Client.base_url()}/api/v0/instances/$CONTAINER_ID/",
+                 "CONTAINER_API_KEY"
+               )
 
   @typedoc """
   What a rent needs from the request alone: the `env` object, its values as
@@ -136,10 +146,13 @@ defmodule ExAtlas.Providers.Vast.Translate do
   The `PUT /api/v0/asks/{id}/` body. `env` values stay `ExAtlas.Secret`s
   until `Vast.Client.put/4` encodes them.
 
-  `runtype: "args"` with no `args` runs the image's own entrypoint; `ssh`
-  would replace it with Vast's SSH setup. `cancel_unavail: true` makes Vast
-  refuse an offer it cannot start now, rather than create a stopped instance
-  that bills its disk.
+  `runtype: "args"` runs the image's own entrypoint, with `args` as its
+  arguments; `ssh` would replace it with Vast's SSH setup. `args` is
+  `:command`, wrapped in `sh -c` with a trap that deletes the instance when it
+  ends (see `ExAtlas.Spec.ComputeRequest`); no `:command` sends no `args`, so
+  the image's own command runs. `cancel_unavail: true` makes Vast refuse an
+  offer it cannot start now, rather than create a stopped instance that bills
+  its disk.
   """
   @spec launch_body(Spec.ComputeRequest.t(), parts()) :: map()
   def launch_body(%Spec.ComputeRequest{} = request, parts) do
@@ -149,6 +162,7 @@ defmodule ExAtlas.Providers.Vast.Translate do
       "disk" => disk_gb(request),
       "runtype" => "args",
       "env" => parts.env,
+      "args" => Shell.start_command(request, @self_delete),
       "cancel_unavail" => true
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)

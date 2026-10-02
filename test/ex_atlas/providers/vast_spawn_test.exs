@@ -5,10 +5,13 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
   import ExAtlas.Test.FakeVast
 
+  alias ExAtlas.Test.CurlShim
+
   @bundles "/api/v0/bundles"
 
   # Distinctive, so a `refute =~` cannot pass on a common substring.
   @hf_token "hf-probe-7c1d9e"
+  @container_key "vast-instance-key-4b8e2a"
 
   setup do
     bypass = Bypass.open()
@@ -264,12 +267,212 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
   end
 
+  describe "spawn_compute/1 command:" do
+    setup do
+      previous = Application.get_env(:ex_atlas, :callback)
+
+      Application.put_env(:ex_atlas, :callback,
+        secret: ExAtlas.Test.Orchestrator.callback_secret()
+      )
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ex_atlas, :callback, previous),
+          else: Application.delete_env(:ex_atlas, :callback)
+      end)
+
+      {:ok, prepared} = ExAtlas.Callback.prepare(callback: "https://app.example.com/atlas/cb")
+      {:ok, callback: prepared[:callback]}
+    end
+
+    # Rents with `extra` and returns the rent body Vast received.
+    defp rent_body(bypass, opts, extra) do
+      expect_search(bypass, [offer()])
+      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+
+      assert {:ok, _} = rent_spawn(opts, extra)
+      assert_received {:rent, _, body}
+      body
+    end
+
+    # What Vast injects into every container (docs.vast.ai, "Docker
+    # Execution Environment").
+    defp vast_env, do: [{"CONTAINER_ID", "28411907"}, {"CONTAINER_API_KEY", @container_key}]
+
+    test "self_terminate: true sends args that run the command under sh -c", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      body = rent_body(bypass, opts, command: ["python", "train.py"])
+
+      assert body["runtype"] == "args"
+      assert ["sh", "-c", script] = body["args"]
+      assert script =~ "trap atlas_self_terminate EXIT INT TERM; 'python' 'train.py'"
+      refute Map.has_key?(body, "onstart")
+    end
+
+    @tag :tmp_dir
+    test "the wrapper deletes the instance by its CONTAINER_ID on exit 0", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp
+    } do
+      body = rent_body(bypass, opts, command: ["sh", "-c", "echo ran > #{tmp}/ran"])
+
+      assert {0, log, config} = CurlShim.run(body["args"], tmp, vast_env())
+
+      assert File.read!(Path.join(tmp, "ran")) == "ran\n"
+      assert log =~ "-X DELETE"
+      assert log =~ "https://console.vast.ai/api/v0/instances/28411907/"
+      # A hung DELETE must not hold the instance, and its bill, open for ever.
+      assert log =~ "-m 30"
+      assert config == ~s(header = "Authorization: Bearer #{@container_key}"\n)
+    end
+
+    @tag :tmp_dir
+    test "the wrapper deletes the instance when the command exits 1", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp
+    } do
+      body = rent_body(bypass, opts, command: ["sh", "-c", "exit 1"])
+
+      assert {1, log, _config} = CurlShim.run(body["args"], tmp, vast_env())
+      assert log =~ "-X DELETE https://console.vast.ai/api/v0/instances/28411907/"
+    end
+
+    # The shell outlives a command a signal killed, so its EXIT trap runs. A
+    # TERM sent to the shell alone (`docker stop`) waits for the command.
+    @tag :tmp_dir
+    test "the wrapper deletes the instance when SIGTERM kills the command", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp
+    } do
+      body = rent_body(bypass, opts, command: ["sh", "-c", "kill -TERM $$; sleep 5"])
+
+      assert {143, log, _config} = CurlShim.run(body["args"], tmp, vast_env())
+      assert log =~ "-X DELETE https://console.vast.ai/api/v0/instances/28411907/"
+    end
+
+    @tag :tmp_dir
+    test "no argv carries the instance key or the callback token", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp,
+      callback: callback
+    } do
+      body = rent_body(bypass, opts, command: ["true"], callback: callback)
+      token = body["env"]["ATLAS_CALLBACK_TOKEN"]
+      env = vast_env() ++ [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"}]
+
+      assert {0, log, config} =
+               CurlShim.run(body["args"], tmp, [{"ATLAS_CALLBACK_TOKEN", token} | env])
+
+      # Control: both credentials reached curl, on stdin.
+      assert config =~ "Bearer #{@container_key}"
+      assert config =~ "Bearer #{token}"
+      refute log =~ @container_key
+      refute log =~ token
+      refute Enum.join(body["args"]) =~ token
+    end
+
+    @tag :tmp_dir
+    test "with a callback the finish report goes first, then the delete", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp,
+      callback: callback
+    } do
+      body = rent_body(bypass, opts, command: ["sh", "-c", "exit 3"], callback: callback)
+      env = [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"} | vast_env()]
+
+      assert {3, log, _config} = CurlShim.run(body["args"], tmp, env)
+
+      assert [finish, delete] = String.split(log, "\n", trim: true)
+      assert finish =~ ~s({"exit_code":3})
+      assert finish =~ "https://app.example.com/atlas/cb/finish"
+      assert delete =~ "-X DELETE"
+    end
+
+    @tag :tmp_dir
+    test "a callback host that is down cannot stop the delete", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp,
+      callback: callback
+    } do
+      body = rent_body(bypass, opts, command: ["true"], callback: callback)
+      CurlShim.install(tmp, 7)
+      env = [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"} | vast_env()]
+
+      assert {0, log, _config} = CurlShim.run(body["args"], tmp, env)
+      assert log =~ "/finish"
+      assert log =~ "-X DELETE"
+    end
+
+    test "self_terminate: false sends the command as args, unwrapped", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      body =
+        rent_body(bypass, opts, command: ["python", "train.py", "it's"], self_terminate: false)
+
+      assert body["args"] == ["python", "train.py", "it's"]
+    end
+
+    @tag :tmp_dir
+    test "self_terminate: false with a callback reports and does not delete", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp,
+      callback: callback
+    } do
+      body =
+        rent_body(bypass, opts, command: ["true"], self_terminate: false, callback: callback)
+
+      env = [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"} | vast_env()]
+
+      assert {0, log, _config} = CurlShim.run(body["args"], tmp, env)
+      assert log =~ ~s({"exit_code":0})
+      refute log =~ "-X DELETE"
+    end
+
+    test "an empty command sends no args, so the image's own command runs", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      body = rent_body(bypass, opts, command: [])
+      refute Map.has_key?(body, "args")
+    end
+
+    @tag :tmp_dir
+    test "command arguments survive the wrapper intact", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp
+    } do
+      arg = "it's a $PATH; rm -rf / `id`"
+
+      body =
+        rent_body(bypass, opts,
+          command: ["sh", "-c", "printf '%s' \"$1\" > #{tmp}/arg", "sh", arg]
+        )
+
+      assert {0, _log, _config} = CurlShim.run(body["args"], tmp, vast_env())
+      assert File.read!(Path.join(tmp, "arg")) == arg
+    end
+
+    test "Vast lists :self_terminate among its capabilities" do
+      assert :self_terminate in ExAtlas.Providers.Vast.capabilities()
+    end
+  end
+
   describe "spawn_compute/1 refusals before any request" do
-    test "command:, spot: true, template_id and network_volume_id are :unsupported", %{
+    test "spot: true, template_id and network_volume_id are :unsupported", %{
       opts: opts
     } do
       for extra <- [
-            [command: ["python", "train.py"]],
             [spot: true],
             [template_id: "tpl_1"],
             [network_volume_id: "vol_1"]
@@ -529,6 +732,93 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
       assert {:error, %ExAtlas.Error{status: 408}} = rent_spawn(opts)
       assert rent_ids() == ["1"]
+    end
+  end
+
+  # A command can hold a value its caller wants kept, as an env value can.
+  # Each rent failure below echoes the whole request back; none may reach the
+  # error. The env tests above cover the same paths for `env`.
+  describe "spawn_compute/1 rent failures with a command" do
+    @command_marker "cmd-probe-91f3aa"
+
+    setup %{bypass: bypass} do
+      expect_search(bypass, [offer(%{"id" => 1})])
+      {:ok, command: ["python", "train.py", "--token", @command_marker]}
+    end
+
+    # Answers the rent with `respond`, after sending the args it got to the test.
+    defp echo_rent(bypass, respond) do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "PUT", "/api/v0/asks/1", fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:args, body["args"]})
+        respond.(conn, Jason.encode!(body))
+      end)
+    end
+
+    defp assert_withheld(error) do
+      # Control: the marker went to Vast, so each refute below can fail.
+      assert_received {:args, ["sh", "-c", script]}
+      assert script =~ @command_marker
+
+      refute inspect(error) =~ @command_marker
+      refute inspect(error, structs: false) =~ @command_marker
+      refute Exception.message(error) =~ @command_marker
+    end
+
+    test "a refusal whose msg echoes the request", %{bypass: bypass, opts: opts, command: cmd} do
+      echo_rent(bypass, fn conn, echo -> json(conn, 400, refused("invalid_args", echo)) end)
+
+      assert {:error, %ExAtlas.Error{status: 400} = error} = rent_spawn(opts, command: cmd)
+      assert_withheld(error)
+    end
+
+    test "a 500 whose error field is the request", %{bypass: bypass, opts: opts, command: cmd} do
+      echo_rent(bypass, fn conn, echo -> json(conn, 500, refused(echo, "x")) end)
+
+      assert {:error, %ExAtlas.Error{status: 500} = error} = rent_spawn(opts, command: cmd)
+      assert_withheld(error)
+    end
+
+    test "a 200 with no new_contract that echoes the request", %{
+      bypass: bypass,
+      opts: opts,
+      command: cmd
+    } do
+      echo_rent(bypass, fn conn, echo -> json(conn, 200, %{"success" => false, "msg" => echo}) end)
+
+      assert {:error, %ExAtlas.Error{} = error} = rent_spawn(opts, command: cmd)
+      assert_withheld(error)
+    end
+
+    test "a body that is not JSON", %{bypass: bypass, opts: opts, command: cmd} do
+      echo_rent(bypass, fn conn, echo ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(400, ~s({"msg":) <> echo)
+      end)
+
+      assert {:error, %ExAtlas.Error{} = error} = rent_spawn(opts, command: cmd)
+      assert_withheld(error)
+    end
+
+    test "a redirect is not followed: the command goes to no other host", %{
+      bypass: bypass,
+      opts: opts,
+      command: cmd
+    } do
+      elsewhere = Bypass.open()
+      Bypass.down(elsewhere)
+
+      echo_rent(bypass, fn conn, _echo ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.resp(307, "")
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 307} = error} = rent_spawn(opts, command: cmd)
+      assert_withheld(error)
     end
   end
 

@@ -33,8 +33,16 @@ defmodule ExAtlas.Providers.Vast do
   `http://<public ip>:<host port>`. The URL is `nil` until Vast reports the
   mapping.
 
-  Not yet on Vast: `:command`, `spot: true`, `:template_id` and
-  `:network_volume_id` are `:unsupported`, and so are `stop/2` and `start/2`.
+  `:command` goes to the image's entrypoint as Vast's `args`. With the default
+  `self_terminate: true` it runs under `sh -c` with a trap that deletes the
+  instance when the command ends, with the `CONTAINER_ID` and
+  `CONTAINER_API_KEY` Vast puts in every container, so
+  `ExAtlas.Orchestrator.run_task/1` ends when the instance is gone. The image
+  needs `sh` and `curl`, and an ENTRYPOINT, if any, that runs its arguments
+  (`exec "$@"`).
+
+  Not yet on Vast: `spot: true`, `:template_id` and `:network_volume_id` are
+  `:unsupported`, and so are `stop/2` and `start/2`.
   """
 
   @behaviour ExAtlas.Provider
@@ -46,7 +54,7 @@ defmodule ExAtlas.Providers.Vast do
   @bundles "/api/v0/bundles/"
 
   @impl true
-  def capabilities, do: [:raw_tcp]
+  def capabilities, do: [:raw_tcp, :self_terminate]
 
   @impl true
   def spawn_compute(%Spec.ComputeRequest{} = request, ctx) do
@@ -128,7 +136,6 @@ defmodule ExAtlas.Providers.Vast do
   defp check_supported(%Spec.ComputeRequest{} = request) do
     unsupported =
       [
-        command: request.command not in [nil, []],
         spot: request.spot,
         template_id: request.template_id != nil,
         network_volume_id: request.network_volume_id != nil
