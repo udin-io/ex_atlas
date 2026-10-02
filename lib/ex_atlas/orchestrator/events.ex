@@ -17,7 +17,9 @@ defmodule ExAtlas.Orchestrator.Events do
     * `{:heartbeat, now}` — idle ttl ticked over.
     * `{:poll_failed, error}` — a status poll could not reach the provider (or
       could not make sense of the answer). The resource is *not* presumed dead;
-      the poller backs off and tries again.
+      the poller backs off and tries again. A provider that raised gives
+      `{:crashed, exception_module, stacktrace}`, whose frames carry arities,
+      never arguments: an argument can be the revealed API key.
     * `{:respawned, new_id}` — a preempted resource was replaced. Sent on the
       **old** id's topic so a subscriber can follow the session, then subscribe
       to `topic(new_id)`. It carries the id alone; the replacement's URL and
@@ -54,7 +56,8 @@ defmodule ExAtlas.Orchestrator.Events do
       estimate, `b` the bill, `s` the session's spend after: the bill raised
       it when `b > e`, and nothing changed otherwise.
     * `{:spend_reconcile_failed, error}` — reading the bill failed, timed out
-      or crashed. Nothing changed; it is read again at the next interval. A
+      or crashed (a crash is `{:crashed, exception_module, stacktrace}`, as for
+      `:poll_failed`). Nothing changed; it is read again at the next interval. A
       provider with no billing API sends neither event.
     * `{:terminating, reason}` — server is shutting down. `reason` is
       `{:shutdown, :stopped}` after `ExAtlas.Orchestrator.stop_tracked/1`,

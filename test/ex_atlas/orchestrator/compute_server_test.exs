@@ -262,6 +262,22 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  # The Mock, but a status poll and a billing read reveal the key and then
+  # crash in a frame that takes it: a provider bug after the HTTP client
+  # read the key.
+  defmodule RevealCrashProvider do
+    alias ExAtlas.Providers.Mock
+
+    def capabilities, do: Mock.capabilities()
+    defdelegate spawn_compute(req, ctx), to: Mock
+    defdelegate terminate(id, ctx), to: Mock
+
+    def get_compute(_id, ctx), do: send_with(ExAtlas.Secret.reveal(ctx.api_key))
+    def compute_spend(_id, _opts, ctx), do: send_with(ExAtlas.Secret.reveal(ctx.api_key))
+
+    defp send_with(:never), do: :ok
+  end
+
   describe "credentials beyond the State line" do
     @api_key "sk-tracker-probe-7a3e"
 
@@ -319,6 +335,60 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert log =~ compute.id
       refute log =~ @api_key
       refute log =~ header_secret
+    end
+
+    # Runs `fun` under capture_log and returns the log and the event `fun` got.
+    defp crash_event(fun) do
+      log = ExUnit.CaptureLog.capture_log(fn -> send(self(), {:event, fun.()}) end)
+      assert_received {:event, event}
+      {log, event}
+    end
+
+    test "a provider crash in a status poll prints no key in the log or the event" do
+      {:ok, _pid, compute} =
+        spawn_tracked(provider: RevealCrashProvider, api_key: @api_key, status_poll_ms: 20)
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      {log, reason} =
+        crash_event(fn ->
+          assert_receive {:atlas_compute, ^id, {:poll_failed, reason}}, 2_000
+          reason
+        end)
+
+      # The task's crash was logged and reported, so the refutes are not vacuous.
+      assert log =~ "send_with"
+      assert inspect(reason) =~ "send_with"
+      refute log =~ @api_key
+      refute inspect(reason) =~ @api_key
+      refute :erlang.term_to_binary(reason) =~ @api_key
+    end
+
+    test "a provider crash in a billing read prints no key in the log or the event" do
+      {:ok, _pid, compute} =
+        spawn_tracked(
+          provider: RevealCrashProvider,
+          api_key: @api_key,
+          max_cost: 1,
+          reconcile_spend_ms: 20,
+          provider_opts: %{cost_per_hour: 0.36}
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      {log, reason} =
+        crash_event(fn ->
+          assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, reason}}, 2_000
+          reason
+        end)
+
+      assert log =~ "send_with"
+      assert inspect(reason) =~ "send_with"
+      refute log =~ @api_key
+      refute inspect(reason) =~ @api_key
+      refute :erlang.term_to_binary(reason) =~ @api_key
     end
 
     test "control: the tracker's polls still hand the per-call key to the provider" do
