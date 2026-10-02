@@ -7,6 +7,37 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: keep tracking records in your database (#120)
+
+`ExAtlas.Orchestrator.TrackingStore.Ecto` stores `persist: true` records in a
+table of the host's Ecto repo, so a task survives a deploy on a machine with no
+volume. `ExAtlas.Orchestrator.Supervisor` starts the orchestrator in the host's
+tree, after the repo.
+
+```elixir
+config :ex_atlas, start_orchestrator: false
+config :ex_atlas, :orchestrator,
+  tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto, repo: MyApp.Repo
+
+children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
+# after a deploy on a machine with no volume
+ExAtlas.Orchestrator.list_ids()
+# => ["pod-abc"]   (before: [] and the Reaper deleted the pod)
+```
+
+- `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up/1` creates
+  `atlas_tracking_records`; call it from a migration. `ecto_sql` is an
+  optional dependency.
+- A row that will not decode safely makes the boot adopt nothing and reap
+  nothing, as an unreadable DETS file does.
+- `ExAtlas.Orchestrator.Supervisor` refuses to start when
+  `start_orchestrator: true` is also set.
+- The orchestrator's functions now check that its tree is running, not the
+  `start_orchestrator` flag. The "not started" error names both ways to start
+  it.
+- A tracker whose tracking store raises (a database that is down, a row that
+  will not decode) logs it and runs on. Before, it crashed and deleted its pod.
+
 ### Fixed: a respawn the Reaper cannot clean up warns, and a revived pod reports (#118)
 
 A spawn with `on_failure: {:respawn, n}` on a provider outside

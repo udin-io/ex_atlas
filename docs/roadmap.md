@@ -1,8 +1,8 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #117 (#116, Vast.ai
-`stop/2`, `start/2` and `compute_spend/3`). It feeds the choice of the next
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #123 (#120, the
+Ecto tracking store, slice 1). It feeds the choice of the next
 feature. Dates are merge dates.
 
 ## Next
@@ -27,7 +27,7 @@ serverless, and SSH and Jupyter modes stay out of scope.
 
 | Feature | Ticket | State |
 |---|---|---|
-| A respawning task warns when no Reaper covers its provider, and an adopted task's revived pod reports again (risk 51) | #118 | PR #119 open |
+| Database tracking store, slice 1: `TrackingStore.Ecto`, its migration module and `ExAtlas.Orchestrator.Supervisor` | #120 | PR #123 open |
 | Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag; no `v0.8.0` tag exists yet, and the Vast.ai entries sit under `CHANGELOG.md`'s Unreleased |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;

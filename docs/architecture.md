@@ -46,6 +46,8 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.Timer` | Constants | `max_ms/0` (4,294,967,295) and `option_type/0` for every timer option |
 | `Orchestrator.Events` | Functions | PubSub broadcasts `{:atlas_compute, id, event}` |
 | `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`. Default `TrackingStore.Dets` |
+| `Orchestrator.TrackingStore.Ecto` | Functions, no process | Records as `term_to_binary` blobs in the host repo's `atlas_tracking_records`, decoded with `[:safe]`. `Ecto.Migration` creates the table |
+| `Orchestrator.Supervisor` | `Supervisor` | The orchestrator's tree for a host to start after its repo; `children/0` is the one child list |
 | `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper |
 | `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
@@ -53,9 +55,76 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.ComputeRegistry`, `ComputeSupervisor` | `Registry`, `DynamicSupervisor` | Look up and supervise trackers |
 | `Callback` | Functions | Routes a pod's report into a tracker through the `Registry` |
 
-Start order (`ExAtlas.Application.orchestrator_children/0`): the tracking
+Start order (`ExAtlas.Orchestrator.Supervisor.children/0`): the tracking
 store, `ComputeRegistry`, the `Task.Supervisor` for polls, `ComputeSupervisor`,
 `Callback.Limiter`, `Phoenix.PubSub` (when loaded), `Reaper`, `Adopter`.
+`start_orchestrator: true` starts that list in ExAtlas's own application;
+`ExAtlas.Orchestrator.Supervisor` starts it in the host's tree instead.
+
+## The orchestrator started after the host's repo
+
+A store in the host's database (`TrackingStore.Ecto`, #120) is readable only
+once the host's repo runs, and ExAtlas's application boots before the host's.
+So the host sets `start_orchestrator: false` and starts
+`ExAtlas.Orchestrator.Supervisor` after its repo:
+
+```mermaid
+sequenceDiagram
+  participant Host as MyApp.Application
+  participant Repo as MyApp.Repo
+  participant Sup as ExAtlas.Orchestrator.Supervisor
+  participant Store as TrackingStore.Ecto
+  participant Adopter as Adopter
+  participant Reaper as Reaper
+  Host->>Repo: start (child 1)
+  Host->>Sup: start (child 2), refuses when start_orchestrator is true
+  Sup->>Store: start_link, raises ArgumentError when repo is unset
+  Sup->>Reaper: start gated
+  Sup->>Adopter: run
+  Adopter->>Store: all()
+  Store->>Repo: SELECT id, record FROM atlas_tracking_records
+  Repo-->>Store: rows
+  Store-->>Adopter: ok with records, or error when a row will not decode
+  Adopter->>Reaper: adoption_complete, or adoption_failed
+  Note over Host,Reaper: Shutdown runs in reverse, so the trackers stop while the Repo is up and persisted rows stay
+```
+
+```mermaid
+classDiagram
+  class TrackingStore {
+    <<behaviour>>
+    put(record) ok
+    get(id) ok or error
+    delete(id) ok
+    all() ok or error
+  }
+  class Ecto {
+    start_link(opts) ignore
+    get(id) raises on a row that will not decode
+    record column holds term_to_binary
+  }
+  class Migration {
+    up(opts)
+    down(opts)
+    creates atlas_tracking_records
+  }
+  class Supervisor {
+    start_link(opts)
+    children()
+  }
+  class Application {
+    orchestrator_children()
+  }
+  class Dets
+  TrackingStore <|.. Ecto
+  TrackingStore <|.. Dets
+  Ecto ..> Migration : reads the table it creates
+  Application ..> Supervisor : children() when start_orchestrator is true
+```
+
+When the store cannot answer, nothing is reaped: `all/0` returns an error and
+the Adopter sends `adoption_failed`; `get/1` raises and the Reaper treats the
+pod as ours; a tracker logs the raise and keeps its pod.
 
 ## The orchestrator at runtime
 
@@ -63,7 +132,7 @@ store, `ComputeRegistry`, the `Task.Supervisor` for polls, `ComputeSupervisor`,
 flowchart TD
   host["Host app"] -->|"spawn/1, run_task/1"| orc["Orchestrator"]
   orc -->|"ExAtlas.spawn_compute/1"| prov["Provider (RunPod, Lambda Labs)"]
-  orc -->|"persist: true"| store[("TrackingStore")]
+  orc -->|"persist: true"| store[("TrackingStore<br/>DETS file or host repo")]
   orc -->|"start tracker"| cs["ComputeServer"]
   cs -->|"status poll"| us["UpstreamStatus"]
   us --> prov
