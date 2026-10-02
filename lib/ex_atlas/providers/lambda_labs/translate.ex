@@ -310,10 +310,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
     # Values reach `docker` through its environment, never its argv, so `ps`
     # on the instance shows names only. The script finds docker and waits for
-    # its daemon first, then exports the values in a subshell that only runs
-    # `docker run`, so a container `PATH` cannot hide docker. `DOCKER_BIN`
-    # falls under the refused `DOCKER_` names. No `set -x`: cloud-init logs
-    # the script's output.
+    # its daemon before it exports the values, so a container `PATH` cannot
+    # hide docker; `DOCKER_BIN` falls under the refused `DOCKER_` names. No
+    # `set -x`: cloud-init logs the script's output.
     script =
       IO.iodata_to_binary([
         "#!/bin/bash\n",
@@ -321,13 +320,12 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         "DOCKER_BIN=$(command -v docker)\n",
         "for _ in $(seq 1 #{@docker_wait_tries}); do ",
         "\"$DOCKER_BIN\" info >/dev/null 2>&1 && break; sleep 2; done\n",
-        "(\n",
         exports,
         "exec \"$DOCKER_BIN\" run --detach --name atlas --gpus all --restart no",
         flags,
         " ",
         shell_quote(image),
-        "\n)\n"
+        "\n"
       ])
 
     if byte_size(script) > @max_user_data_bytes do
