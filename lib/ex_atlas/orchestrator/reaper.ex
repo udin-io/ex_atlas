@@ -113,9 +113,14 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   require Logger
 
+  alias ExAtlas.Config
   alias ExAtlas.Orchestrator.{ComputeRegistry, Ownership, TrackingStore}
 
   @default_interval_ms 60 * 1_000
+
+  # `:vast` stays out: a Vast label is free text a user types in Vast's
+  # console, so the `atlas-` marker can match an instance ExAtlas never rented.
+  @default_providers [:runpod]
 
   # A pod that is still booting bills too. Runpod v1's `desiredStatus=RUNNING`
   # filter included booting pods; v2's `status` splits them out.
@@ -313,11 +318,31 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
     %{
       interval: interval,
-      providers: Keyword.get(cfg, :reap_providers, [:runpod]),
+      providers: providers(),
       prefix: Ownership.prefix(),
       grace_ms: Keyword.get(cfg, :reap_grace_ms, interval)
     }
   end
+
+  @doc """
+  Whether a periodic Reaper reclaims `provider`'s orphans: whether it is in
+  `:reap_providers`, by atom or by module.
+  """
+  @spec covers?(atom() | module()) :: boolean()
+  def covers?(provider) do
+    module = provider_module(provider)
+    Enum.any?(providers(), &(provider_module(&1) == module))
+  end
+
+  defp providers do
+    :ex_atlas
+    |> Application.get_env(:orchestrator, [])
+    |> Keyword.get(:reap_providers, @default_providers)
+  end
+
+  # No raise: an unknown name in `:reap_providers` is the Reaper's to report
+  # on its tick, not a spawn's.
+  defp provider_module(provider), do: Map.get(Config.builtin_providers(), provider, provider)
 
   # Returns the ids left alone so far, so a periodic Reaper logs each one once
   # per boot rather than once per tick.
