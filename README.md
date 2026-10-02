@@ -1134,7 +1134,8 @@ trap atlas_self_terminate EXIT INT TERM
 /app/train.sh --epochs 3
 ```
 
-The key reaches curl on stdin, so no `ps` in the container shows it. On Vast
+The key reaches curl on stdin, so no `ps` in the container shows it, and the
+script sends nothing unless the id and key are plain tokens. On Vast
 the same wrapper deletes `https://console.vast.ai/api/v0/instances/$CONTAINER_ID/`
 with `$CONTAINER_API_KEY`.
 

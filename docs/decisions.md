@@ -23,6 +23,7 @@ names the PR or issue that holds the reasoning.
 | One trap wrapper in `Providers.Shell` for RunPod and Vast | A Vast-only script: the two would fail differently | #105 |
 | The container's DELETE reads `$CONTAINER_ID` and calls `console.vast.ai` | The instance id in the body, which exists only after the rent answers; the configured `base_url`, a test or proxy host the container would send its key to | #105 |
 | Curl reads the Bearer header from stdin (`-K -`), written by the `printf` builtin | `-H` on argv, which `ps` shows to every process in the container | #105 |
+| The wrapper checks the id (`[A-Za-z0-9_-]`) and each key or token (`[A-Za-z0-9._-]`) before it sends, and skips the request otherwise | Escape the value into curl's config syntax: one missed character class sets any curl option | #105 |
 | A SIGTERM to the wrapper's shell waits for the command, as `sh` does | Run the command in the background and forward the signal: a RunPod spot stop would then report an exit code, and read as a failed task, not a preemption to respawn | #105 |
 
 ## Docs build (#92)

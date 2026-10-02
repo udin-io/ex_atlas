@@ -28,6 +28,8 @@ config :ex_atlas, :orchestrator, reap_providers: [:runpod, :vast]
   `callback:`'s exit code first, then DELETEs
   `/api/v0/instances/$CONTAINER_ID/` with `$CONTAINER_API_KEY`.
 - `self_terminate: false` sends the command unwrapped.
+- `CONTAINER_ID` and `CONTAINER_API_KEY` in `env:`, and a `command:` argument
+  with a NUL byte or not UTF-8, are `:validation`.
 - `capabilities/0` adds `:self_terminate`.
 - The image needs `sh`, `curl`, and an ENTRYPOINT, if any, that runs its
   arguments.
@@ -37,7 +39,9 @@ config :ex_atlas, :orchestrator, reap_providers: [:runpod, :vast]
 RunPod's and Vast's wrapper gave curl the pod key and the callback token as
 `-H` arguments, which every process in the container reads in `ps`. Curl now
 reads each header from a `-K -` config line on stdin, written by the
-`printf` builtin.
+`printf` builtin. The wrapper sends nothing when the resource id, the key or
+the callback token is not a plain token: a newline there would have set any
+curl option.
 
 ### Added: Vast.ai compute provider, on-demand (#99)
 
