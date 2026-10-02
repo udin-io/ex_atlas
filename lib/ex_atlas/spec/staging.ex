@@ -122,10 +122,13 @@ defmodule ExAtlas.Spec.Staging do
   # --- validation ---
 
   defp fields(input) do
-    pairs = Enum.to_list(input)
+    pairs = if is_map(input), do: Map.to_list(input), else: input
 
     cond do
-      not Enum.all?(pairs, &match?({key, _} when is_atom(key), &1)) ->
+      not proper_pairs?(pairs) ->
+        error("expected a map or a keyword list")
+
+      not Enum.all?(pairs, fn {key, _} -> is_atom(key) end) ->
         error("keys must be atoms")
 
       unknown = Enum.find(pairs, fn {key, _} -> key not in @keys end) ->
@@ -139,6 +142,12 @@ defmodule ExAtlas.Spec.Staging do
     end
   end
 
+  # `Enum` raises on an improper list, with its tail (a credential) in the
+  # stacktrace, so the shape is walked by hand first.
+  defp proper_pairs?([]), do: true
+  defp proper_pairs?([{_key, _value} | rest]), do: proper_pairs?(rest)
+  defp proper_pairs?(_other), do: false
+
   defp duplicate_key(pairs) do
     pairs
     |> Enum.map(&elem(&1, 0))
@@ -147,11 +156,21 @@ defmodule ExAtlas.Spec.Staging do
   end
 
   defp check_values(fields) do
-    case Enum.find(fields, fn {_key, value} -> not (is_nil(value) or non_empty?(value)) end) do
-      nil -> :ok
-      {key, _value} -> error("#{inspect(key)} must be a non-empty string")
+    cond do
+      bad = Enum.find(fields, fn {_key, value} -> not (is_nil(value) or non_empty?(value)) end) ->
+        error("#{inspect(elem(bad, 0))} must be a non-empty string")
+
+      bad = Enum.find(fields, fn {_key, value} -> is_binary(value) and control?(value) end) ->
+        error("#{inspect(elem(bad, 0))} must not hold control characters")
+
+      true ->
+        :ok
     end
   end
+
+  # A newline in a variable's value can end it early in a shell's `env` dump or
+  # an `.env` file the container writes.
+  defp control?(value), do: String.match?(value, ~r/[[:cntrl:]]/u)
 
   defp non_empty?(value), do: is_binary(value) and value != ""
 
@@ -159,21 +178,27 @@ defmodule ExAtlas.Spec.Staging do
 
   defp check_endpoint(endpoint) do
     case URI.parse(endpoint) do
-      %URI{scheme: scheme, host: host}
-      when scheme in ["http", "https"] and host not in [nil, ""] ->
-        :ok
+      %URI{userinfo: userinfo} when userinfo != nil ->
+        error(
+          ":endpoint must not carry user info; pass the keys as :access_key_id and :secret_access_key"
+        )
+
+      %URI{scheme: scheme, host: host, port: port}
+      when scheme in ["http", "https"] and is_binary(host) and port in 1..65_535 ->
+        if host =~ ~r/\A[A-Za-z0-9.\-\[\]:]+\z/, do: :ok, else: endpoint_error()
 
       _other ->
-        error(":endpoint must be an http:// or https:// URL")
+        endpoint_error()
     end
   end
+
+  defp endpoint_error, do: error(":endpoint must be an http:// or https:// URL")
 
   defp check_uri(_key, nil), do: :ok
 
   defp check_uri(key, "s3://" <> rest) do
     case String.split(rest, "/", parts: 2) do
-      [bucket | _] when bucket != "" -> :ok
-      _no_bucket -> uri_error(key)
+      [bucket | _] -> if bucket =~ ~r/\A[A-Za-z0-9._-]+\z/, do: :ok, else: uri_error(key)
     end
   end
 

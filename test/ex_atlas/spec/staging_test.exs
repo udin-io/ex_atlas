@@ -58,6 +58,11 @@ defmodule ExAtlas.Spec.StagingTest do
       assert {:ok, ^staging} = Staging.new(staging)
     end
 
+    test "a bucket with dots, dashes and digits is accepted (control)" do
+      assert {:ok, _} =
+               Staging.new(dataset_uri: "s3://my-bucket.v2/data set/", region: "eu-west-1")
+    end
+
     test "a plain-http endpoint is accepted, for a local MinIO" do
       assert {:ok, _} = Staging.new(endpoint: "http://localhost:9000", artifact_uri: "s3://b")
     end
@@ -111,7 +116,23 @@ defmodule ExAtlas.Spec.StagingTest do
        "keys must be atoms"},
       {"duplicate key", Map.to_list(@full) ++ [secret_access_key: @secret],
        "duplicate key :secret_access_key"},
-      {"not a map", @secret, "expected a map or a keyword list"}
+      {"not a map", @secret, "expected a map or a keyword list"},
+      {"improper list", [{:dataset_uri, "s3://bucket/d/"} | @secret],
+       "expected a map or a keyword list"},
+      {"credentials in the endpoint", %{@full | endpoint: "https://u:#{@secret}@t3.storage.dev"},
+       ":endpoint must not carry user info"},
+      {"endpoint port out of range", %{@full | endpoint: "http://localhost:99999"},
+       ":endpoint must be an http:// or https:// URL"},
+      {"control character in a value", %{@full | session_token: @token <> "\nX=1"},
+       ":session_token must not hold control characters"},
+      {"space in a bucket", %{@full | dataset_uri: "s3://b c/d/"},
+       ":dataset_uri must start with s3://"},
+      {"blank bucket", %{@full | artifact_uri: "s3:// /a/"},
+       ":artifact_uri must start with s3://"},
+      {"newline in a URI path", %{@full | dataset_uri: "s3://bucket/d/\nX=1"},
+       ":dataset_uri must not hold control characters"},
+      {"space in the endpoint", %{@full | endpoint: "https://t3 storage.dev"},
+       ":endpoint must be an http:// or https:// URL"}
     ]
 
     for {name, input, expected} <- @refusals do
