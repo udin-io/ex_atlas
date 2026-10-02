@@ -1,5 +1,118 @@
 # Upgrading
 
+## Upgrading to 0.9.0
+
+0.9.0 changes what a node adopts after a restart. Five changes need action
+from some hosts. Find yours in the table, then read its section.
+
+| Change | Who acts | Section |
+|---|---|---|
+| An unsigned tracking record cannot respawn, and adopts only a pod the Reaper would delete | You use `persist: true` and set no callback secret | [Callback secret](#set-a-callback-secret) |
+| An adopted task takes `base_url:` and `req_options:` from config | You pass either per call to a `persist: true` spawn | [Provider config](#move-per-call-base_url-and-req_options-to-config) |
+| A custom provider module needs `@behaviour ExAtlas.Provider` to be adopted | You wrote a provider module | [Provider config](#move-per-call-base_url-and-req_options-to-config) |
+| A host store returns each record term for term, with `:respawning` and the callback's `:attempt` | You wrote a `TrackingStore` | [Tracking store](#tracking-store-keep-the-record-whole) |
+| `Migration` step 2 creates `atlas_owner_leases` | You ran `TrackingStore.Ecto` from `main` before 0.9.0 | [Ecto store](#ecto-store-from-main-run-step-2) |
+
+Run `mix igniter.upgrade ex_atlas` first. It edits no file. It prints a notice
+when your app starts the orchestrator and no config file sets a callback
+secret. See `mix help ex_atlas.upgrade`.
+
+### Set a callback secret
+
+A node signs each tracking record it writes with a key derived from
+`config :ex_atlas, :callback, secret:`. With no secret, or for a record 0.8.0
+wrote, the record is unsigned. After a restart an unsigned record:
+
+- adopts only when this node's Reaper would delete its pod once untracked:
+  its provider is in `:reap_providers`, the provider reports it
+  `:provisioning` or `:running`, the node has a `:reap_owner` or no connected
+  peers, and the pod's name carries `:reap_name_prefix` and the owner;
+- never respawns, even with `on_failure: {:respawn, n}`.
+
+A store writer without the secret could otherwise choose what a respawn rents
+(#131) or make the node delete any pod of the account (#138). A pod whose
+record does not adopt keeps billing, and the Reaper leaves it alone:
+terminate it by hand. The log names it ("not adopting ...").
+
+```elixir
+# config/runtime.exs
+config :ex_atlas, :callback, secret: System.fetch_env!("ATLAS_CALLBACK_SECRET")
+```
+
+Rotating the secret makes every stored record unsigned. A `persist: true`
+spawn on a node with no secret warns when its task would not adopt. See the
+CHANGELOG entries [#131][c131] and [#138][c138].
+
+### Move per-call `base_url:` and `req_options:` to config
+
+A tracking record no longer stores `base_url:`, `req_options:` or `api_key:`.
+An adopted task reads all three from `config :ex_atlas, <provider>`, so a
+store writer cannot send the node's API key to another host.
+
+Before:
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  provider: :runpod,
+  persist: true,
+  base_url: "https://runpod-proxy.internal",
+  # ...
+)
+```
+
+After:
+
+```elixir
+# config/runtime.exs
+config :ex_atlas, :runpod, base_url: "https://runpod-proxy.internal"
+```
+
+A fresh spawn still uses its per-call values; only a task adopted after a
+deploy reads config. The Adopter also adopts a record only when its provider
+is built in or a module that declares `@behaviour ExAtlas.Provider`. See the
+[CHANGELOG entry][c125] (#125).
+
+### Tracking store: keep the record whole
+
+A custom `TrackingStore` must return each record term for term. Three fields
+matter in 0.9.0:
+
+| Field | Without it |
+|---|---|
+| `:mac`, byte for byte | The record reads as unsigned (see above) |
+| `:respawning`, a nullable integer | An orphan of a node that died mid-respawn keeps a valid token (#114) |
+| `opts[:callback]` with its `:attempt` | An adopted task refuses its current pod's reports (#110) |
+
+A store that keeps the record as one blob needs nothing. Run the shared
+contract against your store; it ships in the package now:
+
+```elixir
+use ExAtlas.Orchestrator.TrackingStoreConformance, store: MyApp.AtlasStore
+```
+
+The upgrader cannot see your schema, so this step is yours. See the CHANGELOG
+entries [#114][c114], [#110][c110] and [#128][c128].
+
+### Ecto store from `main`: run step 2
+
+`TrackingStore.Ecto` is new in 0.9.0. Its migration module runs every step
+by default, so a host that installs it with
+`mix ex_atlas.install --tracking-store ecto` needs nothing. A host that ran
+step 1 from an unreleased `main` adds a migration for the owner leases:
+
+```elixir
+defmodule MyApp.Repo.Migrations.AddAtlasOwnerLeases do
+  use Ecto.Migration
+
+  def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 2)
+  def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 2)
+end
+```
+
+Until it runs, the lease logs a warning every tick and takes over no record.
+See the
+[CHANGELOG entry][c132] (#132).
+
 ## Upgrading to 0.8.0
 
 Six changes in 0.8.0 break host code or deployments. Find yours in the table,
@@ -202,7 +315,8 @@ that never restarted needs none. See the
 ### Removed: the `endpoints_module` function
 
 The `endpoints_module` function of `ExAtlas.Providers.RunPod` was a
-`@doc false` accessor with no caller in ExAtlas. Call `ExAtlas.Providers.RunPod.Endpoints`
+`@doc false` accessor with no caller in ExAtlas. Call
+`ExAtlas.Providers.RunPod.Endpoints`
 by name, or use the endpoint functions on the public API. See the
 [CHANGELOG entry][c59]
 (#59).
@@ -213,3 +327,10 @@ by name, or use the endpoint functions on the public API. See the
 [c45]: CHANGELOG.md#fixed-a-graceful-shutdown-deletes-persisted-tasks-45
 [c79]: CHANGELOG.md#changed-env-values-print-redacted-and-stay-off-disk-79
 [c59]: CHANGELOG.md#removed-the-endpoints_module-function-of-exatlas-providers-runpod-59
+[c131]: CHANGELOG.md#fixed-an-adopted-task-respawns-only-from-a-record-this-node-signed-131
+[c138]: CHANGELOG.md#fixed-a-forged-tracking-record-no-longer-deletes-another-app-s-pod-138
+[c125]: CHANGELOG.md#fixed-a-forged-tracking-record-no-longer-steers-an-adopted-task-s-calls-125
+[c114]: CHANGELOG.md#fixed-an-orphan-of-a-node-that-died-mid-respawn-gets-410-114
+[c110]: CHANGELOG.md#fixed-a-token-with-no-attempt-is-refused-once-a-respawn-replaced-the-pod-110
+[c128]: CHANGELOG.md#fixed-the-conformance-suites-ship-in-the-package-128
+[c132]: CHANGELOG.md#added-a-live-node-takes-over-a-dead-node-s-tasks-on-the-ecto-store-132

@@ -5,7 +5,34 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.9.0 — 2026-10-02
+
+### Upgrading
+
+Five changes decide which persisted tasks a node adopts after a restart, and
+what a custom tracking store must keep. Read
+[the upgrading guide](guides/upgrading.md), or run `mix igniter.upgrade ex_atlas`
+to see whether your config sets a callback secret.
+
+- Set `config :ex_atlas, :callback, secret:`. Without it a record is
+  unsigned: an adopted task cannot respawn (#131), and adopts only a pod this
+  node's Reaper would delete (#138).
+- Move per-call `base_url:` and `req_options:` of `persist: true` spawns to
+  `config :ex_atlas, <provider>`; a custom provider module declares
+  `@behaviour ExAtlas.Provider` (#125).
+- A custom `TrackingStore` returns each record term for term: `:mac`,
+  `:respawning` and the callback's `:attempt` (#131, #114, #110).
+- `TrackingStore.Ecto` is new. A database that ran its step 1 from `main`
+  before this release needs a migration calling `Migration.up(version: 2)`
+  (#132).
+
+### Added: `mix ex_atlas.upgrade` 0.9.0 step (#141)
+
+The step edits no file. It adds a notice when your app starts the
+orchestrator and no config file sets `config :ex_atlas, :callback, secret:`,
+and links the upgrading guide. The reap-owner notice now finds a
+`:reap_owner` set inside an `if` block in `runtime.exs`, as the
+start-orchestrator check already did.
 
 ### Added: a live node takes over a dead node's tasks on the Ecto store (#132)
 

@@ -83,7 +83,7 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_atlas, "~> 0.8"}
+    {:ex_atlas, "~> 0.9"}
   ]
 end
 ```
@@ -115,10 +115,11 @@ mix ex_atlas.upgrade
 `mix igniter.upgrade ex_atlas` passes your previous and new version, so the
 task runs only the steps between them. Run directly, `mix ex_atlas.upgrade`
 starts at 0.1.0 and runs every step; each step is idempotent.
-`mix ex_atlas.upgrade 0.7.0 0.8.0` runs one range.
+`mix ex_atlas.upgrade 0.8.0 0.9.0` runs one range.
 
-Coming from 0.7? Read [guides/upgrading.md](guides/upgrading.md): six changes
-in 0.8.0 break provider modules, cluster deployments or tracking stores.
+Coming from 0.8? Read [guides/upgrading.md](guides/upgrading.md): five changes
+in 0.9.0 decide which persisted tasks a node adopts after a restart. Coming from
+0.7, read its 0.8.0 section too.
 
 ## Architecture at a glance
 
@@ -136,7 +137,7 @@ in 0.8.0 break provider modules, cluster deployments or tracking stores.
     │         │             │              │             │
  ┌──▼───┐ ┌──▼───┐ ┌───────▼────────┐ ┌──▼─────┐ ┌──────▼──────┐
  │RunPod│ │ Fly  │ │  Lambda Labs   │ │ Vast   │ │  Mock (test)│
- │ v0.1 │ │ stub │ │     v0.8       │ │ stub   │ │    v0.1     │
+ │ v0.1 │ │ stub │ │     v0.8       │ │ v0.9   │ │    v0.1     │
  └──────┘ └──────┘ └────────────────┘ └────────┘ └─────────────┘
 
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -570,7 +571,7 @@ config :ex_atlas, :orchestrator,
 | `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
 | `:fly`        | `ExAtlas.Providers.Fly`            | stub            | `:http_proxy, :raw_tcp, :global_networking`                                         |
 | `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.8 (compute)  | `:raw_tcp`                                                                          |
-| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:billing, :raw_tcp, :self_terminate, :spot`                                   |
+| `:vast`       | `ExAtlas.Providers.Vast`           | v0.9 (compute)       | `:billing, :raw_tcp, :self_terminate, :spot`                                   |
 | `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
 The `:fly` stub returns `{:error, %ExAtlas.Error{kind: :unsupported}}` from
@@ -1740,9 +1741,13 @@ mandate Req — it's an implementation choice of the bundled providers.
   [Upgrading](guides/upgrading.md).
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
-- **Unreleased** — Vast.ai compute: spawn, get, list, terminate and GPU types
-  for on-demand offers (#99); `command:`, `run_task/1` and the Reaper (#105).
-  `spot: true` (#112); `stop/2`, `start/2` and `compute_spend/3` (#116).
+- **v0.9** — Vast.ai compute: spawn, get, list, terminate and GPU types for
+  on-demand offers (#99); `command:`, `run_task/1` and the Reaper (#105).
+  `spot: true` (#112); `stop/2`, `start/2` and `compute_spend/3` (#116). Also
+  tracking records in your own database (`TrackingStore.Ecto`, set up by
+  `mix ex_atlas.install --tracking-store ecto`), owner leases so a live node
+  takes over a dead node's tasks, and signed records. See
+  [Upgrading](guides/upgrading.md).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.
