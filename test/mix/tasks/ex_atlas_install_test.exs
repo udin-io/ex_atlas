@@ -32,6 +32,12 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
     |> Enum.filter(&String.starts_with?(&1, "priv/repo/migrations/"))
   end
 
+  defp ex_atlas_config(igniter, file \\ "config/config.exs") do
+    file
+    |> Config.Reader.eval!(content(igniter, file), env: :dev)
+    |> Keyword.get(:ex_atlas, [])
+  end
+
   describe ".gitignore" do
     test "is created with the DETS entry when the project has none" do
       assert gitignore(install()) =~ @entry
@@ -62,6 +68,52 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
       assert migration =~ "defmodule Test.Repo.Migrations.AddAtlasTracking do"
       assert migration =~ "def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()"
       assert migration =~ "def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down()"
+    end
+
+    test "configures the Ecto store on the repo, with the orchestrator started by the host" do
+      config = ex_atlas_config(install_ecto(host()))
+
+      assert config[:start_orchestrator] == false
+      assert config[:orchestrator][:tracking_store] == ExAtlas.Orchestrator.TrackingStore.Ecto
+      assert config[:orchestrator][:repo] == Test.Repo
+    end
+
+    test "keeps the host's other orchestrator settings" do
+      files =
+        Map.put(host(), "config/config.exs", """
+        import Config
+        config :ex_atlas, :orchestrator, reap_owner: "web-1", tracking_store: MyApp.OldStore
+        """)
+
+      config = ex_atlas_config(install_ecto(files))
+
+      assert config[:orchestrator][:reap_owner] == "web-1"
+      assert config[:orchestrator][:tracking_store] == ExAtlas.Orchestrator.TrackingStore.Ecto
+    end
+
+    test "turns a config.exs start_orchestrator: true off, since the supervisor refuses it" do
+      files =
+        Map.put(host(), "config/config.exs", """
+        import Config
+        config :ex_atlas, start_orchestrator: true
+        """)
+
+      igniter = install_ecto(files)
+
+      assert ex_atlas_config(igniter)[:start_orchestrator] == false
+      assert_has_notice(igniter, &(&1 =~ "start_orchestrator: false"))
+    end
+
+    test "warns about a start_orchestrator: true in another config file and leaves it" do
+      runtime = """
+      import Config
+      config :ex_atlas, start_orchestrator: true
+      """
+
+      igniter = install_ecto(Map.put(host(), "config/runtime.exs", runtime))
+
+      assert_has_warning(igniter, &(&1 =~ "config/runtime.exs" and &1 =~ "start_orchestrator"))
+      assert content(igniter, "config/runtime.exs") == runtime
     end
 
     test "writes no migration when one already calls the store's migration module" do

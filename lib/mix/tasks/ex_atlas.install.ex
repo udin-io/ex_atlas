@@ -28,6 +28,12 @@ if Code.ensure_loaded?(Igniter) do
 
     use Igniter.Mix.Task
 
+    alias Igniter.Project.Config
+    alias Mix.ExAtlas.OrchestratorConfig
+
+    @ecto_store ExAtlas.Orchestrator.TrackingStore.Ecto
+    @other_config_files ["runtime.exs", "prod.exs", "dev.exs", "test.exs"]
+
     @impl Igniter.Mix.Task
     def info(_argv, _parent) do
       %Igniter.Mix.Task.Info{
@@ -73,6 +79,7 @@ if Code.ensure_loaded?(Igniter) do
         {igniter, {:ok, repo}} ->
           igniter
           |> add_migration(repo)
+          |> configure_ecto_store(repo)
 
         {igniter, {:error, message}} ->
           Igniter.add_issue(igniter, message)
@@ -143,6 +150,49 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
+    defp configure_ecto_store(igniter, repo) do
+      igniter =
+        Enum.reduce(
+          ["config.exs" | @other_config_files],
+          igniter,
+          &OrchestratorConfig.include_config/2
+        )
+
+      igniter
+      |> notice_start_orchestrator()
+      |> Config.configure("config.exs", :ex_atlas, [:start_orchestrator], false)
+      |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :tracking_store], @ecto_store)
+      |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :repo], repo)
+      |> warn_start_orchestrator()
+    end
+
+    # `ExAtlas.Orchestrator.Supervisor` refuses to start beside
+    # `start_orchestrator: true`.
+    defp notice_start_orchestrator(igniter) do
+      if OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true) do
+        Igniter.add_notice(igniter, """
+        config/config.exs set `start_orchestrator: true`; the installer set \
+        `start_orchestrator: false`. Your app now starts the orchestrator with \
+        ExAtlas.Orchestrator.Supervisor, which refuses to start beside the flag.
+        """)
+      else
+        igniter
+      end
+    end
+
+    # Another file often sets the flag under a condition, so the installer
+    # names it instead of editing it.
+    defp warn_start_orchestrator(igniter) do
+      @other_config_files
+      |> Enum.filter(&OrchestratorConfig.sets_start_orchestrator?(igniter, &1, true))
+      |> Enum.reduce(igniter, fn file, igniter ->
+        Igniter.add_warning(igniter, """
+        config/#{file} sets `config :ex_atlas, start_orchestrator: true`. Remove it: \
+        ExAtlas.Orchestrator.Supervisor refuses to start beside it.
+        """)
+      end)
+    end
+
     # A host that followed the README by hand named its migration itself.
     defp calls_store_migration?(igniter, dir) do
       Enum.any?(igniter.rewrite, fn source ->
@@ -159,14 +209,14 @@ if Code.ensure_loaded?(Igniter) do
 
       igniter =
         igniter
-        |> Igniter.Project.Config.configure(
+        |> Config.configure(
           "config.exs",
           :ex_atlas,
           [:fly, :enabled],
           true,
           updater: &already_set/1
         )
-        |> Igniter.Project.Config.configure(
+        |> Config.configure(
           "config.exs",
           :ex_atlas,
           [:fly, :storage_path],
@@ -175,7 +225,7 @@ if Code.ensure_loaded?(Igniter) do
         )
 
       if has_pubsub? do
-        Igniter.Project.Config.configure(
+        Config.configure(
           igniter,
           "config.exs",
           :ex_atlas,
@@ -184,7 +234,7 @@ if Code.ensure_loaded?(Igniter) do
           updater: &already_set/1
         )
       else
-        Igniter.Project.Config.configure(
+        Config.configure(
           igniter,
           "config.exs",
           :ex_atlas,
