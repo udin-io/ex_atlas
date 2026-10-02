@@ -92,6 +92,46 @@ defmodule ExAtlas.CredentialRedactionTest do
       refute text =~ "sigv4-probe-61aa"
     end
 
+    test "a req_options :auth shape Req does not know is refused by name, unprinted" do
+      text =
+        crash_text(fn ->
+          ExAtlas.get_compute("pod-1",
+            provider: ClauseProvider,
+            req_options: [auth: {:token, @key}]
+          )
+        end)
+
+      assert text =~ "NimbleOptions.ValidationError"
+      assert text =~ ":req_options"
+      refute text =~ @key
+
+      ExAtlas.Test.Orchestrator.start!()
+
+      assert {:error, %NimbleOptions.ValidationError{key: :req_options, value: nil}} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x",
+                 req_options: [auth: {:token, @key}]
+               )
+
+      # Control: every shape Req documents is accepted.
+      for auth <- [
+            "Bearer x",
+            {:basic, "u:p"},
+            {:bearer, "t"},
+            {:digest, "u:p"},
+            fn -> {:bearer, "t"} end,
+            {Kernel, :then, []},
+            :netrc,
+            {:netrc, "/tmp/n"},
+            {"u", "p"}
+          ] do
+        ctx = ExAtlas.Config.build_ctx(:mock, req_options: [auth: auth])
+        assert ExAtlas.Config.reveal_req_options(ctx.req_options)[:auth] == auth
+      end
+    end
+
     test "a req_options that is not a keyword list is refused by name, unprinted" do
       text =
         crash_text(fn ->

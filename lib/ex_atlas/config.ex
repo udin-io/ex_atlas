@@ -135,12 +135,28 @@ defmodule ExAtlas.Config do
   end
 
   defp seal_req_options(req_options) do
-    if is_list(req_options) and Keyword.keyword?(req_options) do
-      {:ok, Enum.map(req_options, &seal_req_option/1)}
-    else
-      invalid(:req_options, "expected a keyword list")
+    cond do
+      not (is_list(req_options) and Keyword.keyword?(req_options)) ->
+        invalid(:req_options, "expected a keyword list")
+
+      not Enum.all?(Keyword.get_values(req_options, :auth), &req_auth?(Secret.reveal(&1))) ->
+        invalid(:req_options, ":auth must be a shape Req's auth step takes")
+
+      true ->
+        {:ok, Enum.map(req_options, &seal_req_option/1)}
     end
   end
+
+  # The shapes `Req.Steps.auth/1` matches. Any other raises a
+  # FunctionClauseError there, whose stacktrace prints the revealed value.
+  defp req_auth?(auth) when is_binary(auth), do: true
+  defp req_auth?({scheme, value}) when scheme in [:basic, :bearer, :digest], do: is_binary(value)
+  defp req_auth?(fun) when is_function(fun, 0), do: true
+  defp req_auth?({mod, fun, args}), do: is_atom(mod) and is_atom(fun) and is_list(args)
+  defp req_auth?(:netrc), do: true
+  defp req_auth?({:netrc, _path}), do: true
+  defp req_auth?({user, pass}), do: is_binary(user) and is_binary(pass)
+  defp req_auth?(_other), do: false
 
   defp seal_req_option({key, value}) when key in @secret_req_options,
     do: {key, Secret.wrap(value)}
