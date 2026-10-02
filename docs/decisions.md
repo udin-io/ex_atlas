@@ -21,7 +21,7 @@ names the PR or issue that holds the reasoning.
 | `raw` drops `jupyter_token` and `jupyter_url`, which carries the same token | Keep `raw` whole | #84, #89 |
 | `user_data` stays an `ExAtlas.Secret` until the last Req request step encodes the body | `json:`: Req's `inspect/1` prints `json` in full (risk 26) | #89 |
 | A refused launch keeps its status and only Lambda's error `code`, and always withholds Lambda's message | Withhold only a message that contains a value: the review's probes showed echoes quoted (`'\''`), JSON-escaped or cut short pass a substring check | #89 |
-| The script finds docker and waits for its daemon, then exports the values in a subshell that only runs `docker run` | Export at the top: a container `PATH` hid docker, and every value steered the host's shell | #89 |
+| The script finds docker and waits for its daemon, then exports the values and `exec`s `docker run` | Export at the top: a container `PATH` hid docker from the wait loop and the run | #89 |
 | Env names starting `DOCKER_` or `LD_` are `:validation` | Allow them: `docker run` reads them on the host, so `DOCKER_HOST` sends every value to another daemon | #89 |
 | An image starting with `-` is `:validation` | `--` before the image: docker CLI support unchecked on Lambda's image | #89 |
 | A missing API key raises `:unauthorized`, as RunPod does, through the shared `Providers.HTTP.bearer/3` | Return an error tuple for Lambda only | #89 |
