@@ -44,6 +44,27 @@ pod may exist. Lambda's launch follows the same rule
 
 `:rtx_6000` is `gpu_1x_rtx6000` and `:a100_80g` is `gpu_1x_a100_80gb_sxm4`,
 as Lambda names them. `:gh200` maps to `gpu_1x_gh200`.
+### Added: `respawn_credentials:`, a respawn after a deploy (#87)
+
+A `persist: true` task with `s3:` or `env:` that was preempted after a
+restart ended with `{:respawn_failed, ...}`, since its record holds no
+secret. Now:
+
+- `Orchestrator.spawn/1` and `run_task/1` take `respawn_credentials: {m, f,
+  args}`. It needs `persist: true`, and the function must be exported with
+  arity `length(args) + 1`; otherwise the spawn is a
+  `NimbleOptions.ValidationError` on `:respawn_credentials`, before any rent.
+- The record keeps the tuple. `config :ex_atlas, :orchestrator,
+  respawn_credentials:` serves records without one.
+- An adopted task's respawn calls `apply(m, f, args ++ [info])`, where
+  `info` is `%{id:, name:, user_id:, provider:, s3:, env_names:}`, and
+  rents the replacement with the `s3:` and `env:` it returns. The record
+  keeps its markers. A task that never restarted does not call it.
+- A missing, failing, raising or slow resolver (bound:
+  `respawn_credentials_timeout_ms`, default 30,000) ends the task as before,
+  with a message that names the resolver and no value.
+- An adopted record whose tuple no longer validates adopts without it and
+  logs a warning.
 
 ### Changed: `env:` values print redacted and stay off disk (#79)
 

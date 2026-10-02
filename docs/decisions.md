@@ -111,3 +111,11 @@ names the PR or issue that holds the reasoning.
 | Optional provider callbacks go through `dispatch_optional/3` | Call the module directly: raises on providers without the callback | #60, `CLAUDE.md` |
 | `hex.audit` stays in CI and suppresses nothing, even though it fails on cowlib | Ignore the advisories | #53, `CLAUDE.md` |
 | `compute_spend/2` with no window covers RunPod's last 30 days | Default to a short window | #58, #62 |
+| A respawn after adoption asks a host resolver, an `{m, f, args}`, for `s3:` and `env:` | A function capture: a record must survive DETS and a restart | #87 |
+| The per-task tuple wins; `config :ex_atlas, :orchestrator, respawn_credentials:` is the fallback | App config only: credentials are often per user or per task | #87 |
+| Resolve at respawn, not at adoption | Resolve when adopting: most adopted tasks never respawn | #87 |
+| The resolver returns `s3:` whole; `info.s3` gives the stored parts without the marker | ExAtlas merges keys onto the stored parts: presigned mode stores no URL | #87 |
+| `env:` must cover every stored name and replaces the stored env whole | Run with the names it returns: a container would miss a value it was rented with | #87 |
+| The resolver runs in a task under the poll `Task.Supervisor`, bounded at 30 s; a raise, throw or exit is caught inside it, so no crash report prints its value | Call inline: a hung resolver would hold the tracker forever | #87 |
+| Resolved values stay in the tracker's opts, so a second respawn in the same VM reuses them | Call the resolver on every respawn | #87 |
+| The spawn checks that the resolver function is exported | Check the shape only: a typo would surface hours later, at the respawn | #87 |
