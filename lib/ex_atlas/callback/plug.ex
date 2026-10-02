@@ -99,7 +99,7 @@ if Code.ensure_loaded?(Plug) do
 
     defp dispatch(conn, kind) do
       with {:ok, claims} <- authenticate(conn, kind),
-           :ok <- Callback.take(claims.task_id, kind) do
+           :ok <- Callback.take(claims, kind) do
         read_and_ingest(conn, kind, claims)
       else
         {:error, reason} -> respond(conn, status_for(reason))

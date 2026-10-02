@@ -175,6 +175,30 @@ defmodule ExAtlas.Callback.PlugTest do
       assert post("/logs", token, ~s({"lines":[]})).status == 202
     end
 
+    test "a replaced pod's flood does not throttle its replacement" do
+      task = "task-#{System.unique_integer([:positive])}"
+      {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, 1)
+      old = Token.mint(task, Callback.kinds(), attempt: 0)
+      current = Token.mint(task, Callback.kinds(), attempt: 1)
+
+      for _ <- 1..Limiter.burst(:progress),
+          do: assert(post("/progress", old, ~s({"pct":1})).status == 410)
+
+      assert post("/progress", old, ~s({"pct":1})).status == 429
+      assert post("/progress", current, ~s({"pct":1})).status == 202
+    end
+
+    test "a pod that floods with its own attempt token is throttled at burst + 1" do
+      task = "task-#{System.unique_integer([:positive])}"
+      {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, 1)
+      current = Token.mint(task, Callback.kinds(), attempt: 1)
+
+      for _ <- 1..Limiter.burst(:progress),
+          do: assert(post("/progress", current, ~s({"pct":1})).status == 202)
+
+      assert post("/progress", current, ~s({"pct":1})).status == 429
+    end
+
     test "one pod's flood does not throttle another" do
       {_a, token_a} = tracked_task()
       {_b, token_b} = tracked_task()

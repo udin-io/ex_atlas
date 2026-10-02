@@ -56,6 +56,22 @@ A pod rented by 0.8.0 holds a token with no attempt. It is accepted
 unchecked, so its late report after a respawn still ends the replacement,
 until those pods end.
 
+### Fixed: a replaced pod's refused reports no longer spend its replacement's rate budget (#107)
+
+The callback rate limit keys its bucket by task and attempt. Before, pod A
+and its replacement pod B shared one bucket per task and kind, and the plug
+spent it before it checked the attempt. Three late `/finish` posts from A
+(each a `410`) emptied the burst of 3, and B's real exit code got `429` for up
+to a minute.
+
+`ExAtlas.Callback.take/2` takes the claims `verify/1` returned, as `ingest/3`
+does. A bare `task_id` string still works and keys as a token with no
+attempt, so a hand-rolled controller keeps compiling. Move it to the claims form:
+
+```elixir
+:ok <- ExAtlas.Callback.take(claims, :progress)
+```
+
 ### Fixed: provider responses and the Vast GPU names (#99)
 
 - `Spec.GpuCatalog`'s `:vast` names are Vast's spaced names, one list per

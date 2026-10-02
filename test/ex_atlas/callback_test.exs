@@ -279,6 +279,29 @@ defmodule ExAtlas.CallbackTest do
     end
   end
 
+  describe "take/2" do
+    test "a bare task id and a claim-less token share one bucket" do
+      task = task_id()
+      claims = %{task_id: task, attempt: nil, kinds: Callback.kinds()}
+
+      for _ <- 1..Callback.Limiter.burst(:log), do: assert(:ok = Callback.take(claims, :log))
+
+      assert {:error, :rate_limited} = Callback.take(task, :log)
+    end
+
+    test "each attempt of a task has its own bucket" do
+      task = task_id()
+      attempt_0 = %{task_id: task, attempt: 0, kinds: Callback.kinds()}
+      attempt_1 = %{attempt_0 | attempt: 1}
+
+      for _ <- 1..Callback.Limiter.burst(:log), do: assert(:ok = Callback.take(attempt_0, :log))
+
+      assert {:error, :rate_limited} = Callback.take(attempt_0, :log)
+      assert :ok = Callback.take(attempt_1, :log)
+      assert :ok = Callback.take(task, :log)
+    end
+  end
+
   describe "env/1" do
     test "expands a descriptor into the three documented variables" do
       {:ok, opts} = Callback.prepare(callback: "https://app.example.com/cb")

@@ -1828,6 +1828,19 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
     end
 
+    test "the replaced pod's refused finishes do not spend the replacement's finish budget",
+         %{base: base} do
+      {_pid, pod_a, pod_b, _task_id} = respawned_task(base)
+      new_id = pod_b.id
+
+      for _ <- 1..Callback.Limiter.burst(:finish) do
+        assert post_report("/finish", pod_token(pod_a), ~s({"exit_code":0})).status == 410
+      end
+
+      assert post_report("/finish", pod_token(pod_b), ~s({"exit_code":3})).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 3}}}, 2_000
+    end
+
     test "control: the replacement's own finish is accepted and ends the task on its code",
          %{base: base} do
       {pid, _pod_a, pod_b, _task_id} = respawned_task(base)

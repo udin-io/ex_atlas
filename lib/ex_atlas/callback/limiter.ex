@@ -1,16 +1,21 @@
 defmodule ExAtlas.Callback.Limiter do
   @moduledoc """
-  Per-task, per-kind token bucket for the inbound callback boundary.
+  Per-pod, per-kind token bucket for the inbound callback boundary.
 
   The callback endpoint is one the library *tells hosts to expose to the
   internet*, so "put a limiter in front of it" is not an adequate answer:
   the rate limit ships with the endpoint.
 
-  One ETS-backed bucket per `{task_id, kind}` pair, sized from the budgets in
-  `burst/1` and `rate_per_second/1`. Keying by `task_id` rather than by IP is
+  One ETS-backed bucket per `{task_id, attempt, kind}`, sized from the budgets
+  in `burst/1` and `rate_per_second/1`. Keying by pod rather than by IP is
   what makes it useful — a pod's egress IP is the provider's, shared with every
   other tenant, and the task id is the only thing that identifies the caller
   we actually care about.
+
+  The attempt is part of the key because a respawn replaces the pod but keeps
+  the task. Pods of two attempts share a task id, and a replaced pod's refused
+  reports must not spend its replacement's budget. A token with no attempt
+  (minted by 0.8.0) keys as attempt `nil`, a bucket of its own.
 
   ## Budgets
 
@@ -68,16 +73,19 @@ defmodule ExAtlas.Callback.Limiter do
   def burst(kind), do: @budgets |> Map.fetch!(kind) |> elem(1)
 
   @doc """
-  Spend one token of `kind`'s budget for `task_id`.
+  Spend one token of `kind`'s budget for the pod `claims` names.
+
+  Takes verified claims, or a bare task id, which keys as attempt `nil`.
 
   `:now_ms` overrides the clock; the refill is a function of elapsed monotonic
   time, so injecting it is what lets the budgets be tested without sleeping.
   """
-  @spec take(Token.task_id(), Token.kind(), keyword()) :: :ok | {:error, :rate_limited}
-  def take(task_id, kind, opts \\ []) do
+  @spec take(Token.claims() | Token.task_id(), Token.kind(), keyword()) ::
+          :ok | {:error, :rate_limited}
+  def take(claims_or_task_id, kind, opts \\ []) do
     now = Keyword.get_lazy(opts, :now_ms, &now_ms/0)
     {rate, burst} = Map.fetch!(@budgets, kind)
-    key = {task_id, kind}
+    key = {pod(claims_or_task_id), kind}
     ceiling = burst * @scale
 
     {tokens, last} =
@@ -144,6 +152,9 @@ defmodule ExAtlas.Callback.Limiter do
         @table
     end
   end
+
+  defp pod(%{task_id: task_id} = claims), do: {task_id, Map.get(claims, :attempt)}
+  defp pod(task_id) when is_binary(task_id), do: {task_id, nil}
 
   defp refill(elapsed_ms, _rate) when elapsed_ms <= 0, do: 0
   defp refill(elapsed_ms, rate), do: trunc(elapsed_ms * rate)
