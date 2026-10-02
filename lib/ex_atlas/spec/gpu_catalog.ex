@@ -7,6 +7,9 @@ defmodule ExAtlas.Spec.GpuCatalog do
   identifier their API expects when building a spawn request.
 
   New providers register their mapping here by extending the `@providers` map.
+
+  Lambda Labs names encode the GPU count, so its entries are the one-GPU
+  names (`gpu_1x_h100_pcie`); the provider swaps `1x` for `:gpu_count`.
   """
 
   @type canonical :: atom()
@@ -30,14 +33,19 @@ defmodule ExAtlas.Spec.GpuCatalog do
     mi300x: "AMD Instinct MI300X OAM"
   }
 
+  # Lambda's names encode the GPU count (`gpu_8x_h100_sxm5`). Each entry is
+  # the 1x name, which `ExAtlas.Providers.LambdaLabs` reads as the family key
+  # and swaps `1x` for the requested count. Lambda sells the A100 80 GB only
+  # as `gpu_8x_a100_80gb_sxm4`.
   @canonical_to_lambda %{
     h100: "gpu_1x_h100_pcie",
     h100_sxm: "gpu_1x_h100_sxm5",
-    a100_80g: "gpu_1x_a100_sxm4_80gb",
+    a100_80g: "gpu_1x_a100_80gb_sxm4",
     a100_40g: "gpu_1x_a100_sxm4",
     a10: "gpu_1x_a10",
     a6000: "gpu_1x_a6000",
-    rtx_6000: "gpu_1x_rtx_6000"
+    rtx_6000: "gpu_1x_rtx6000",
+    gh200: "gpu_1x_gh200"
   }
 
   @canonical_to_fly %{
