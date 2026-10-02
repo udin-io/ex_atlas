@@ -43,7 +43,9 @@ defmodule ExAtlas.Callback.Token do
   `attempt`: 0 for the first pod, `n` for the `n`th replacement.
   `ExAtlas.Callback.ingest/3` refuses a report whose attempt is not the
   tracker's current one. A token minted by 0.8.0 has no attempt; `verify/2`
-  returns `attempt: nil` for it, and the attempt goes unchecked.
+  returns `attempt: nil` for it. `ingest/3` accepts such a token only while the
+  tracker's current pod holds one too, which is a task 0.8.0 stored and no
+  respawn has replaced since.
 
   ## Replay
 

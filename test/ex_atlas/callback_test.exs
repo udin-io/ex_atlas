@@ -10,7 +10,7 @@ defmodule ExAtlas.CallbackTest do
 
   defp task_id, do: "task-#{System.unique_integer([:positive])}"
 
-  defp register(task_id, attempt \\ nil),
+  defp register(task_id, attempt \\ 0),
     do: Registry.register(ComputeRegistry, {:callback, task_id}, attempt)
 
   describe "verify/1" do
@@ -265,12 +265,59 @@ defmodule ExAtlas.CallbackTest do
       refute_received {:atlas_callback, _, _, _}
     end
 
-    test "accepts a token with no attempt unchecked, as 0.8.0 minted it" do
+    # A tracker adopted from a 0.8.0 record has a current pod whose token
+    # carries no attempt. Only that pod can hold such a token.
+    test "accepts a token with no attempt while the current pod holds none either" do
+      task = task_id()
+      {:ok, _} = register(task, :claimless)
+
+      assert :ok = Callback.ingest(%{task_id: task, attempt: nil}, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_callback, :finish, %{exit_code: 0}, nil}
+    end
+
+    test "claims with no :attempt key read as a token with no attempt" do
+      task = task_id()
+      {:ok, _} = register(task, :claimless)
+
+      assert :ok = Callback.ingest(%{task_id: task}, :progress, %{"pct" => 1})
+      assert_receive {:atlas_callback, :progress, %{"pct" => 1}, nil}
+    end
+
+    test "refuses a token with no attempt once the current pod holds one" do
       task = task_id()
       {:ok, _} = register(task, 1)
 
-      assert :ok = Callback.ingest(%{task_id: task, attempt: nil}, :finish, %{"exit_code" => 0})
-      assert_receive {:atlas_callback, :finish, %{exit_code: 0}}
+      assert {:error, :not_tracked} =
+               Callback.ingest(%{task_id: task, attempt: nil}, :finish, %{"exit_code" => 0})
+
+      refute_received {:atlas_callback, _, _}
+      refute_received {:atlas_callback, _, _, _}
+    end
+
+    test "control: the current pod's own attempt is accepted where a claim-less token is not" do
+      task = task_id()
+      {:ok, _} = register(task, 1)
+
+      assert :ok = Callback.ingest(%{task_id: task, attempt: 1}, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_callback, :finish, %{exit_code: 0}, 1}
+    end
+
+    test "a claim-less pod's registration refuses a token that signs another attempt" do
+      task = task_id()
+      {:ok, _} = register(task, :claimless)
+
+      assert {:error, :not_tracked} =
+               Callback.ingest(%{task_id: task, attempt: 0}, :finish, %{"exit_code" => 0})
+    end
+
+    test "a bare task id stays unchecked against either kind of current pod" do
+      for current <- [1, :claimless] do
+        task = task_id()
+        {:ok, _} = register(task, current)
+
+        assert :ok = Callback.ingest(task, :finish, %{"exit_code" => 0})
+        assert_receive {:atlas_callback, :finish, %{exit_code: 0}}
+      end
     end
 
     test "an untracked task is still gone" do
