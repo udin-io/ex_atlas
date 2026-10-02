@@ -328,10 +328,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   def child_spec(arg) do
-    # Sealed here too: a supervisor keeps the child spec, and a crash in
-    # `start_link/1` prints its argument.
-    arg = sealed(arg)
-
     %{
       id: {:compute_server, tracked_id(arg)},
       start: {__MODULE__, :start_link, [arg]},
