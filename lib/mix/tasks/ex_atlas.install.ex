@@ -191,18 +191,20 @@ if Code.ensure_loaded?(Igniter) do
           &OrchestratorConfig.include_config/2
         )
 
+      started? = OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true)
+
       igniter
-      |> notice_start_orchestrator()
       |> Config.configure("config.exs", :ex_atlas, [:start_orchestrator], false)
       |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :tracking_store], @ecto_store)
       |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :repo], repo)
+      |> notice_start_orchestrator(started?)
       |> warn_start_orchestrator()
     end
 
     # `ExAtlas.Orchestrator.Supervisor` refuses to start beside
     # `start_orchestrator: true`.
-    defp notice_start_orchestrator(igniter) do
-      if OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true) do
+    defp notice_start_orchestrator(igniter, started?) do
+      if started? and not OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true) do
         Igniter.add_notice(igniter, """
         config/config.exs set `start_orchestrator: true`; the installer set \
         `start_orchestrator: false`. Your app now starts the orchestrator with \
@@ -213,10 +215,12 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    # Another file often sets the flag under a condition, so the installer
-    # names it instead of editing it.
+    # A `true` the installer did not turn off: one in another file, or one
+    # inside a block such as `if config_env() == :prod`. Either often sets
+    # the flag under a condition, so the installer names it instead of
+    # editing it.
     defp warn_start_orchestrator(igniter) do
-      @other_config_files
+      ["config.exs" | @other_config_files]
       |> Enum.filter(&OrchestratorConfig.sets_start_orchestrator?(igniter, &1, true))
       |> Enum.reduce(igniter, fn file, igniter ->
         Igniter.add_warning(igniter, """

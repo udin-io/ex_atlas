@@ -169,6 +169,8 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
       assert content(igniter, "lib/test/application.ex") =~ "] ++ workers()"
     end
 
+    # A host with `start_orchestrator: true` would lose its orchestrator if
+    # the installer turned the flag off and added no child.
     test "warns and adds no child when the repo is not in the children" do
       igniter = install_ecto(host(["TestWeb.Endpoint"]))
 
@@ -191,6 +193,60 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
 
       assert ex_atlas_config(igniter)[:start_orchestrator] == false
       assert_has_notice(igniter, &(&1 =~ "start_orchestrator: false"))
+    end
+
+    test "turns off a config.exs start_orchestrator given as config/3" do
+      files =
+        Map.put(host(), "config/config.exs", """
+        import Config
+        config :ex_atlas, :start_orchestrator, true
+        """)
+
+      igniter = install_ecto(files)
+
+      assert ex_atlas_config(igniter)[:start_orchestrator] == false
+      assert_has_notice(igniter, &(&1 =~ "start_orchestrator: false"))
+    end
+
+    for {name, runtime} <- [
+          {"inside an if block",
+           """
+           import Config
+
+           if config_env() == :prod do
+             config :ex_atlas, start_orchestrator: true
+           end
+           """},
+          {"given as config/3",
+           """
+           import Config
+           config :ex_atlas, :start_orchestrator, true
+           """}
+        ] do
+      test "warns about a runtime.exs start_orchestrator: true #{name}" do
+        igniter = install_ecto(Map.put(host(), "config/runtime.exs", unquote(runtime)))
+
+        assert_has_warning(
+          igniter,
+          &(&1 =~ "config/runtime.exs" and &1 =~ "start_orchestrator")
+        )
+      end
+    end
+
+    test "warns about a config.exs start_orchestrator: true inside a block it cannot turn off" do
+      files =
+        Map.put(host(), "config/config.exs", """
+        import Config
+
+        if config_env() == :prod do
+          config :ex_atlas, start_orchestrator: true
+        end
+        """)
+
+      assert_has_warning(
+        install_ecto(files),
+        &(&1 =~ "config/config.exs" and &1 =~ "start_orchestrator")
+      )
     end
 
     test "warns about a start_orchestrator: true in another config file and leaves it" do

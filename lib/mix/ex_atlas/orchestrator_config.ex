@@ -7,6 +7,7 @@ if Code.ensure_loaded?(Igniter) do
     alias Igniter.Code.Common
     alias Igniter.Code.Function
     alias Igniter.Code.Keyword, as: IgniterKeyword
+    alias Igniter.Code.List, as: IgniterList
     alias Igniter.Project.Config
     alias Sourceror.Zipper
 
@@ -81,39 +82,75 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     @doc """
-    Whether `config/<file>` holds `config :ex_atlas, start_orchestrator: <value>`.
+    Whether `config/<file>` sets `start_orchestrator` to `value` anywhere.
 
     Include the file first with `include_config/2`.
     """
     @spec sets_start_orchestrator?(Igniter.t(), String.t(), boolean()) :: boolean()
     def sets_start_orchestrator?(igniter, file, value) do
+      igniter
+      |> config_values(file, :ex_atlas, [:start_orchestrator])
+      |> Enum.any?(&Common.nodes_equal?(&1, value))
+    end
+
+    @doc """
+    The value nodes `config/<file>` sets for `app` at `path`.
+
+    Reads every `config` call in the file, inside `if` and `case` blocks too,
+    in both forms: `config :app, key: [sub: value]` and
+    `config :app, :key, sub: value`. `Igniter.Project.Config` reads only
+    top-level calls, and a host's runtime.exs often sets a key under
+    `if config_env() == :prod`.
+    """
+    @spec config_values(Igniter.t(), String.t(), atom(), [atom() | module()]) :: [Zipper.t()]
+    def config_values(igniter, file, app, path) do
       case Rewrite.source(igniter.rewrite, Path.join("config", file)) do
         {:ok, source} ->
-          zipper = source |> Rewrite.Source.get(:quoted) |> Zipper.zip()
-
-          case Function.move_to_function_call_in_current_scope(
-                 zipper,
-                 :config,
-                 2,
-                 &start_orchestrator?(&1, value)
-               ) do
-            {:ok, _call} -> true
-            :error -> false
-          end
+          source
+          |> Rewrite.Source.get(:quoted)
+          |> Zipper.zip()
+          |> Zipper.traverse([], fn zipper, found ->
+            {zipper, found ++ config_call_values(zipper, app, path)}
+          end)
+          |> elem(1)
 
         _ ->
-          false
+          []
       end
     end
 
-    defp start_orchestrator?(call, value) do
-      Function.argument_equals?(call, 0, :ex_atlas) and
-        Function.argument_matches_predicate?(call, 1, fn options ->
-          case IgniterKeyword.get_key(options, :start_orchestrator) do
-            {:ok, found} -> Common.nodes_equal?(Zipper.node(found), value)
-            :error -> false
+    defp config_call_values(zipper, app, [key | rest] = path) do
+      cond do
+        Function.function_call?(zipper, :config, 2) and Function.argument_equals?(zipper, 0, app) ->
+          with {:ok, options} <- Function.move_to_nth_argument(zipper, 1),
+               {:ok, value} <- get_path(options, path) do
+            [value]
+          else
+            _ -> []
           end
-        end)
+
+        Function.function_call?(zipper, :config, 3) and Function.argument_equals?(zipper, 0, app) and
+            Function.argument_equals?(zipper, 1, key) ->
+          with {:ok, options} <- Function.move_to_nth_argument(zipper, 2),
+               {:ok, value} <- get_path(options, rest) do
+            [value]
+          else
+            _ -> []
+          end
+
+        true ->
+          []
+      end
+    end
+
+    defp get_path(zipper, []), do: {:ok, zipper}
+
+    defp get_path(zipper, [key | rest]) do
+      if IgniterList.list?(zipper) do
+        with {:ok, value} <- IgniterKeyword.get_key(zipper, key), do: get_path(value, rest)
+      else
+        :error
+      end
     end
   end
 end

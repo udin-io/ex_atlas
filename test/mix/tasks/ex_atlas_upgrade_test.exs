@@ -130,6 +130,21 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
     end
 
+    test "finds start_orchestrator: true inside a runtime.exs block" do
+      igniter =
+        upgrade_0_7(%{
+          "config/runtime.exs" => """
+          import Config
+
+          if config_env() == :prod do
+            config :ex_atlas, start_orchestrator: true
+          end
+          """
+        })
+
+      assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
+    end
+
     test "stays quiet about the reap owner when runtime.exs sets one" do
       igniter =
         upgrade_0_7(%{
