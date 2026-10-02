@@ -30,17 +30,20 @@ if Code.ensure_loaded?(Igniter) do
     survive a deploy on a machine with no volume:
 
       * Writes `<timestamp>_add_atlas_tracking.exs` in the repo's migrations
-        (`priv/repo/migrations` for `MyApp.Repo`), which calls
-        `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration`. A migration
-        that already calls it stops a second one.
+        (`priv/repo/migrations` for `MyApp.Repo`, or the repo's literal
+        `priv:`), which calls `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration`.
+        A migration that already calls it stops a second one.
       * Sets `start_orchestrator: false` and the orchestrator's `tracking_store:`
         and `repo:` in `config/config.exs`. Warns about a
-        `start_orchestrator: true` in any other config file.
+        `start_orchestrator: true` or another `tracking_store:` left in any
+        config file, inside an `if` block too.
       * Puts `ExAtlas.Orchestrator.Supervisor` in your application's children,
         right after the repo.
 
-    `--repo` picks the repo when the project has several. With none, or with
-    a store other than `ecto`, the task stops and changes nothing.
+    `--repo` picks the repo when the project has several, or names one built
+    on your own wrapper module. With no repo, a repo missing from your
+    application's `children` list, or a store other than `ecto`, the task
+    stops and changes nothing.
 
     Idempotent — re-running is safe; `mix ex_atlas.upgrade` handles version-over-version
     migrations.
