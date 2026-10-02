@@ -303,13 +303,20 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       do: raise(ExAtlas.Error.new(:unauthorized, message: "no API key configured"))
   end
 
-  describe "a provider whose list raises" do
+  # A list that exits: an HTTP pool checkout that times out.
+  defmodule ExitingListProvider do
+    @moduledoc false
+    def capabilities, do: []
+    def list_compute(_filters, _ctx), do: exit({:timeout, {NimblePool, :checkout, [:pool]}})
+  end
+
+  describe "a provider whose list raises or exits" do
     setup do
       TestOrchestrator.put_env(
         tracking_store: false,
         reap_grace_ms: 0,
         reap_interval_ms: 60_000,
-        reap_providers: [RaisingListProvider, :mock],
+        reap_providers: [RaisingListProvider, ExitingListProvider, :mock],
         reap_name_prefix: "atlas-"
       )
 
@@ -325,6 +332,8 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       assert log =~ inspect(RaisingListProvider)
       assert log =~ ":unauthorized"
       refute log =~ "no API key configured"
+      assert log =~ "listing #{inspect(ExitingListProvider)} exited"
+      refute log =~ ":checkout"
     end
   end
 

@@ -370,9 +370,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
   end
 
   # A list that raises (RunPod with no API key, which the default
-  # `reap_providers` lists on a Vast-only host) skips that provider, not the
-  # tick: a crash would restart the Reaper gated, and no Adopter signals again.
-  # The log keeps the error's kind, never its message, which can carry a
+  # `reap_providers` lists on a Vast-only host) or exits (an HTTP pool
+  # checkout that times out) skips that provider, not the tick: a crash would
+  # restart the Reaper gated, and no Adopter signals again. The log keeps the
+  # error's kind, never its message or exit reason, which can carry a
   # provider's response.
   defp list_compute(provider) do
     ExAtlas.list_compute(provider: provider)
@@ -382,6 +383,14 @@ defmodule ExAtlas.Orchestrator.Reaper do
         "[ExAtlas.Orchestrator.Reaper] listing #{inspect(provider)} raised " <>
           "#{inspect(error.__struct__)}#{error_kind(error)}; its orphans are not reaped this " <>
           "tick. Configure its API key, or remove it from :reap_providers."
+      )
+
+      :error
+  catch
+    :exit, _reason ->
+      Logger.warning(
+        "[ExAtlas.Orchestrator.Reaper] listing #{inspect(provider)} exited; its orphans are " <>
+          "not reaped this tick."
       )
 
       :error
