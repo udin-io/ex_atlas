@@ -203,8 +203,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
     end
   end
 
-  # The supervisor this process runs under. `proc_lib` stores a registered
-  # parent by name and an unregistered one by pid.
+  # The supervisor this process runs under. A GenServer's `proc_lib` start
+  # stores a registered parent by name, a Task stores it by pid. A process no
+  # supervisor started, such as a test calling `Adopter.run/1`, has no
+  # ancestors and records nothing.
   defp tree do
     case Process.get(:"$ancestors") do
       [pid | _] when is_pid(pid) -> pid
