@@ -32,26 +32,54 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
   exit 0
   """
 
-  # Serves $STUB_SERVE for a download and keeps the file of an upload. A
-  # failure prints what curl -fsS prints for an HTTP 403: no URL.
+  # Serves $STUB_SERVE for a download and keeps the file of an upload. It acts
+  # as real curl does where a URL could print:
+  # - without -q first, a `verbose` line in $CURL_HOME/.curlrc prints the
+  #   request line;
+  # - without -g, `{` or `[` in the URL is a glob error that prints the URL;
+  # - on an HTTP error, -f prints one line with no URL; without -f the S3
+  #   error body, which echoes the signature, is the output.
   @curl_stub """
   #!/bin/sh
   echo "$*" >> "$STUB_DIR/curl.log"
+  first=$1
   out=
   upload=
+  url=
+  fail=
+  glob=on
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -o) out=$2; shift 2 ;;
-      -T) upload=$2; shift 2 ;;
-      *) shift ;;
+      -o) out=$2; shift 2; continue ;;
+      -T) upload=$2; shift 2; continue ;;
+      -g|--globoff) glob=off ;;
+      --connect-timeout|--speed-limit|--speed-time) shift ;;
+      http://*|https://*) url=$1 ;;
+      -*f*) case "$1" in --*) ;; *) fail=yes ;; esac ;;
     esac
+    shift
   done
+  if [ "$first" != "-q" ] && grep -q verbose "${CURL_HOME:-/nonexistent}/.curlrc" 2>/dev/null; then
+    echo "> ${upload:+PUT}${upload:-GET} $url" >&2
+  fi
+  case "$url" in
+    *[{[]*) [ "$glob" = on ] && { printf 'curl: (3) bad range in URL position 9:\n%s\n' "$url" >&2; exit 3; } ;;
+  esac
+  refused() {
+    if [ -n "$fail" ]; then
+      echo "curl: (22) The requested URL returned error: 403" >&2
+      exit 22
+    fi
+    body="<Error><Code>SignatureDoesNotMatch</Code><SignatureProvided>$url</SignatureProvided></Error>"
+    if [ -n "$out" ]; then echo "$body" > "$out"; else echo "$body"; fi
+    exit 0
+  }
   if [ -n "$upload" ]; then
-    [ -n "$STUB_FAIL_PUT" ] && { echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; }
+    [ -n "$STUB_FAIL_PUT" ] && refused
     cp "$upload" "$STUB_DIR/uploaded.tar.gz"
     exit 0
   fi
-  [ -n "$STUB_FAIL_GET" ] && { echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; }
+  [ -n "$STUB_FAIL_GET" ] && refused
   if [ -n "$out" ]; then cp "$STUB_SERVE" "$out"; else cat "$STUB_SERVE"; fi
   """
 
@@ -466,12 +494,37 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
         {"STUB_SERVE", dataset_archive(dir)}
       ]
 
-    test "control: a trainer that prints a URL shows up in every place we search", %{dir: dir} do
-      r = run(dir, ["sh", "-c", "echo $ATLAS_ARTIFACT_URL"], both_urls(dir))
+    test "control: a trainer that prints a signature shows up in every place we search", %{
+      dir: dir
+    } do
+      r = run(dir, ["sh", "-c", "echo #{@put_sig}"], both_urls(dir))
 
       assert r.output =~ @put_sig
       assert r.local_log =~ @put_sig
       assert r.archive["atlas.log"] =~ @put_sig
+    end
+
+    test "a URL curl would read as a glob", %{dir: dir} do
+      env = [
+        {"ATLAS_DATASET_URL", @get_url <> "[1-2]"},
+        {"ATLAS_ARTIFACT_URL", @put_url <> "{"},
+        {"STUB_SERVE", dataset_archive(dir)}
+      ]
+
+      r = run(dir, reads_dataset(), env)
+      assert r.status == 0
+      assert [_put] = upload_calls(r)
+      assert_no_signature(r)
+    end
+
+    test "a .curlrc that turns on verbose output", %{dir: dir} do
+      home = Path.join(dir, "curlhome")
+      File.mkdir_p!(home)
+      File.write!(Path.join(home, ".curlrc"), "verbose\n")
+
+      r = run(dir, marker_trainer(), both_urls(dir) ++ [{"CURL_HOME", home}])
+      assert r.status == 0
+      assert_no_signature(r)
     end
 
     test "on success", %{dir: dir} do
