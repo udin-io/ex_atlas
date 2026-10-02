@@ -167,16 +167,16 @@ defmodule ExAtlas.Providers.VastLiveTest do
     assert [price] = spot
     assert is_number(price) and price > 0
 
-    # Whether a bid search orders by dph_total the way the pick's order
-    # assumes: the printed min_bids should rise.
+    # A bid search lists dph_total as min_bid plus storage and sorts by it
+    # (read from Vast's free search on 2026-10-02; this checks it still holds).
     {:ok, query} = ExAtlas.Providers.Vast.Translate.gpu_type_query(:rtx_4090, :bid)
     {:ok, %{"offers" => offers}} = Client.post(ctx(opts), "/api/v0/bundles/", query)
 
-    IO.puts(
-      "first bid offers' min_bid: #{inspect(offers |> Enum.take(8) |> Enum.map(& &1["min_bid"]))}"
-    )
-
+    totals = Enum.map(offers, & &1["dph_total"])
+    first = offers |> Enum.take(4) |> Enum.map(&Map.take(&1, ~w(min_bid dph_base dph_total)))
+    IO.puts("first bid offers: #{inspect(first)}")
     assert Enum.all?(offers, &is_number(&1["min_bid"])), "a bid offer lists no min_bid"
+    assert totals == Enum.sort(totals), "a bid search is not sorted by dph_total"
 
     {:ok, compute} =
       ExAtlas.spawn_compute(
@@ -195,7 +195,7 @@ defmodule ExAtlas.Providers.VastLiveTest do
       "actual_status #{inspect(instance["actual_status"])}, intended_status " <>
         "#{inspect(instance["intended_status"])}, is_bid #{inspect(instance["is_bid"])}, " <>
         "min_bid #{inspect(instance["min_bid"])}, dph_total #{inspect(instance["dph_total"])}, " <>
-        "read cost_per_hour #{inspect(read.cost_per_hour)}"
+        "read cost_per_hour #{inspect(read.cost_per_hour)}, the rent's #{inspect(compute.cost_per_hour)}"
     )
 
     assert instance["is_bid"] == true, "Vast did not take the rent as an interruptible instance"
