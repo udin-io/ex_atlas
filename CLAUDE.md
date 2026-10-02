@@ -55,6 +55,15 @@ so `ci` stays red until cowlib ships a fix.
 - Never add `--ignore-advisory-ids`, an ignore file or a skip to make it
   green.
 
+### Test floats compare with a delta, and tests run from any checkout path
+
+- A bill is a float sum of several roundings, so a spend test uses
+  `assert_in_delta`, never `>= 5.0`. `CostMeter` reads integer milliseconds: a
+  respawn in the same ms as the last bill sums to 4.999999999999999 (#103).
+- Igniter's test mode skips dot directories, so `ex_atlas_upgrade_test.exs`
+  builds its project with `File.cd!/2` in a temp dir. Agent worktrees live
+  under `~/.claude_worktrees`; a new Igniter test uses the same helper (#104).
+
 ### Optional provider callbacks go through `dispatch_optional/3`
 
 `ExAtlas.Provider` lists its newer callbacks in `@optional_callbacks`:
