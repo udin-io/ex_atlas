@@ -104,6 +104,27 @@ defmodule ExAtlas.Providers.RunPodTest do
 
       assert {:ok, _} = ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
     end
+
+    test "inspect of the compute omits the env RunPod echoes back", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        json(conn, 201, Map.put(pod("p1", "RUNNING", "t"), "env", body["env"]))
+      end)
+
+      {:ok, compute} =
+        ExAtlas.spawn_compute(
+          [gpu: :h100, image: "x", env: %{"AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"}] ++ opts
+        )
+
+      # Control: the response did echo the secret, and `raw` still keeps it.
+      assert compute.raw["env"]["AWS_SECRET_ACCESS_KEY"] == "tsec-test-9f2c"
+      assert inspect(compute) =~ ~s(id: "p1")
+      refute inspect(compute) =~ "tsec-test-9f2c"
+    end
   end
 
   describe "get_compute/2" do
