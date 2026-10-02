@@ -137,12 +137,13 @@ defmodule ExAtlas.Config do
   end
 
   # `ExAtlas.Spec.ComputeRequest.new/1` checks each name and value. A tracking
-  # record's bare `:not_stored` passes: an adopted tracker hands its opts to
+  # record's bare `:not_stored` passes, or the `"not_stored"` a host store that
+  # keeps atoms as strings returns: an adopted tracker hands its opts to
   # `build_ctx/2` on every poll.
   defp seal_env(env) when is_map(env) and not is_struct(env),
     do: {:ok, Map.new(env, fn {name, value} -> {name, Secret.wrap(value)} end)}
 
-  defp seal_env(:not_stored), do: {:ok, :not_stored}
+  defp seal_env(marker) when marker in [:not_stored, "not_stored"], do: {:ok, marker}
 
   defp seal_env(_env), do: invalid(:env, "expected a map of string names to string values")
 

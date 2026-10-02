@@ -359,7 +359,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp seal_stored_env(env), do: env
 
-  defp seal_stored_value(:not_stored), do: :not_stored
+  defp seal_stored_value(marker) when marker in [:not_stored, "not_stored"], do: marker
   defp seal_stored_value(value), do: ExAtlas.Secret.wrap(value)
 
   defp tracked_id({:adopted, record}), do: record.id
@@ -1063,11 +1063,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   # The names of the values a record left out, as a message suffix; `nil` when
-  # the env is whole. `TrackingStore.scrub_opts/1` writes both markers.
-  defp unstored_env(:not_stored), do: ""
+  # the env is whole. `TrackingStore.scrub_opts/1` writes both markers. A host
+  # store that keeps atoms as strings hands back `"not_stored"`, which counts
+  # too: a replacement must never get the marker as a value.
+  defp unstored_env(marker) when marker in [:not_stored, "not_stored"], do: ""
 
   defp unstored_env(env) when is_map(env) do
-    case for {name, :not_stored} <- env, do: name do
+    case for {name, value} <- env, value in [:not_stored, "not_stored"], do: name do
       [] -> nil
       names -> " (#{names |> Enum.sort() |> Enum.join(", ")})"
     end

@@ -693,6 +693,39 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert ExAtlas.Spec.ComputeRequest.container_env(replacement.raw.request) == @env
     end
 
+    test "a host store that turned the marker into a string still refuses the respawn" do
+      compute = orphaned_env_task("trainer-adopted-env-string:latest")
+      id = compute.id
+
+      {:ok, record} = Memory.get(id)
+      json_like = %{"HF_TOKEN" => "not_stored", "WANDB_PROJECT" => "not_stored"}
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, json_like)})
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute "trainer-adopted-env-string:latest" in env_images()
+    end
+
+    test "a host store that turned the bare marker into a string still refuses the respawn" do
+      compute = orphaned_env_task("trainer-adopted-env-bare-string:latest")
+      id = compute.id
+
+      {:ok, record} = Memory.get(id)
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, "not_stored")})
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute "trainer-adopted-env-bare-string:latest" in env_images()
+    end
+
     test "control: an empty env: respawns after adoption" do
       compute = orphaned_env_task("trainer-adopted-env-empty:latest", %{})
       id = compute.id
