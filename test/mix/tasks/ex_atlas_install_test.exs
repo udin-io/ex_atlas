@@ -1,5 +1,7 @@
 defmodule Mix.Tasks.ExAtlas.InstallTest do
-  use ExUnit.Case, async: true
+  # Not async: `IgniterProject.run/3` changes the VM's working directory,
+  # and async tests run while ExUnit still loads test files by relative path.
+  use ExUnit.Case, async: false
 
   import Igniter.Test
 

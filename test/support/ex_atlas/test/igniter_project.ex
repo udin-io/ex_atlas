@@ -6,6 +6,9 @@ defmodule ExAtlas.Test.IgniterProject do
   absolute path, and GlobEx's `**` skips a dot directory. A checkout under
   `~/.claude_worktrees` finds no module, so the project runs from a temp
   directory with no dot segment in its path (#104).
+
+  `File.cd!/2` changes the working directory of the whole VM, so a test
+  module that calls this must be `async: false`.
   """
 
   @doc "Compose `task` with `argv` over a test project holding `files`."
