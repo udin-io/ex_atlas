@@ -69,7 +69,10 @@ defmodule ExAtlas.Orchestrator.Lease do
   ## Clocks
 
   Expiry is the renewing node's wall clock; a claimer compares it with its
-  own. Keep clock skew between nodes well under `lease_ttl_ms`. The dead-owner
+  own. Keep clock skew between nodes well under `lease_ttl_ms`, and give
+  every node the same `lease_ttl_ms`: a node with a longer ttl renews less
+  often, and after a database outage another node can read it dead before
+  its next renewal. The dead-owner
   window runs on the monotonic clock, so skew moves only when the watch
   starts, never how long it lasts.
   """

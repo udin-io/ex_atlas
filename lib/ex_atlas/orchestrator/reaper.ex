@@ -114,15 +114,24 @@ defmodule ExAtlas.Orchestrator.Reaper do
   for `:reap_dead_owner_after_ms` (15 minutes by default) while this node
   renewed its own. The rules above still hold: the pod bills, is in neither
   the Registry nor the store, carries the prefix and is past grace. The
-  Reaper keeps the pod when a connected node reports that owner, and when
-  any connected node cannot report its owner. Each deletion logs a warning
-  with the owner and its lease's expiry.
+  Reaper reads the dead owners again after each provider's list, just before
+  it deletes. It keeps the pod when a connected node reports that owner, and
+  when any connected node reports no valid owner or cannot report one. Each
+  deletion logs a warning with the owner and its lease's expiry.
 
-  A node that is alive but cut off from the database, and connected to no
-  other node, reads as dead after the window, and so does a node that once
-  renewed and now runs no Lease (its callback secret removed, say). Their
-  untracked pods go. Cluster the nodes, or raise `:reap_dead_owner_after_ms`.
-  A pod a dead owner's record still names stays, as today.
+  The deletion trusts `atlas_owner_leases`. These live nodes read as dead
+  after the window, and lose their untracked pods, unless clustered with
+  this node: one cut off from the database; one that runs no Lease (no
+  callback secret, the DETS store, an older release) and has an expired row,
+  written once by itself or by anyone who can write that table; and one
+  whose row a writer keeps pinning to an old expiry. Cluster the nodes, let
+  only the app write the table, and give every node the same
+  `lease_ttl_ms`. Issue 148 signs the rows. To turn the deletion off:
+
+      config :ex_atlas, :orchestrator, reap_dead_owners: false
+
+  Any value but `true` turns it off. A pod a dead owner's record still names
+  stays, as today.
 
   ## The grace window
 

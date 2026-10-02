@@ -21,15 +21,20 @@ default, from two `lease_ttl_ms` to 24 hours):
     connected node reports it
 
 It keeps the pod when a connected node reports that owner, when any
-connected node cannot report its owner, and when this node has not renewed
-its own lease for the whole window. A node that just booted waits a full
-window. A store of your own opts in with the optional `expired_leases/1`
-callback.
+connected node reports no valid owner or cannot report one, and when this
+node has not renewed its own lease for the whole window. A node that just
+booted waits a full window. `reap_dead_owners: false` turns it off. A store
+of your own opts in with the optional `expired_leases/1` callback.
 
-- **Upgrade:** an unclustered node cut off from the database for the whole
-  window, or one that stopped renewing its lease (its callback secret
-  removed), loses its untracked pods to the other nodes. Cluster the nodes,
-  or raise `:reap_dead_owner_after_ms`.
+A delete that raises or exits no longer stops the Reaper's tick: it logs the
+error's kind and the next pod goes on.
+
+- **Upgrade:** the deletion trusts `atlas_owner_leases`, whose rows are not
+  signed yet (#148). An unclustered live node loses its untracked pods when
+  it is cut off from the database for the whole window, or renews no lease
+  (no callback secret, DETS, an older release) and has an expired row. Give
+  every node the same `lease_ttl_ms`, cluster the nodes, let only the app
+  write the table, or set `reap_dead_owners: false`.
 
 ## v0.9.0 — 2026-10-02
 

@@ -195,13 +195,13 @@ sequenceDiagram
   Store-->>L2: m1 expires_at T
   Note over L2: watch m1 with T on the monotonic clock. A moved T, a failed renewal or read, or a ttl gap starts it again
   R2->>Peers: Ownership.owner() over erpc
-  Peers-->>R2: owners of live connected nodes, or no answer
-  R2->>L2: dead_owners()
-  L2->>Store: expired_leases(now), to confirm T
-  L2-->>R2: m1 with T, or none when a window has not passed or m2 last renewed a ttl ago
+  Peers-->>R2: owners of live connected nodes, or no valid answer
   R2->>P: list_compute()
   P-->>R2: atlas-m1-notebook-3 billing, untracked, no record, past grace
-  alt m1 dead, no peer reports m1, every peer answered
+  R2->>L2: dead_owners(), after the list
+  L2->>Store: expired_leases(now), to confirm T
+  L2-->>R2: m1 with T, or none when a window has not passed or m2 last renewed a ttl ago
+  alt m1 dead, no peer reports m1, every peer named a valid owner, reap_dead_owners on
     R2->>P: ExAtlas.terminate(id)
     R2->>R2: warning, deleted pod of dead owner m1
   else otherwise

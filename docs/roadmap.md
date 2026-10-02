@@ -22,6 +22,7 @@ the owner's live tests settle. The ranking is on #143. Two slices:
 |---|---|---|
 | 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods | #144, PR #147 |
 | 2 | A record a dead owner still holds after the window no longer shields its pod: the Reaper deletes the pod, then the record | #145 |
+| 3 | Owner lease rows are signed, so a database writer cannot fake a dead owner (review finding on PR #147) | #148 |
 
 Vast.ai (#98) shipped with slice 4. Its templates, network volumes,
 serverless, and SSH and Jupyter modes stay out of scope.
