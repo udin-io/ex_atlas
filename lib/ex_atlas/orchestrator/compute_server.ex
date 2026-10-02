@@ -1552,7 +1552,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     contain_store(state.compute.id, :ok, fn ->
       case store.get(state.compute.id) do
         {:ok, record} ->
-          store.put(TrackingStore.rewrite(fun.(record), TrackingStore.sealed?(record)))
+          store.put(TrackingStore.rewrite(fun.(record), signed_as?(record, state.compute.id)))
 
         :error ->
           :ok
@@ -1566,6 +1566,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     since_ms = System.system_time(:millisecond) - (now_ms() - meter.since_ms)
     update_record(state, &Map.merge(&1, TrackingStore.cost_fields(meter, since_ms)))
   end
+
+  # A store can file one task's signed record under another task's id (a DETS
+  # entry's key is not the record's `:id`). Re-signing it would splice two
+  # tasks into a record this node never wrote.
+  defp signed_as?(%{id: id} = record, id), do: TrackingStore.sealed?(record)
+  defp signed_as?(_record, _id), do: false
 
   defp carry_record(%{store: nil}, _old_id, _new_id), do: :ok
 
@@ -1583,7 +1589,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
                 respawning: nil,
                 opts: next_attempt(record.opts, attempt)
               }),
-              TrackingStore.sealed?(record)
+              signed_as?(record, old_id)
             )
           )
 

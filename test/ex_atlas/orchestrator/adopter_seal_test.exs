@@ -228,6 +228,28 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
     end
   end
 
+  describe "a signed record filed under another task's id" do
+    # DETS keys an entry apart from the record it holds, so a writer can file
+    # task Y's signed record under task X's key (review finding on PR 135).
+    test "is not re-signed under the replacement's id", %{tmp_dir: dir} do
+      store = start_dets!(dir)
+      %{id: x} = orphaned_task()
+      %{id: y} = orphaned_task(name: "atlas-sealed-y")
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(x))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      {:ok, record_y} = store.get(y)
+      :ok = :dets.insert(:ex_atlas_tracked, {x, record_y})
+      :ok = Mock.forget(x)
+
+      assert_receive {:atlas_compute, ^x, {:respawned, new_id}}, 2_000
+      assert {:ok, replacement} = store.get(new_id)
+      refute TrackingStore.sealed?(replacement)
+    end
+  end
+
   describe "a record from 0.8.0, with no signature" do
     for {label, edit} <- [
           {"without the :mac field", quote(do: &Map.delete(&1, :mac))},
