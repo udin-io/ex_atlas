@@ -49,6 +49,30 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     )
   end
 
+  # A host's migration for each step, as the upgrade notice tells it to write.
+  defmodule StepOne do
+    @moduledoc false
+    use Ecto.Migration
+    def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 1)
+    def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 1)
+  end
+
+  defmodule StepTwo do
+    @moduledoc false
+    use Ecto.Migration
+    def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 2)
+    def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 2)
+  end
+
+  defp tables do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'atlas_%' ORDER BY name"
+      )
+
+    List.flatten(rows)
+  end
+
   describe "all/0" do
     test "answers {:error, _} when the table was never migrated", %{tmp_dir: dir} do
       start!(dir, migrate: false)
@@ -276,7 +300,30 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     end
 
     test "up/1 refuses a version this build does not have" do
-      assert_raise ArgumentError, ~r/version/, fn -> Store.Migration.up(version: 2) end
+      assert_raise ArgumentError, ~r/version/, fn -> Store.Migration.up(version: 3) end
+    end
+
+    test "step 1 creates the records table alone; step 2 adds the lease table", %{
+      tmp_dir: dir
+    } do
+      start!(dir, migrate: false)
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}], :up, all: true, log: false)
+      assert tables() == ["atlas_tracking_records"]
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+      assert tables() == ["atlas_owner_leases", "atlas_tracking_records"]
+    end
+
+    test "down(version: 2) drops the lease table and keeps the records", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+      :ok = Store.put(record("pod-a"))
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :down, step: 1, log: false)
+
+      assert tables() == ["atlas_tracking_records"]
+      assert {:ok, [%{id: "pod-a"}]} = Store.all()
     end
 
     test "down runs inside a migration and drops the table", %{tmp_dir: dir} do
