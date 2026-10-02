@@ -22,7 +22,7 @@ opt-in orchestrator that tracks, polls and deletes the pods you rent. It also ca
 | Catalog | `ExAtlas` | `list_gpu_types/1`, `capabilities/1` |
 | Resources | `ExAtlas` | network volumes, templates, endpoints (list, get, create, delete), `compute_spend/2` |
 | Provider contract | `ExAtlas.Provider` | Behaviour. Newer callbacks are optional; `ExAtlas` returns `:unsupported` when a provider lacks one |
-| Providers | `ExAtlas.Providers.*` | `RunPod` (complete), `LambdaLabs` (spawn, get, list, terminate, GPU types, `command:` and `run_task/1`), `Vast` (spawn, get, list, terminate, GPU types, `command:` and `run_task/1`, and `spot: true` interruptible offers), `Mock` (tests, demos), `Fly` (stub) |
+| Providers | `ExAtlas.Providers.*` | `RunPod` (complete), `LambdaLabs` (spawn, get, list, terminate, GPU types, `command:` and `run_task/1`), `Vast` (spawn, get, list, terminate, GPU types, `command:` and `run_task/1`, `spot: true` interruptible offers, `stop/2`, `start/2` and `compute_spend/3`), `Mock` (tests, demos), `Fly` (stub) |
 | Orchestrator | `ExAtlas.Orchestrator` | `spawn/1`, `run_task/1`, `await_ready/2`, `touch/1`, `info/1`, `stop_tracked/1`, `list_ids/0`, `lookup/1` |
 | Pod callbacks | `ExAtlas.Callback`, `ExAtlas.Callback.Plug` | A pod reports progress, logs and its exit code to the host |
 | Auth | `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` | Bearer tokens and signed URLs for browser-to-pod traffic |

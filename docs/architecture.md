@@ -12,7 +12,7 @@ database and no web UI. It runs inside the host application's VM.
 | Host Phoenix app | Calls `ExAtlas` and `ExAtlas.Orchestrator`; subscribes to `ExAtlas.PubSub` topics `"compute:<id>"` |
 | RunPod | HTTPS through `Req` (`ExAtlas.Providers.RunPod.Client`): pods, catalog, billing, templates, volumes, endpoints, jobs |
 | Lambda Cloud API v1 | HTTPS through `Req` (`ExAtlas.Providers.LambdaLabs.Client`): instance types, firewall rulesets, launch, get, list, terminate |
-| Vast.ai API | HTTPS through `Req` (`ExAtlas.Providers.Vast.Client`): offer search, rent, get, list (v1, paged by `next_token`), destroy |
+| Vast.ai API | HTTPS through `Req` (`ExAtlas.Providers.Vast.Client`): offer search, rent, get, list (v1, paged by `next_token`), stop and start (`PUT` state), charges (paged by `next_token`), destroy |
 | A Vast instance | A marketplace host runs the image as a Docker container with its own entrypoint; Vast maps each container port to a random host port |
 | A Lambda instance | cloud-init runs the `user_data` script ExAtlas wrote; it starts the container with `docker run`. With a callback, a `systemd-run` unit POSTs the container's exit code to `Callback.Plug` |
 | A running pod | POSTs to the host through `ExAtlas.Callback.Plug` (progress, logs, finish) |
@@ -184,6 +184,27 @@ that 0.8.0 itself respawned keeps two claim-less pods, which risk 49 records.
    `estimated_usd`, `billed_usd` and `spent_usd`.
 5. A respawn calls `CostMeter.new_pod/2`; a bill queued for the replaced pod
    is ignored.
+
+On Vast (#116) step 4 reads `GET /api/v0/charges/` for the UTC days from the
+pod's start. Vast takes no instance filter, so `Providers.Vast` pages through
+the account's contract rows and keeps those whose `source` is
+`instance-<id>`. The total is their `amount`; `gpu_usd` and `disk_usd` sum
+the `gpu` and `disk` items.
+
+```mermaid
+sequenceDiagram
+  participant CS as ComputeServer
+  participant EA as ExAtlas.compute_spend
+  participant V as Providers.Vast
+  participant API as console.vast.ai
+  CS->>EA: every reconcile_spend_ms, from: spawn time
+  EA->>V: compute_spend(id, from:, ctx)
+  V->>API: GET /api/v0/charges/ (day range, type instance)
+  API-->>V: results page, next_token
+  V->>API: next page until next_token is null
+  V-->>CS: Spend total_usd, gpu_usd, disk_usd
+  CS->>CS: the meter rises to the bill, never falls
+```
 
 ## A Lambda Labs spawn
 
@@ -393,10 +414,11 @@ classDiagram
     delete_request(url, key_var)
   }
   class Vast["Providers.Vast"] {
-    capabilities: raw_tcp, self_terminate, spot
+    capabilities: billing, raw_tcp, self_terminate, spot
     spawn_compute, get_compute, list_compute
     terminate, list_gpu_types
-    stop and start return unsupported
+    stop, start
+    compute_spend
   }
   class VastClient["Vast.Client"] {
     get(ctx, path)
@@ -404,6 +426,7 @@ classDiagram
     put(ctx, path, body, opts)
     delete(ctx, path)
     list_instances(ctx)
+    instance_charges(ctx, source, from_unix, to_unix)
   }
   class VastTranslate["Vast.Translate"] {
     launch_parts(request)
@@ -413,6 +436,8 @@ classDiagram
     priced(body, request, offer)
     launched_compute(id, request, parts, offer)
     instance_to_compute(instance)
+    state_body(state)
+    charges_to_spend(rows, id, from, to)
     gpu_types(offers_by_gpu, bid_offers_by_gpu)
   }
   class RunPodTranslate["RunPod.Translate"]
