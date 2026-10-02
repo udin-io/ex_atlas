@@ -38,6 +38,14 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
     end
 
+    test "signs the record with the node's key" do
+      {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
+
+      assert {:ok, %{mac: mac} = record} = Memory.get(compute.id)
+      assert is_binary(mac)
+      assert TrackingStore.sealed?(record)
+    end
+
     test "writes a record holding what it takes to rebuild the tracker" do
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 

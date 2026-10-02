@@ -357,6 +357,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       user_id: Keyword.get(tracking, :user_id)
     }
     |> Map.merge(initial_cost(Keyword.get(tracking, :max_cost, false), compute))
+    |> seal()
   end
 
   defp initial_cost(false, _compute),
@@ -470,6 +471,68 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   defp callback_task_id(%{task_id: task_id}), do: task_id
   defp callback_task_id(_no_callback), do: nil
+
+  @doc """
+  `record` signed with this node's key, under `:mac`.
+
+  The key is derived from `config :ex_atlas, :callback, secret:` with its own
+  salt. With no usable secret the record carries no `:mac`. The MAC covers
+  every other field, so an edit of any field fails `sealed?/1`.
+  """
+  @spec seal(record()) :: record()
+  def seal(record) do
+    case seal_key() do
+      nil -> Map.delete(record, :mac)
+      key -> Map.put(record, :mac, mac(key, record))
+    end
+  end
+
+  @doc """
+  Whether `record`'s `:mac` is this node's signature over it.
+
+  `false` for a record with no `:mac` (written by 0.8.0, or by a node with no
+  callback secret), for one signed under another secret, and for one any
+  field of which changed after signing.
+  """
+  @spec sealed?(map()) :: boolean()
+  def sealed?(%{mac: mac} = record) when is_binary(mac) do
+    case seal_key() do
+      nil -> false
+      key -> Plug.Crypto.secure_compare(mac, mac(key, record))
+    end
+  end
+
+  def sealed?(_record), do: false
+
+  @doc """
+  `record` as a rewrite writes it: scrubbed by `scrub_record/1`, and signed
+  only when the record it rewrites was (`sealed?`). A node never signs a
+  record it did not sign before, so no rewrite turns a forged row into a
+  trusted one.
+  """
+  @spec rewrite(record(), boolean()) :: record()
+  def rewrite(record, sealed?) do
+    record = scrub_record(record)
+    if sealed?, do: seal(record), else: Map.delete(record, :mac)
+  end
+
+  defp mac(key, record) do
+    bytes = :erlang.term_to_binary(Map.delete(record, :mac), [:deterministic])
+    :crypto.mac(:hmac, :sha256, key, bytes)
+  end
+
+  # A salt of its own, so the key that signs records signs no callback token.
+  @seal_salt "ex_atlas tracking record v1"
+
+  defp seal_key do
+    case Application.get_env(:ex_atlas, :callback, [])[:secret] do
+      secret when is_binary(secret) and byte_size(secret) >= 32 ->
+        Plug.Crypto.KeyGenerator.generate(secret, @seal_salt, cache: Plug.Crypto.Keys)
+
+      _none_or_unusable ->
+        nil
+    end
+  end
 
   defp orchestrator_config, do: Application.get_env(:ex_atlas, :orchestrator, [])
 end
