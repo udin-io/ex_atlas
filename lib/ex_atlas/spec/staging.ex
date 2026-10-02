@@ -26,9 +26,13 @@ defmodule ExAtlas.Spec.Staging do
   S3 endpoint variable is set, not the global `AWS_ENDPOINT_URL`, which would
   also redirect every other AWS service the container calls.
 
-  `inspect/1` prints the endpoint, region and URIs, never a credential.
-  Validation errors name the key and the rule, never a value.
+  `inspect/1` prints the endpoint, region and URIs, never a credential. The
+  three credential fields hold an `ExAtlas.Secret`, so a printer that skips
+  `Inspect` prints none of them either. Validation errors name the key and the
+  rule, never a value.
   """
+
+  alias ExAtlas.Secret
 
   @derive {Inspect, only: [:endpoint, :region, :dataset_uri, :artifact_uri]}
   defstruct endpoint: nil,
@@ -42,9 +46,9 @@ defmodule ExAtlas.Spec.Staging do
   @type t :: %__MODULE__{
           endpoint: String.t() | nil,
           region: String.t() | nil,
-          access_key_id: String.t() | nil,
-          secret_access_key: String.t() | nil,
-          session_token: String.t() | nil,
+          access_key_id: Secret.t() | nil,
+          secret_access_key: Secret.t() | nil,
+          session_token: Secret.t() | nil,
           dataset_uri: String.t() | nil,
           artifact_uri: String.t() | nil
         }
@@ -78,7 +82,9 @@ defmodule ExAtlas.Spec.Staging do
   @spec new(t() | map() | keyword() | nil) ::
           {:ok, t() | nil} | {:error, NimbleOptions.ValidationError.t()}
   def new(nil), do: {:ok, nil}
-  def new(%__MODULE__{} = staging), do: staging |> Map.from_struct() |> new()
+
+  def new(%__MODULE__{} = staging),
+    do: staging |> Map.from_struct() |> Map.new(fn {k, v} -> {k, Secret.reveal(v)} end) |> new()
 
   def new(input) when (is_map(input) and not is_struct(input)) or is_list(input) do
     with {:ok, fields} <- fields(input),
@@ -89,7 +95,7 @@ defmodule ExAtlas.Spec.Staging do
          :ok <- check_uri(:artifact_uri, staging.artifact_uri),
          :ok <- check_credentials(staging),
          :ok <- check_has_uri(staging) do
-      {:ok, staging}
+      {:ok, seal(staging)}
     end
   end
 
@@ -106,7 +112,7 @@ defmodule ExAtlas.Spec.Staging do
 
   def env(%__MODULE__{} = staging) do
     for {key, names} <- @variables,
-        value = Map.fetch!(staging, key),
+        value = Secret.reveal(Map.fetch!(staging, key)),
         value != nil,
         name <- names,
         into: %{},
@@ -117,6 +123,12 @@ defmodule ExAtlas.Spec.Staging do
     raise ArgumentError,
           "ComputeRequest.s3 must be nil or an ExAtlas.Spec.Staging from Staging.new/1 " <>
             "or ComputeRequest.new/1"
+  end
+
+  @credentials [:access_key_id, :secret_access_key, :session_token]
+
+  defp seal(staging) do
+    Enum.reduce(@credentials, staging, fn key, acc -> Map.update!(acc, key, &Secret.wrap/1) end)
   end
 
   # --- validation ---

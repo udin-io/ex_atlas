@@ -513,8 +513,11 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
       assert {:ok, %{compute: replacement}} = ExAtlas.Orchestrator.info(new_id)
 
-      assert %{dataset_uri: "s3://bucket/datasets/abc/", secret_access_key: "tsec-test-9f2c"} =
-               replacement.raw.request.s3
+      assert %{
+               "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
+               "AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"
+             } =
+               ExAtlas.Spec.Staging.env(replacement.raw.request.s3)
     end
 
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do
