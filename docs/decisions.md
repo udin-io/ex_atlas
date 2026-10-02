@@ -29,6 +29,11 @@ names the PR or issue that holds the reasoning.
 | `persist: true` with `s3:` is refused until #74 | Store `s3:` like `env:`: a credential on disk | #26, #75 |
 | URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
 | ExAtlas never presigns and never calls S3 | Presign in ExAtlas: needs a SigV4 signer and host credentials | #26 |
+| Presigned URLs may be `http://` or `https://`, need a host, and carry no user info | `https://` only: a local MinIO runs on plain HTTP | #26, #73 |
+| `Spec.Staging` holds `dataset_url` and `artifact_url` as `ExAtlas.Secret`s | Plain strings left out of `Inspect`'s `only:` list: `structs: false` and `~p` print them | #73 |
+| The entrypoint downloads the dataset archive to a file, then runs `tar -xf` | `curl \| tar -x`: GNU tar detects no compression on a pipe, and the pipe hides curl's exit code | #73 |
+| The artifacts and the log go up as one `.tar.gz` built with `tar -czf` | `tar \| gzip`: POSIX `sh` cannot read tar's exit code in a pipe | #73 |
+| A URI and a URL for the same side: the URI wins and the script prints which variable it ignored | Refuse both in `Staging.new/1`: blocks an image that reads only one of them | #73 |
 
 ## Cost caps (feature #28)
 
