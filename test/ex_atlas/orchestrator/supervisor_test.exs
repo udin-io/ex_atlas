@@ -8,8 +8,10 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Adopter, Reaper}
+  alias ExAtlas.Orchestrator.{Adopter, Lease, Reaper}
   alias ExAtlas.Orchestrator.Supervisor, as: OrchestratorSupervisor
   alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
   alias ExAtlas.Providers.Mock
@@ -168,6 +170,76 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
     boot(db)
 
     assert Enum.sort(Orchestrator.list_ids()) == Enum.sort([old.id, new.id])
+  end
+
+  describe "owner leases (issue 132)" do
+    test "a node with :reap_owner takes over a dead owner's task once its lease expires",
+         %{database: db} do
+      TestOrchestrator.put_env(reap_owner: "m1")
+      boot(db)
+      {:ok, tracker, compute} = run_task(persist: true)
+      ref = Process.monitor(tracker)
+      Process.exit(tracker, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^tracker, :killed}, 2_000
+      shutdown()
+
+      # m1 never comes back: its last renewal runs out.
+      with_repo(db, fn ->
+        :ok = Store.renew_lease("m1", System.system_time(:millisecond) - 1)
+      end)
+
+      TestOrchestrator.put_env(reap_owner: "m2")
+      boot(db)
+      :sys.get_state(Lease)
+
+      assert Orchestrator.list_ids() == [compute.id]
+      assert {:ok, %{owner: "m2"}} = Store.get(compute.id)
+    end
+
+    test "control: a node takes over nothing of an owner whose lease is live",
+         %{database: db} do
+      TestOrchestrator.put_env(reap_owner: "m1")
+      boot(db)
+      {:ok, tracker, compute} = run_task(persist: true)
+      ref = Process.monitor(tracker)
+      Process.exit(tracker, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^tracker, :killed}, 2_000
+      shutdown()
+
+      TestOrchestrator.put_env(reap_owner: "m2")
+      boot(db)
+      :sys.get_state(Lease)
+
+      assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+    end
+
+    test "starts no Lease without a valid :reap_owner", %{database: db} do
+      for owner <- [nil, "Not Valid!"] do
+        TestOrchestrator.put_env(reap_owner: owner)
+        capture_log(fn -> boot(db) end)
+
+        refute Process.whereis(Lease)
+        shutdown()
+      end
+    end
+
+    test "starts no Lease with a store that has no lease callbacks", %{tmp_dir: dir} do
+      TestOrchestrator.put_env(
+        reap_owner: "m2",
+        tracking_store: ExAtlas.Orchestrator.TrackingStore.Dets,
+        storage_path: dir
+      )
+
+      start_supervised!(%{
+        id: :host,
+        start: {OrchestratorSupervisor, :start_link, [[]]},
+        type: :supervisor
+      })
+
+      assert Process.whereis(ExAtlas.Orchestrator.ComputeSupervisor)
+      refute Process.whereis(Lease)
+    end
   end
 
   test "refuses to start when start_orchestrator: true, naming both settings" do

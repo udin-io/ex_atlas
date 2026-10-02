@@ -30,6 +30,8 @@ defmodule ExAtlas.Orchestrator.Supervisor do
     ComputeRegistry,
     ComputeServer,
     ComputeSupervisor,
+    Lease,
+    Ownership,
     Reaper,
     TrackingStore
   }
@@ -61,7 +63,8 @@ defmodule ExAtlas.Orchestrator.Supervisor do
   The tracking store comes first, so it outlives the trackers that write to it
   from `terminate/2`. The Adopter comes last: it needs the store, the Registry
   and the DynamicSupervisor, and it signals the Reaper, which must already be
-  registered.
+  registered. `ExAtlas.Orchestrator.Lease` follows it, only when the store
+  implements leases and `:reap_owner` is set and valid.
   """
   @spec children() :: [Supervisor.child_spec() | {module(), term()} | module()]
   def children do
@@ -71,7 +74,7 @@ defmodule ExAtlas.Orchestrator.Supervisor do
         {Task.Supervisor, name: ComputeServer.task_supervisor_name()},
         {DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one},
         Limiter
-      ] ++ pubsub_child() ++ [Reaper] ++ adopter_child()
+      ] ++ pubsub_child() ++ [Reaper] ++ adopter_child() ++ lease_child()
   end
 
   defp tracking_store_child do
@@ -85,6 +88,16 @@ defmodule ExAtlas.Orchestrator.Supervisor do
     case TrackingStore.impl() do
       nil -> []
       _store -> [Adopter]
+    end
+  end
+
+  defp lease_child do
+    with store when not is_nil(store) <- TrackingStore.impl(),
+         true <- Lease.supported?(store),
+         {:ok, owner} when is_binary(owner) <- Ownership.owner() do
+      [{Lease, store: store, owner: owner}]
+    else
+      _no_lease -> []
     end
   end
 
