@@ -3,6 +3,7 @@ defmodule ExAtlas.DocsTest do
 
   @config Mix.Project.config()
   @docs Keyword.fetch!(@config, :docs)
+  @doc_files ["README.md" | Path.wildcard("guides/*.md")] ++ Path.wildcard("lib/mix/tasks/*.ex")
 
   describe "sidebar groups" do
     test "every public module with docs sits in a group" do
@@ -24,6 +25,64 @@ defmodule ExAtlas.DocsTest do
             do: inspect(mod)
 
       assert unknown == []
+    end
+  end
+
+  describe "install and upgrade commands" do
+    test "every {:ex_atlas, \"~> x.y\"} pin matches the project's major.minor" do
+      [major, minor | _] = String.split(@config[:version], ".")
+      expected = "~> #{major}.#{minor}"
+
+      pins =
+        for file <- @doc_files,
+            [_, pin] <- Regex.scan(~r/\{:ex_atlas,\s*"([^"]+)"/, File.read!(file)),
+            do: {file, pin}
+
+      assert pins != []
+      assert for({file, pin} <- pins, pin != expected, do: {file, pin}) == []
+    end
+
+    test "mix deps.update, igniter.install and igniter.upgrade name ex_atlas" do
+      wrong =
+        for file <- @doc_files,
+            [cmd, pkg] <-
+              Regex.scan(
+                ~r/mix (deps\.update|igniter\.install|igniter\.upgrade) ([a-z_]+)/,
+                File.read!(file),
+                capture: :all_but_first
+              ),
+            pkg != "ex_atlas",
+            do: {file, cmd, pkg}
+
+      assert wrong == []
+    end
+
+    test "hex.pm and hexdocs.pm links never name the package atlas" do
+      wrong =
+        for file <- @doc_files ++ Path.wildcard("lib/**/*.ex"),
+            [url, pkg] <-
+              Regex.scan(~r{https://(?:hex\.pm/packages|hexdocs\.pm)/([a-z_]+)}, File.read!(file)),
+            pkg == "atlas",
+            do: {file, url}
+
+      assert wrong == []
+    end
+  end
+
+  describe "relative Markdown links" do
+    test "each points at a file the hex package ships" do
+      shipped = @config[:package][:files]
+
+      broken =
+        for file <- ["README.md" | Path.wildcard("guides/*.md")],
+            [_, target] <- Regex.scan(~r/\]\(([^)\s]+)\)/, File.read!(file)),
+            not String.starts_with?(target, ["http://", "https://", "#", "mailto:"]),
+            path =
+              target |> String.split("#") |> hd() |> then(&Path.join(Path.dirname(file), &1)),
+            not (File.exists?(path) and shipped?(path, shipped)),
+            do: {file, target}
+
+      assert broken == []
     end
   end
 
