@@ -78,6 +78,7 @@ defmodule ExAtlas.MixProject do
         "README.md",
         "CHANGELOG.md",
         "guides/getting_started.md",
+        "guides/upgrading.md",
         "guides/fly.md",
         "guides/transient_pods.md",
         "guides/data_staging.md",

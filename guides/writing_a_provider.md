@@ -5,6 +5,9 @@ ExAtlas providers are plain Elixir modules that implement the
 scheme, and any data model internally — the only contract is the
 callbacks and the normalized structs they return.
 
+A provider written for 0.7 reads `ctx.api_key` as a string. From 0.8.0 it is an
+`ExAtlas.Secret`: see [Upgrading](upgrading.md).
+
 ## Minimum viable provider
 
 ```elixir

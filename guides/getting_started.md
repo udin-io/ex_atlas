@@ -9,7 +9,7 @@ spawning your first GPU pod.
 # mix.exs
 def deps do
   [
-    {:ex_atlas, "~> 0.7"}
+    {:ex_atlas, "~> 0.8"}
   ]
 end
 ```
