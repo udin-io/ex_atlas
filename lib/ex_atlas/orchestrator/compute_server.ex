@@ -440,11 +440,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def validate_respawn_credentials(_other),
     do: {:error, "expected {module, function, args}, with atoms and a list"}
 
-  # Walked by hand: `Enum` raises on a struct, and `List.flatten/1` on an
-  # improper tail, and either raise would crash a tracker on the config path.
+  # Walked by hand, a struct as a plain map: `Enum` raises on a struct and
+  # `List.flatten/1` on an improper tail, and a raise here crashes a tracker
+  # on the config path.
   defp sealed_or_closure?(%ExAtlas.Secret{}), do: true
   defp sealed_or_closure?(term) when is_function(term), do: true
-  defp sealed_or_closure?(%_{} = struct), do: sealed_or_closure?(Map.from_struct(struct))
   defp sealed_or_closure?(term) when is_map(term), do: sealed_or_closure?(Map.to_list(term))
   defp sealed_or_closure?(term) when is_tuple(term), do: sealed_or_closure?(Tuple.to_list(term))
   defp sealed_or_closure?([head | tail]), do: sealed_or_closure?(head) or sealed_or_closure?(tail)
