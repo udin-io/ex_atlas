@@ -18,6 +18,63 @@ defmodule ExAtlas.Test.IgniterProject do
     end)
   end
 
+  @doc """
+  Files for a project whose `Test.Application` starts `children`, a list of
+  module names as source text.
+
+  `:alias` puts an alias line in the application module. `:repos` adds a
+  module that uses `Ecto.Repo` for each name it lists.
+  """
+  @spec app_with_children(String.t() | [String.t()], keyword()) :: map()
+  def app_with_children(children, opts \\ []) do
+    children = children |> List.wrap() |> Enum.join(", ")
+
+    %{
+      "mix.exs" => """
+      defmodule Test.MixProject do
+        use Mix.Project
+
+        def project do
+          [app: :test, version: "0.1.0", elixir: "~> 1.17", deps: deps()]
+        end
+
+        def application do
+          [mod: {Test.Application, []}, extra_applications: [:logger]]
+        end
+
+        defp deps, do: []
+      end
+      """,
+      "lib/test/application.ex" => """
+      defmodule Test.Application do
+        use Application
+        #{Keyword.get(opts, :alias, "")}
+
+        @impl true
+        def start(_type, _args) do
+          children = [#{children}]
+
+          Supervisor.start_link(children, strategy: :one_for_one, name: Test.Supervisor)
+        end
+      end
+      """
+    }
+    |> Map.merge(repo_files(Keyword.get(opts, :repos, [])))
+  end
+
+  defp repo_files(repos) do
+    Map.new(repos, fn repo ->
+      path = "lib/" <> Macro.underscore(repo) <> ".ex"
+
+      {path,
+       """
+       defmodule #{repo} do
+         use Ecto.Repo, otp_app: :test, adapter: Ecto.Adapters.Postgres
+       end
+       """}
+    end)
+  end
+
   @doc "Run `fun` with a fresh temp dir as the working directory."
   @spec in_tmp_dir((-> result)) :: result when result: term()
   def in_tmp_dir(fun) do

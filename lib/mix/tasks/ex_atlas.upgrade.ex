@@ -32,8 +32,10 @@ if Code.ensure_loaded?(Igniter) do
     `0.8.0` — edits no file. Warns once for each module that carries
     `@behaviour ExAtlas.Provider`: `ctx.api_key` and the credentials in
     `ctx.req_options` are now `ExAtlas.Secret` values. Adds a notice when the
-    config sets `start_orchestrator: true` and no `:reap_owner`. Always adds a
-    notice linking the [upgrading guide](upgrading.html).
+    host starts the orchestrator (`start_orchestrator: true`, or
+    `ExAtlas.Orchestrator.Supervisor` in a module) and no config file sets
+    `:reap_owner`. Always adds a notice linking the
+    [upgrading guide](upgrading.html).
     """
 
     use Igniter.Mix.Task

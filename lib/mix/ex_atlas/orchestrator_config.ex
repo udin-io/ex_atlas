@@ -12,10 +12,12 @@ if Code.ensure_loaded?(Igniter) do
 
     @guide_url "https://hexdocs.pm/ex_atlas/upgrading.html"
     @config_files ["config.exs", "runtime.exs", "prod.exs"]
+    @supervisor {:__aliases__, [], [:ExAtlas, :Orchestrator, :Supervisor]}
 
     @doc """
-    Adds a notice when the config sets `start_orchestrator: true` and no
-    config file sets `:reap_owner`.
+    Adds a notice when the host starts the orchestrator, with
+    `start_orchestrator: true` or `ExAtlas.Orchestrator.Supervisor` in a
+    module, and no config file sets `:reap_owner`.
     """
     @spec notice_reap_owner(Igniter.t()) :: Igniter.t()
     def notice_reap_owner(igniter) do
@@ -35,8 +37,38 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp starts_orchestrator?(igniter) do
-      {igniter, Enum.any?(@config_files, &sets_start_orchestrator?(igniter, &1, true))}
+      if Enum.any?(@config_files, &sets_start_orchestrator?(igniter, &1, true)) do
+        {igniter, true}
+      else
+        starts_supervisor?(igniter)
+      end
     end
+
+    @doc "Whether any module in the project names `ExAtlas.Orchestrator.Supervisor`."
+    @spec starts_supervisor?(Igniter.t()) :: {Igniter.t(), boolean()}
+    def starts_supervisor?(igniter) do
+      {igniter, modules} =
+        Igniter.Project.Module.find_all_matching_modules(igniter, fn _module, body ->
+          names_supervisor?(body)
+        end)
+
+      {igniter, modules != []}
+    end
+
+    # `Common.nodes_equal?/2` expands aliases, so `alias
+    # ExAtlas.Orchestrator.Supervisor` then `Supervisor` matches.
+    defp names_supervisor?(body) do
+      body
+      |> Zipper.traverse(false, fn zipper, found? ->
+        {zipper, found? or supervisor_alias?(zipper)}
+      end)
+      |> elem(1)
+    end
+
+    defp supervisor_alias?(%Zipper{node: {:__aliases__, _, _}} = zipper),
+      do: Common.nodes_equal?(zipper, @supervisor)
+
+    defp supervisor_alias?(_zipper), do: false
 
     @doc "Loads `config/<file>` into the igniter when it exists."
     @spec include_config(String.t(), Igniter.t()) :: Igniter.t()

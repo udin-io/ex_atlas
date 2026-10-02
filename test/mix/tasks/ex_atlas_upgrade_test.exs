@@ -158,6 +158,41 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
     end
 
+    test "tells a host that starts ExAtlas.Orchestrator.Supervisor about the reap owner" do
+      igniter = upgrade_0_7(IgniterProject.app_with_children("ExAtlas.Orchestrator.Supervisor"))
+
+      assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
+    end
+
+    test "finds the supervisor child through an alias" do
+      files =
+        IgniterProject.app_with_children("Supervisor",
+          alias: "alias ExAtlas.Orchestrator.Supervisor"
+        )
+
+      assert_has_notice(upgrade_0_7(files), &(&1 =~ ":reap_owner"))
+    end
+
+    test "stays quiet about the reap owner when the host starts the supervisor and sets one" do
+      files =
+        Map.put(
+          IgniterProject.app_with_children("ExAtlas.Orchestrator.Supervisor"),
+          "config/runtime.exs",
+          """
+          import Config
+          config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
+          """
+        )
+
+      refute Enum.any?(upgrade_0_7(files).notices, &(&1 =~ ":reap_owner"))
+    end
+
+    test "stays quiet about the reap owner when the application starts other children only" do
+      igniter = upgrade_0_7(IgniterProject.app_with_children("Test.Repo"))
+
+      refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
+    end
+
     test "always links the upgrading guide" do
       assert_has_notice(upgrade_0_7(), &(&1 =~ @guide))
     end
