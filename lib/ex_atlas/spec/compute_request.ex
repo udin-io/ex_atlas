@@ -94,7 +94,8 @@ defmodule ExAtlas.Spec.ComputeRequest do
     spot: [type: :boolean, default: false],
     region_hints: [type: {:list, :string}, default: []],
     ports: [type: {:list, :any}, default: []],
-    env: [type: {:map, :string, :string}, default: %{}],
+    # Checked by `validate_env/1`: NimbleOptions puts the env in its error.
+    env: [type: :any, default: %{}],
     volume_gb: [type: {:or, [:pos_integer, nil]}, default: nil],
     container_disk_gb: [type: {:or, [:pos_integer, nil]}, default: nil],
     network_volume_id: [type: {:or, [:string, nil]}, default: nil],
@@ -111,17 +112,49 @@ defmodule ExAtlas.Spec.ComputeRequest do
   @doc "Build a validated `ComputeRequest` from keyword opts. Raises on invalid input."
   @spec new!(keyword() | map()) :: t()
   def new!(opts) do
-    opts = opts |> normalize() |> NimbleOptions.validate!(@schema)
-    struct!(__MODULE__, opts)
+    case new(opts) do
+      {:ok, request} -> request
+      {:error, error} -> raise error
+    end
   end
 
-  @doc "Build a validated `ComputeRequest` from keyword opts."
+  @doc """
+  Build a validated `ComputeRequest` from keyword opts.
+
+  An error about `:env` names the variable at fault and never holds a value.
+  """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, NimbleOptions.ValidationError.t()}
   def new(opts) do
-    with opts <- normalize(opts),
-         {:ok, opts} <- NimbleOptions.validate(opts, @schema) do
+    with {:ok, opts} <- opts |> normalize() |> NimbleOptions.validate(@schema),
+         :ok <- validate_env(opts[:env]) do
       {:ok, struct!(__MODULE__, opts)}
     end
+  end
+
+  defp validate_env(env) when is_map(env) and not is_struct(env) do
+    case Enum.find(env, fn {name, value} -> not (is_binary(name) and is_binary(value)) end) do
+      nil ->
+        :ok
+
+      {name, _value} when is_binary(name) ->
+        env_error("the value of #{inspect(name)} is not a string")
+
+      _not_a_string_name ->
+        env_error("every name must be a string")
+    end
+  end
+
+  defp validate_env(_env), do: env_error("expected a map")
+
+  defp env_error(detail) do
+    {:error,
+     %NimbleOptions.ValidationError{
+       key: :env,
+       value: nil,
+       message:
+         "invalid value for :env option: expected a map of string names to string values; " <>
+           detail
+     }}
   end
 
   defp normalize(opts) when is_map(opts), do: Map.to_list(opts)

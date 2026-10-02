@@ -43,4 +43,44 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
     assert {:error, %NimbleOptions.ValidationError{}} =
              ComputeRequest.new(gpu: :h100, command: "/app/train.sh")
   end
+
+  describe "env validation errors" do
+    test "a non-string value returns an error that holds no env value" do
+      assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+               ComputeRequest.new(gpu: :h100, env: %{"K" => "v-secret-71a4", "N" => 1})
+
+      assert Exception.message(error) =~ ~s(:env)
+      assert Exception.message(error) =~ ~s("N")
+      refute inspect(error) =~ "v-secret-71a4"
+    end
+
+    test "an env that is not a map returns an error that does not echo it" do
+      assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+               ComputeRequest.new(gpu: :h100, env: "v-secret-71a4")
+
+      refute inspect(error) =~ "v-secret-71a4"
+    end
+
+    test "a non-string name is refused without printing the env" do
+      assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+               ComputeRequest.new(gpu: :h100, env: %{1 => "v-secret-71a4"})
+
+      refute inspect(error) =~ "v-secret-71a4"
+    end
+
+    test "new!/1 raises the same value-free error" do
+      error =
+        assert_raise NimbleOptions.ValidationError, fn ->
+          ComputeRequest.new!(gpu: :h100, env: %{"K" => "v-secret-71a4", "N" => 1})
+        end
+
+      assert error.key == :env
+      refute inspect(error) =~ "v-secret-71a4"
+    end
+
+    test "a map of strings is accepted as before (control)" do
+      assert {:ok, %ComputeRequest{env: %{"K" => "v-secret-71a4"}}} =
+               ComputeRequest.new(gpu: :h100, env: %{"K" => "v-secret-71a4"})
+    end
+  end
 end
