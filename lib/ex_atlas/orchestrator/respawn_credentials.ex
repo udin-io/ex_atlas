@@ -23,6 +23,10 @@ defmodule ExAtlas.Orchestrator.RespawnCredentials do
   behaviour; `{:os, :cmd, [...]}` in a record is refused. The same check runs
   on the spawn option, on an adopted record and on
   `config :ex_atlas, :orchestrator, respawn_credentials:`.
+
+  The check covers the module, not the function: a store writer can name any
+  exported function of a module that declares this behaviour, with args of
+  their choosing. Declare it on a module that holds resolvers alone.
   """
 
   @typedoc "What the record keeps about the task, and no value."
@@ -55,7 +59,11 @@ defmodule ExAtlas.Orchestrator.RespawnCredentials do
   @doc "Whether `module` declares this behaviour."
   @spec declared_by?(module()) :: boolean()
   def declared_by?(module) do
+    # Erlang's `-behavior(...)` spelling lands under `:behavior`.
     Code.ensure_loaded?(module) and
-      __MODULE__ in List.flatten(Keyword.get_values(module.module_info(:attributes), :behaviour))
+      Enum.any?(module.module_info(:attributes), fn
+        {key, modules} when key in [:behaviour, :behavior] -> __MODULE__ in modules
+        _other -> false
+      end)
   end
 end
