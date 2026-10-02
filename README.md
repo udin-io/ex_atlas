@@ -591,8 +591,15 @@ compute.ports
 # => [%{internal: 8000, external: 8000, protocol: :http, url: "http://198.51.100.2:8000"}]
 ```
 
-- Lambda's firewall admits only port 22 by default. Open your `ports:` in
-  the Lambda dashboard; ExAtlas does not change firewall rules yet.
+- Lambda's firewall admits only port 22 by default. A spawn with `ports:`
+  creates one firewall ruleset for the instance, `atlas-<name>-<suffix>`,
+  that opens exactly those ports over TCP, and launches the instance with it
+  attached. The source is `0.0.0.0/0`; `provider_opts: %{source_network:
+  "203.0.113.0/24"}` narrows it. `ports: []` creates no ruleset.
+  `terminate/2` deletes the ruleset, but Lambda refuses while the instance
+  still uses it, so the next spawn also deletes `atlas-` rulesets that no
+  instance uses. Lambda applies no firewall rules in `us-south-1`: a spawn
+  there creates no ruleset, and its ports stay closed.
 - The spawn picks the first of `region_hints` with capacity, else Lambda's
   first region with capacity. `provider_opts: %{instance_type: "..."}` names
   the type directly.
@@ -1513,7 +1520,7 @@ mandate Req — it's an implementation choice of the bundled providers.
 - **v0.1** — RunPod (full surface), Mock provider, orchestrator, auth,
   LiveDashboard page.
 - **v0.8** — Lambda Labs compute: spawn, get, list, terminate. Next: `command:`,
-  `run_task/1` and the Reaper, then firewall ports.
+  `run_task/1` and the Reaper. `ports:` open in Lambda's firewall.
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
 - Vast.ai.
