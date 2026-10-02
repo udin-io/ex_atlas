@@ -7,6 +7,38 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: Vast.ai `command:`, `run_task/1` and the Reaper (#105)
+
+`provider: :vast` takes `command:`. With the default `self_terminate: true`
+the container deletes its own instance when the command ends, so
+`ExAtlas.Orchestrator.run_task/1`, `max_cost` and the Reaper work on Vast:
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  provider: :vast, gpu: :rtx_4090, image: "pytorch/pytorch",
+  command: ["python", "train.py"], max_runtime_ms: :timer.hours(2)
+)
+# => {:task, :completed} once train.py exits
+
+config :ex_atlas, :orchestrator, reap_providers: [:runpod, :vast]
+```
+
+- The rent sends the command as Vast's `args`, which go to the image's
+  entrypoint, wrapped in `sh -c` with the trap RunPod uses. It reports a
+  `callback:`'s exit code first, then DELETEs
+  `/api/v0/instances/$CONTAINER_ID/` with `$CONTAINER_API_KEY`.
+- `self_terminate: false` sends the command unwrapped.
+- `capabilities/0` adds `:self_terminate`.
+- The image needs `sh`, `curl`, and an ENTRYPOINT, if any, that runs its
+  arguments.
+
+### Fixed: the self-terminating wrapper keeps keys off curl's argv (#105)
+
+RunPod's and Vast's wrapper gave curl the pod key and the callback token as
+`-H` arguments, which every process in the container reads in `ps`. Curl now
+reads each header from a `-K -` config line on stdin, written by the
+`printf` builtin.
+
 ### Added: Vast.ai compute provider, on-demand (#99)
 
 `provider: :vast` spawns, reads, lists and terminates Vast.ai on-demand
@@ -32,9 +64,9 @@ instances, and `list_gpu_types/1` reads Vast's offers.
 - An `env:` name that is not `[A-Za-z_][A-Za-z0-9_]*`, or a value that holds
   a NUL byte or is not UTF-8, is `:validation`: Vast reads other names as
   Docker flags.
-- `command:`, `spot: true`, `template_id:`, `network_volume_id:`, `stop/2`
-  and `start/2` return `:unsupported`. `capabilities/0` drops `:spot` until
-  interruptible offers land.
+- `spot: true`, `template_id:`, `network_volume_id:`, `stop/2` and `start/2`
+  return `:unsupported`. `capabilities/0` drops `:spot` until interruptible
+  offers land.
 
 ### Fixed: a late report from a replaced pod no longer ends the replacement (#100)
 

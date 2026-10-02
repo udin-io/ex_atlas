@@ -563,7 +563,7 @@ config :ex_atlas, :orchestrator,
 | `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
 | `:fly`        | `ExAtlas.Providers.Fly`            | stub            | `:http_proxy, :raw_tcp, :global_networking`                                         |
 | `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.8 (compute)  | `:raw_tcp`                                                                          |
-| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:raw_tcp`                                                                     |
+| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:raw_tcp, :self_terminate`                                                    |
 | `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
 The `:fly` stub returns `{:error, %ExAtlas.Error{kind: :unsupported}}` from
@@ -654,9 +654,24 @@ compute.ports
   and tries nothing else: check `list_compute(name: ...)`.
 - `env:` names must match `[A-Za-z_][A-Za-z0-9_]*`: Vast reads other names
   as Docker flags. `ATLAS_PORTS` is ExAtlas's own.
-- `command:`, `spot: true`, `template_id:`, `network_volume_id:`, `stop/2`
-  and `start/2` return `:unsupported` for now; the Reaper does not cover
-  Vast yet.
+- `command:` goes to the image's entrypoint as Vast's `args`. With the
+  default `self_terminate: true` the container deletes its own instance when
+  the command ends, with the `CONTAINER_ID` and `CONTAINER_API_KEY` Vast puts
+  in every container, so `run_task/1` ends `{:task, :completed}`. The image
+  needs `sh`, `curl`, and an ENTRYPOINT, if any, that runs its arguments
+  (`exec "$@"`).
+
+  ```elixir
+  {:ok, _pid, compute} =
+    ExAtlas.Orchestrator.run_task(
+      provider: :vast, gpu: :rtx_4090, image: "pytorch/pytorch",
+      command: ["python", "train.py"], max_runtime_ms: :timer.hours(2)
+    )
+  ```
+- The Reaper covers Vast with `reap_providers: [:vast]`. It lists with no
+  per-call options, so set `config :ex_atlas, :vast, api_key:`.
+- `spot: true`, `template_id:`, `network_volume_id:`, `stop/2` and `start/2`
+  return `:unsupported` for now.
 
 ### Canonical GPU atoms
 
@@ -1112,17 +1127,23 @@ ex_atlas wraps your command in a shell that deletes the pod when it ends:
 
 ```sh
 atlas_self_terminate() {
-  curl -sS -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
-    "https://api.runpod.io/v2/pods/$RUNPOD_POD_ID"
+  printf 'header = "Authorization: Bearer %s"\n' "$RUNPOD_API_KEY" |
+    curl -sS -m 30 -K - -X DELETE "https://api.runpod.io/v2/pods/$RUNPOD_POD_ID"
 }
 trap atlas_self_terminate EXIT INT TERM
 /app/train.sh --epochs 3
 ```
 
+The key reaches curl on stdin, so no `ps` in the container shows it. On Vast
+the same wrapper deletes `https://console.vast.ai/api/v0/instances/$CONTAINER_ID/`
+with `$CONTAINER_API_KEY`.
+
 `RUNPOD_POD_ID` and the pod-scoped `RUNPOD_API_KEY` are injected by RunPod, so
-no secret of yours travels to the pod, and `trap … EXIT` fires on a crash and
-on a signal as well as on a clean finish. The orchestrator sees the resulting
-404 and reports `{:task, :completed}`.
+no secret of yours travels to the pod. `trap … EXIT` fires when the command
+exits, fails, or dies from a signal. A SIGTERM to the container's shell alone
+(`docker stop`) waits for the command, and the SIGKILL that follows runs no
+cleanup. The orchestrator sees the resulting 404 and reports
+`{:task, :completed}`.
 
 Pass `self_terminate: false` for an image with no shell or no `curl`, or when
 you want the resource kept up for inspection. Such a task will always end at
@@ -1576,9 +1597,9 @@ mandate Req — it's an implementation choice of the bundled providers.
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
 - **Unreleased** — Vast.ai compute: spawn, get, list, terminate and GPU types
-  for on-demand offers (#99). Next on Vast: `command:` and `run_task/1`,
-  interruptible offers with `spot: true`, then `stop/2`, `start/2` and the
-  bill (#98).
+  for on-demand offers (#99); `command:`, `run_task/1` and the Reaper (#105).
+  Next on Vast: interruptible offers with `spot: true`, then `stop/2`,
+  `start/2` and the bill (#98).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.

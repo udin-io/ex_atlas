@@ -7,7 +7,8 @@ next feature. Dates are merge dates.
 
 ## Next
 
-Vast.ai slices 2 to 4 (#98): each is filed when the slice before it merges.
+Vast.ai slices 3 and 4 (#98): interruptible offers, then stop, start and the
+bill. Each is filed when the slice before it merges.
 
 ## In progress
 
@@ -15,7 +16,7 @@ Vast.ai slices 2 to 4 (#98): each is filed when the slice before it merges.
 |---|---|---|
 | A late report from a replaced pod no longer ends the replacement | #100 | PR #101: the callback token signs the pod's attempt, and a stale report gets 410 |
 | Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag after the merge |
-| Vast.ai provider (feature #98) | #99 | PR #102 (slice 1): spawn by renting the cheapest on-demand offer, get, list, terminate, GPU types. Then `command:` and `run_task/1`, interruptible offers, stop, start and the bill, each filed when the slice before it merges |
+| Vast.ai provider (feature #98) | #99, #105 | PR #102 (slice 1, merged): spawn by renting the cheapest on-demand offer, get, list, terminate, GPU types. PR #108 (slice 2): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper. Then interruptible offers, stop, start and the bill, each filed when the slice before it merges |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.

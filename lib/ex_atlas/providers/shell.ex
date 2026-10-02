@@ -43,8 +43,10 @@ defmodule ExAtlas.Providers.Shell do
   # The only party that knows the container ended is the container. RunPod and
   # Vast inject the resource's id and a key scoped to it into every container,
   # so it can delete itself with no secret of ours travelling to it.
-  # `trap … EXIT INT TERM` means a crash and a signal clean up too, not just a
-  # clean exit.
+  # `trap … EXIT INT TERM` cleans up when the command fails or a signal kills
+  # it, not just on a clean exit. A TERM to this shell alone (`docker stop`)
+  # runs the trap only once the command exits; the SIGKILL that follows the
+  # stop's grace runs nothing. Measured with curlimages/curl on PR 108.
   #
   # `curl` rather than a provider CLI: curl is in nearly every base image and
   # the CLIs in nearly none. An image with neither wants
