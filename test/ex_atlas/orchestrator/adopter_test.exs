@@ -1069,6 +1069,32 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       end
     end
 
+    test "a result whose check raises ends the task, and nothing prints the value" do
+      # A hand-built Secret whose value is no function raises `BadFunctionError`
+      # with the term in its message when the env check reveals it.
+      bad = %ExAtlas.Secret{value: "hf-badfun-leak-3d6a"}
+      image = "trainer-resolver-raising-check:latest"
+
+      log =
+        capture_log(fn ->
+          compute =
+            orphaned_resolved_task(
+              image,
+              {:return, {:ok, env: %{"HF_TOKEN" => bad, "WANDB_PROJECT" => "w"}}},
+              s3: nil
+            )
+
+          pid = adopt_and_preempt(compute.id)
+          send(self(), {:message, assert_refused(compute.id, pid, image)})
+        end)
+
+      assert_received {:message, message}
+      assert message =~ "ExAtlas.Test.CredentialResolver.resolve/2"
+      assert message =~ "raised BadFunctionError"
+      refute message =~ "hf-badfun-leak-3d6a"
+      refute log =~ "hf-badfun-leak-3d6a"
+    end
+
     test "a resolver that never answers ends the task at the configured bound" do
       TestOrchestrator.put_env(respawn_credentials_timeout_ms: 50)
       compute = orphaned_resolved_task("trainer-resolver-hang:latest", {:hang, self()})

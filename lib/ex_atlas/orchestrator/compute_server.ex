@@ -1204,11 +1204,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp resolve_credentials({source, mfa}, needs, state) do
     with {:ok, mfa} <- checked_resolver(source, mfa, state.opts),
          {:ok, timeout} <- resolver_timeout(state.opts) do
-      result =
-        with {:ok, returned} <- call_resolver(mfa, resolver_info(state), timeout),
-             do: apply_resolved(returned, needs, state.opts)
-
-      case result do
+      case call_resolver(
+             mfa,
+             resolver_info(state),
+             timeout,
+             &apply_resolved(&1, needs, state.opts)
+           ) do
         {:ok, opts} ->
           {:ok, opts}
 
@@ -1274,17 +1275,20 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # Bounded, and off this mailbox's callback stack: a hung resolver must not
   # hold the tracker past the bound, and a raise must not crash it, since a
-  # crash deletes the old pod with no replacement. Its return, raise or exit
-  # value can hold a credential, so none leaves the task: a raise becomes its
-  # exception's module, a throw or exit its kind, and the task exits normally,
-  # so OTP logs no crash report.
-  defp call_resolver({m, f, args}, info, timeout) do
+  # crash deletes the old pod with no replacement. The result is checked in
+  # the same task, since a check can raise on a value too. A return, raise or
+  # exit value can hold a credential, so none leaves the task: a raise becomes
+  # its exception's module, a throw or exit its kind, and the task exits
+  # normally, so OTP logs no crash report.
+  defp call_resolver({m, f, args}, info, timeout, check) do
     if Process.whereis(@task_supervisor) do
       task =
-        Task.Supervisor.async_nolink(@task_supervisor, fn -> guarded(m, f, args ++ [info]) end)
+        Task.Supervisor.async_nolink(@task_supervisor, fn ->
+          guarded(fn -> check.(apply(m, f, args ++ [info])) end)
+        end)
 
       case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {:returned, result}} -> {:ok, result}
+        {:ok, {:returned, result}} -> result
         {:ok, {:raised, module}} -> {:error, "raised #{inspect(module)}"}
         {:ok, {:caught, :throw}} -> {:error, "threw"}
         {:ok, {:caught, _exit}} -> {:error, "exited"}
@@ -1296,8 +1300,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
-  defp guarded(m, f, args) do
-    {:returned, apply(m, f, args)}
+  defp guarded(fun) do
+    {:returned, fun.()}
   rescue
     exception -> {:raised, exception.__struct__}
   catch
