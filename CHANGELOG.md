@@ -131,6 +131,9 @@ e.raw   # before: the whole body   after: %{"detail" => "in use", "conflict" => 
   named `environment` stays. An atom-keyed `errors[].value` goes too, as the
   string-keyed one already did. Only the key `env` is scrubbed: a body that
   echoes Vast's `extra_env` or Lambda's `jupyter_token` keeps them.
+- An atom-keyed error body now gives `Error.message` its `detail`, `message`
+  or `errors[]` text, as a string-keyed one does; it read `nil` before.
+  `errors[].value` stays out of the text either way.
 - A plain-text error body that echoes the request stays in `Error.message`:
   nothing can tell the secret from the text.
 
