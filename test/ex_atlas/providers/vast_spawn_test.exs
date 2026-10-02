@@ -299,6 +299,15 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     # Execution Environment").
     defp vast_env, do: [{"CONTAINER_ID", "28411907"}, {"CONTAINER_API_KEY", @container_key}]
 
+    # The callback variables the rent put in the env object, as Vast passes them.
+    defp callback_env(body) do
+      [
+        {"ATLAS_CALLBACK_URL", body["env"]["ATLAS_CALLBACK_URL"]},
+        {"ATLAS_CALLBACK_TOKEN", body["env"]["ATLAS_CALLBACK_TOKEN"]}
+        | vast_env()
+      ]
+    end
+
     test "self_terminate: true sends args that run the command under sh -c", %{
       bypass: bypass,
       opts: opts
@@ -385,7 +394,7 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       callback: callback
     } do
       body = rent_body(bypass, opts, command: ["sh", "-c", "exit 3"], callback: callback)
-      env = [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"} | vast_env()]
+      env = callback_env(body)
 
       assert {3, log, _config} = CurlShim.run(body["args"], tmp, env)
 
@@ -404,7 +413,7 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     } do
       body = rent_body(bypass, opts, command: ["true"], callback: callback)
       CurlShim.install(tmp, 7)
-      env = [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"} | vast_env()]
+      env = callback_env(body)
 
       assert {0, log, _config} = CurlShim.run(body["args"], tmp, env)
       assert log =~ "/finish"
@@ -431,7 +440,7 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       body =
         rent_body(bypass, opts, command: ["true"], self_terminate: false, callback: callback)
 
-      env = [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"} | vast_env()]
+      env = callback_env(body)
 
       assert {0, log, _config} = CurlShim.run(body["args"], tmp, env)
       assert log =~ ~s({"exit_code":0})
@@ -461,6 +470,56 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
       assert {0, _log, _config} = CurlShim.run(body["args"], tmp, vast_env())
       assert File.read!(Path.join(tmp, "arg")) == arg
+    end
+
+    # Review of PR 108: a newline in a key ends curl's config line, and the
+    # rest of the value is read as curl options (`url =`, `variable =`).
+    @tag :tmp_dir
+    test "a key or id that is not a plain token sends no request", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp
+    } do
+      body = rent_body(bypass, opts, command: ["true"])
+
+      for {id, key} <- [
+            {"28411907", "abc\nurl = \"http://127.0.0.1:9/stolen\""},
+            {"28411907", ""},
+            {"../../999", @container_key},
+            {"", @container_key}
+          ] do
+        File.rm_rf!(Path.join(tmp, "curl.log"))
+        env = [{"CONTAINER_ID", id}, {"CONTAINER_API_KEY", key}]
+
+        assert {0, "", ""} = CurlShim.run(body["args"], tmp, env),
+               "sent a request with id #{inspect(id)} and key #{inspect(key)}"
+      end
+
+      # Control: a plain id and key still delete.
+      assert {0, log, _} = CurlShim.run(body["args"], tmp, vast_env())
+      assert log =~ "-X DELETE"
+    end
+
+    @tag :tmp_dir
+    test "a callback token that is not a plain token posts no report", %{
+      bypass: bypass,
+      opts: opts,
+      tmp_dir: tmp,
+      callback: callback
+    } do
+      body = rent_body(bypass, opts, command: ["true"], callback: callback)
+      url = {"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"}
+      bad = {"ATLAS_CALLBACK_TOKEN", "t\nurl = \"http://127.0.0.1:9/x\""}
+
+      assert {0, log, _} = CurlShim.run(body["args"], tmp, [url, bad | vast_env()])
+      refute log =~ "/finish"
+      # The delete does not depend on the report.
+      assert log =~ "-X DELETE"
+
+      File.rm_rf!(Path.join(tmp, "curl.log"))
+      good = {"ATLAS_CALLBACK_TOKEN", body["env"]["ATLAS_CALLBACK_TOKEN"]}
+      assert {0, log, _} = CurlShim.run(body["args"], tmp, [url, good | vast_env()])
+      assert log =~ "/finish"
     end
 
     test "Vast lists :self_terminate among its capabilities" do

@@ -178,7 +178,11 @@ defmodule ExAtlas.Providers.RunPod.Translate do
     do:
       Shell.start_command(
         req,
-        Shell.delete_request("#{Client.management_url()}/pods/$RUNPOD_POD_ID", "RUNPOD_API_KEY")
+        Shell.delete_request(
+          "#{Client.management_url()}/pods/$RUNPOD_POD_ID",
+          "RUNPOD_POD_ID",
+          "RUNPOD_API_KEY"
+        )
       )
 
   defp pod_status("RUNNING"), do: :running

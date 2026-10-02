@@ -42,6 +42,7 @@ defmodule ExAtlas.Providers.Vast.Translate do
   # read at run time: it exists only after the rent answers.
   @self_delete Shell.delete_request(
                  "#{Client.base_url()}/api/v0/instances/$CONTAINER_ID/",
+                 "CONTAINER_ID",
                  "CONTAINER_API_KEY"
                )
 

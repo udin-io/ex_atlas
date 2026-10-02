@@ -74,19 +74,32 @@ defmodule ExAtlas.Providers.Shell do
       "trap atlas_self_terminate EXIT INT TERM; " <> join(command)
   end
 
+  # Positive classes: an id names one path segment (no `.`, `/`), and a key or
+  # token is what the providers and `ExAtlas.Callback` mint. A newline in a key
+  # would end the config line below and let the rest of the value set any curl
+  # option (`url =`, `variable =`); a review of PR 108 reproduced both.
+  @id_chars "A-Za-z0-9_-"
+  @token_chars "A-Za-z0-9._-"
+
   @doc """
   A `curl` DELETE of `url` with the Bearer key held in the environment variable
-  `key_var`, bounded to 30 s. `url` may name environment variables (`$ID`).
+  `key_var`, bounded to 30 s. `url` reads the resource's id from `id_var`.
+  Nothing is sent when the id or the key is not a plain token.
   """
-  @spec delete_request(String.t(), String.t()) :: String.t()
-  def delete_request(url, key_var),
-    do: "#{bearer_config(key_var)} | curl -sS -m 30 -K - -X DELETE \"#{url}\";"
+  @spec delete_request(String.t(), String.t(), String.t()) :: String.t()
+  def delete_request(url, id_var, key_var) do
+    request = "#{bearer_config(key_var)} | curl -sS -m 30 -K - -X DELETE \"#{url}\""
+    only_if(id_var, @id_chars, only_if(key_var, @token_chars, request)) <> ";"
+  end
+
+  defp only_if(var, chars, command),
+    do:
+      ~s(case "$#{var}" in ""|*[!#{chars}]*\) echo "atlas: #{var} is not a plain token; ) <>
+        ~s(skipped" >&2 ;; *\) #{command} ;; esac)
 
   # The header goes to curl as a `-K -` config line on stdin, written by the
   # `printf` builtin, so no argv carries the key: every process in the
-  # container reads every other's argv in `ps`. A key holding `"` or `\` would
-  # break the config line; RunPod's, Vast's and the callback's tokens hold
-  # neither.
+  # container reads every other's argv in `ps`.
   defp bearer_config(key_var),
     do: ~s(printf 'header = "Authorization: Bearer %s"\\n' "$#{key_var}")
 
@@ -96,10 +109,13 @@ defmodule ExAtlas.Providers.Shell do
   # being interpolated into the script, so a callback URL can never be read as
   # shell syntax.
   defp finish_report(%{}) do
-    bearer_config("ATLAS_CALLBACK_TOKEN") <>
-      ~s( | curl -sS -m 10 -K - -X POST ) <>
-      ~s(-H "Content-Type: application/json" ) <>
-      ~s(-d "{\\"exit_code\\":$atlas_code}" ) <>
-      ~s("$ATLAS_CALLBACK_URL/finish" || true;)
+    post =
+      bearer_config("ATLAS_CALLBACK_TOKEN") <>
+        ~s( | curl -sS -m 10 -K - -X POST ) <>
+        ~s(-H "Content-Type: application/json" ) <>
+        ~s(-d "{\\"exit_code\\":$atlas_code}" ) <>
+        ~s("$ATLAS_CALLBACK_URL/finish" || true)
+
+    only_if("ATLAS_CALLBACK_TOKEN", @token_chars, post) <> ";"
   end
 end
