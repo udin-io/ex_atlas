@@ -467,6 +467,7 @@ defmodule ExAtlas do
     :command,
     :self_terminate,
     :callback,
+    :s3,
     :provider_opts
   ]
 

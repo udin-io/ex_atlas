@@ -105,6 +105,47 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:ok, _} = ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
     end
 
+    test "s3: puts the seven staging variables into the POST body env", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:env, Jason.decode!(raw)["env"]})
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, %{id: "p1"}} =
+               ExAtlas.spawn_compute(
+                 [
+                   gpu: :h100,
+                   image: "x",
+                   s3: %{
+                     endpoint: "https://t3.storage.dev",
+                     region: "auto",
+                     access_key_id: "tid-test-4b1e",
+                     secret_access_key: "tsec-test-9f2c",
+                     dataset_uri: "s3://bucket/datasets/abc/",
+                     artifact_uri: "s3://bucket/artifacts/run-123/"
+                   }
+                 ] ++ opts
+               )
+
+      assert_receive {:env, env}
+
+      assert env == %{
+               "AWS_ENDPOINT_URL_S3" => "https://t3.storage.dev",
+               "AWS_REGION" => "auto",
+               "AWS_DEFAULT_REGION" => "auto",
+               "AWS_ACCESS_KEY_ID" => "tid-test-4b1e",
+               "AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c",
+               "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
+               "ATLAS_ARTIFACT_URI" => "s3://bucket/artifacts/run-123/"
+             }
+    end
+
     test "inspect of the compute omits the env RunPod echoes back", %{
       bypass: bypass,
       ctx_opts: opts

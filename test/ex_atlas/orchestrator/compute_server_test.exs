@@ -307,6 +307,29 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert new_id in ExAtlas.Orchestrator.list_ids()
     end
 
+    test "a replacement is spawned with the same s3: staging", %{base: base} do
+      s3 = %{
+        access_key_id: "tid-test-4b1e",
+        secret_access_key: "tsec-test-9f2c",
+        dataset_uri: "s3://bucket/datasets/abc/"
+      }
+
+      {:ok, _pid, compute} = ExAtlas.Orchestrator.spawn([s3: s3] ++ base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      # Control: the Mock records the staging it was asked for.
+      assert %{dataset_uri: "s3://bucket/datasets/abc/"} = compute.raw.request.s3
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{compute: replacement}} = ExAtlas.Orchestrator.info(new_id)
+
+      assert %{dataset_uri: "s3://bucket/datasets/abc/", secret_access_key: "tsec-test-9f2c"} =
+               replacement.raw.request.s3
+    end
+
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do
       {:ok, _pid, compute} = ExAtlas.Orchestrator.spawn(base)
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
