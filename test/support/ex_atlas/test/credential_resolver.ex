@@ -51,6 +51,7 @@ defmodule ExAtlas.Test.CredentialResolver do
        env: %{"HF_TOKEN" => %ExAtlas.Secret{value: "hf-badfun-leak-3d6a"}, "WANDB_PROJECT" => "w"}}
 
   def resolve({:return, value}, _info), do: value
+  def resolve(script, _extra, info), do: resolve(script, info)
 
   def resolve({:merge_s3, credentials, rest}, info),
     do: {:ok, [s3: Map.merge(credentials, info.s3)] ++ rest}

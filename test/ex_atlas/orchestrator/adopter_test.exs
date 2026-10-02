@@ -1245,6 +1245,21 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       refute_received %{env_names: _}
     end
 
+    test "a configured resolver with a struct in its args respawns, without a crash" do
+      TestOrchestrator.put_env(
+        respawn_credentials: {CredentialResolver, :resolve, [:fixed, ~D[2026-01-01]]}
+      )
+
+      compute =
+        orphaned_resolved_task("trainer-resolver-struct-arg:latest", @ok_both,
+          respawn_credentials: nil
+        )
+
+      id = compute.id
+      adopt_and_preempt(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, _new_id}}, 2_000
+    end
+
     test "scrub_keys: [:env] gives no names, and the result must hold env:" do
       TestOrchestrator.put_env(scrub_keys: [:env])
 

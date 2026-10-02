@@ -440,18 +440,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def validate_respawn_credentials(_other),
     do: {:error, "expected {module, function, args}, with atoms and a list"}
 
+  # Walked by hand: `Enum` raises on a struct, and `List.flatten/1` on an
+  # improper tail, and either raise would crash a tracker on the config path.
   defp sealed_or_closure?(%ExAtlas.Secret{}), do: true
   defp sealed_or_closure?(term) when is_function(term), do: true
-
-  defp sealed_or_closure?(term) when is_list(term),
-    do: Enum.any?(List.flatten(term), &sealed_or_closure?/1)
-
+  defp sealed_or_closure?(%_{} = struct), do: sealed_or_closure?(Map.from_struct(struct))
+  defp sealed_or_closure?(term) when is_map(term), do: sealed_or_closure?(Map.to_list(term))
   defp sealed_or_closure?(term) when is_tuple(term), do: sealed_or_closure?(Tuple.to_list(term))
-
-  defp sealed_or_closure?(term) when is_map(term),
-    do:
-      Enum.any?(term, fn {key, value} -> sealed_or_closure?(key) or sealed_or_closure?(value) end)
-
+  defp sealed_or_closure?([head | tail]), do: sealed_or_closure?(head) or sealed_or_closure?(tail)
   defp sealed_or_closure?(_term), do: false
 
   # `persist: true` is a promise that the resource can be rebuilt at boot, and

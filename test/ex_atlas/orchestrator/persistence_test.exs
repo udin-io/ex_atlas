@@ -503,6 +503,31 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
     end
 
+    test "args holding structs, ranges, sets and improper lists validate without a raise" do
+      for args <- [[~D[2026-01-01]], [URI.parse("https://x.example")], [1..3], [MapSet.new([1])]] do
+        assert {:ok, _pid, _compute} =
+                 Orchestrator.run_task(
+                   task_opts(
+                     respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, args}
+                   )
+                 ),
+               "refused #{inspect(args)}"
+      end
+
+      # A Secret inside a struct or an improper tail is still found.
+      for args <- [
+            [URI.parse("https://x") |> Map.put(:host, ExAtlas.Secret.wrap("h"))],
+            [[1 | ExAtlas.Secret.wrap("t")]]
+          ] do
+        assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials}} =
+                 Orchestrator.run_task(
+                   task_opts(
+                     respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, args}
+                   )
+                 )
+      end
+    end
+
     test "a function the module does not export is refused, naming it" do
       assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
                Orchestrator.run_task(
