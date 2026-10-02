@@ -41,8 +41,17 @@ defmodule ExAtlas.Providers.Vast do
   needs `sh` and `curl`, and an ENTRYPOINT, if any, that runs its arguments
   (`exec "$@"`).
 
-  Not yet on Vast: `spot: true`, `:template_id` and `:network_volume_id` are
-  `:unsupported`, and so are `stop/2` and `start/2`.
+  `spot: true` searches interruptible (`type: "bid"`) offers and rents the
+  cheapest by `min_bid`, bidding exactly that price, so `cost_per_hour` is the
+  bid. An offer with no `min_bid` is skipped, and `provider_opts.offer_id`
+  with `spot: true` is `:validation`: it searches nothing to bid on. An
+  outbid instance reads `exited`, which `ExAtlas.Orchestrator` classes as
+  `:preempted`; `on_failure: {:respawn, n}` rents a replacement. A finished
+  task also vanishes, which reads the same on spot capacity, so pass a
+  `:callback` to a spot task you respawn (see `ExAtlas.Orchestrator.TaskOutcome`).
+
+  Not yet on Vast: `:template_id` and `:network_volume_id` are `:unsupported`,
+  and so are `stop/2` and `start/2`.
   """
 
   @behaviour ExAtlas.Provider
@@ -54,15 +63,16 @@ defmodule ExAtlas.Providers.Vast do
   @bundles "/api/v0/bundles/"
 
   @impl true
-  def capabilities, do: [:raw_tcp, :self_terminate]
+  def capabilities, do: [:raw_tcp, :self_terminate, :spot]
 
   @impl true
   def spawn_compute(%Spec.ComputeRequest{} = request, ctx) do
     with :ok <- check_supported(request),
+         :ok <- check_bid(request),
          {:ok, parts} <- Translate.launch_parts(request),
          body = Translate.launch_body(request, parts),
          {:ok, offers} <- offers(request, ctx),
-         {:ok, id, offer} <- rent_first(ctx, offers, body) do
+         {:ok, id, offer} <- rent_first(ctx, request, offers, body) do
       {:ok, Translate.launched_compute(id, request, parts, offer)}
     end
   end
@@ -136,7 +146,6 @@ defmodule ExAtlas.Providers.Vast do
   defp check_supported(%Spec.ComputeRequest{} = request) do
     unsupported =
       [
-        spot: request.spot,
         template_id: request.template_id != nil,
         network_volume_id: request.network_volume_id != nil
       ]
@@ -147,6 +156,19 @@ defmodule ExAtlas.Providers.Vast do
       {field, _} -> unsupported("Vast does not take #{inspect(field)} in this ExAtlas release")
     end
   end
+
+  # An `offer_id` rent searches nothing, so it has no `min_bid` to bid.
+  defp check_bid(%Spec.ComputeRequest{spot: true, provider_opts: %{offer_id: _}}) do
+    {:error,
+     Error.new(:validation,
+       provider: :vast,
+       message:
+         "spot: true bids at a searched offer's min_bid, so it cannot rent " <>
+           "provider_opts.offer_id; remove one"
+     )}
+  end
+
+  defp check_bid(_request), do: :ok
 
   defp offers(request, ctx) do
     case offer_id(request) do
@@ -164,7 +186,7 @@ defmodule ExAtlas.Providers.Vast do
   defp searched_offers(request, ctx) do
     with {:ok, query} <- Translate.offer_query(request),
          {:ok, found} <- search(ctx, query) do
-      case Translate.pick(found, request.region_hints) do
+      case Translate.pick(found, request.region_hints, request.spot) do
         [] -> no_offer(request)
         picked -> {:ok, picked}
       end
@@ -202,22 +224,22 @@ defmodule ExAtlas.Providers.Vast do
      Error.new(:provider,
        provider: :vast,
        message:
-         "Vast has no on-demand offer for #{request.gpu_count}x #{inspect(request.gpu)} " <>
-           "with the disk and ports asked for"
+         "Vast has no #{if request.spot, do: "interruptible (with a min_bid)", else: "on-demand"} " <>
+           "offer for #{request.gpu_count}x #{inspect(request.gpu)} with the disk and ports asked for"
      )}
   end
 
   # Tries each offer in turn. Only a refusal (a 4xx other than 401, 403 and
   # 429) moves on: it means Vast rented nothing, and offers are taken within
   # seconds. A 5xx or a timeout may have rented, so it stops the spawn.
-  defp rent_first(ctx, [offer | rest], body) do
-    case rent(ctx, offer, body) do
+  defp rent_first(ctx, request, [offer | rest], body) do
+    case rent(ctx, offer, Translate.priced(body, request, offer)) do
       {:ok, id} ->
         {:ok, id, if(Map.has_key?(offer, "dph_total"), do: offer)}
 
       {:error, error} ->
         if rest != [] and next_offer?(error),
-          do: rent_first(ctx, rest, body),
+          do: rent_first(ctx, request, rest, body),
           else: {:error, error}
     end
   end

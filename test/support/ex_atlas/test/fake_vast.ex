@@ -81,6 +81,12 @@ defmodule ExAtlas.Test.FakeVast do
       {query, conn} = read_json(conn)
       names = get_in(query, ["gpu_name", "in"]) || ["RTX 4090"]
       offers = Enum.map(Enum.with_index(names, 1), fn {name, i} -> offer_for(name, i) end)
+
+      offers =
+        if query["type"] == "bid",
+          do: Enum.map(offers, &Map.put(&1, "min_bid", 0.2)),
+          else: offers
+
       json(conn, 200, %{"offers" => offers})
     end)
 
@@ -97,9 +103,18 @@ defmodule ExAtlas.Test.FakeVast do
           "extra_env" => Enum.map(body["env"] || %{}, fn {k, v} -> [k, v] end),
           "ports" => %{}
         })
+        |> bid_fields(body["price"])
 
       Agent.update(store, &Map.put(&1, Integer.to_string(id), rented))
       json(conn, 200, %{"success" => true, "new_contract" => id})
+    end)
+
+    # Not Vast's API: the test-side switch for an outbid instance, which Vast
+    # reads `exited` (docs.vast.ai, instance `actual_status`).
+    Bypass.stub(bypass, "POST", "/fake/outbid/:id", fn conn ->
+      id = List.last(conn.path_info)
+      Agent.update(store, &update_in(&1[id], fn i -> Map.put(i, "actual_status", "exited") end))
+      json(conn, 200, %{"success" => true})
     end)
 
     Bypass.stub(bypass, "GET", "/api/v0/instances/:id", fn conn ->
@@ -122,6 +137,18 @@ defmodule ExAtlas.Test.FakeVast do
     end)
 
     [base_url: "http://localhost:#{bypass.port}", api_key: "vast-test-key"]
+  end
+
+  # A bid instance bills its bid and reads `is_bid`.
+  defp bid_fields(instance, nil), do: instance
+
+  defp bid_fields(instance, price),
+    do: Map.merge(instance, %{"is_bid" => true, "dph_total" => price, "min_bid" => price})
+
+  @doc "Outbid a rented instance of `start/0`'s fake: it reads `exited` from now on."
+  def outbid(vast, id) do
+    {:ok, %{status: 200}} = Req.post("#{vast[:base_url]}/fake/outbid/#{id}", retry: false)
+    :ok
   end
 
   defp offer_for(name, i), do: offer(%{"id" => 1000 + i, "gpu_name" => name})

@@ -527,12 +527,136 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
   end
 
+  describe "spawn_compute/1 spot: true" do
+    defp bid_offer(id, min_bid, attrs \\ %{}),
+      do: offer(Map.merge(%{"id" => id, "min_bid" => min_bid, "dph_total" => 0.9}, attrs))
+
+    test "searches type bid and rents at the offer's min_bid", %{bypass: bypass, opts: opts} do
+      expect_search(bypass, [bid_offer(7, 0.18)])
+      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+
+      assert {:ok, compute} = rent_spawn(opts, spot: true)
+
+      assert_received {:search, query}
+      assert query["type"] == "bid"
+      assert_received {:rent, "7", body}
+      assert body["price"] == 0.18
+      # The bid, not the on-demand dph_total of 0.9.
+      assert compute.cost_per_hour == 0.18
+    end
+
+    test "control: an on-demand spawn searches ondemand and sends no price", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_search(bypass, [bid_offer(7, 0.18)])
+      expect_rents(bypass, fn _ -> rented(1) end)
+
+      assert {:ok, compute} = rent_spawn(opts)
+
+      assert_received {:search, %{"type" => "ondemand"}}
+      assert_received {:rent, "7", body}
+      refute Map.has_key?(body, "price")
+      assert compute.cost_per_hour == 0.9
+    end
+
+    test "tries offers by min_bid, not by dph_total", %{bypass: bypass, opts: opts} do
+      expect_search(bypass, [
+        bid_offer(1, 0.30, %{"dph_total" => 0.50}),
+        bid_offer(2, 0.12, %{"dph_total" => 0.80}),
+        bid_offer(3, 0.20, %{"dph_total" => 0.60})
+      ])
+
+      expect_rents(bypass, fn _ -> {400, refused("bid_too_low", "no")} end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} = rent_spawn(opts, spot: true)
+      assert rent_ids() == ["2", "3", "1"]
+    end
+
+    test "skips an offer with no usable min_bid, and never rents it at dph_total", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_search(bypass, [
+        bid_offer(1, nil, %{"dph_total" => 0.05}),
+        bid_offer(2, "0.10", %{"dph_total" => 0.06}),
+        bid_offer(3, 0, %{"dph_total" => 0.07}),
+        bid_offer(4, 0.25)
+      ])
+
+      expect_rents(bypass, fn _ -> rented(5) end)
+
+      assert {:ok, %{cost_per_hour: 0.25}} = rent_spawn(opts, spot: true)
+      assert rent_ids() == ["4"]
+    end
+
+    test "no offer with a min_bid is a :provider error, and no rent", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_search(bypass, [bid_offer(1, nil)])
+
+      assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
+               rent_spawn(opts, spot: true)
+
+      assert message =~ "interruptible"
+    end
+
+    test "a refused bid tries the next offer at that offer's own min_bid", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_search(bypass, [bid_offer(1, 0.10), bid_offer(2, 0.15)])
+
+      expect_rents(bypass, fn
+        "1" -> {400, refused("bid_too_low", "no")}
+        "2" -> rented(9)
+      end)
+
+      assert {:ok, %{id: "9", cost_per_hour: 0.15}} = rent_spawn(opts, spot: true)
+      assert_received {:rent, "1", %{"price" => 0.10}}
+      assert_received {:rent, "2", %{"price" => 0.15}}
+    end
+
+    test "provider_opts.offer_id with spot: true is :validation, and no request", %{opts: opts} do
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+               rent_spawn(opts,
+                 spot: true,
+                 provider_opts: %{offer_id: 7},
+                 env: %{"T" => @hf_token}
+               )
+
+      assert message =~ "offer_id"
+      refute message =~ @hf_token
+    end
+
+    test "a refused bid withholds Vast's msg, as an on-demand refusal does", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_rents(bypass, fn _ -> {400, refused("invalid_args", "bad env #{@hf_token}")} end)
+
+      for extra <- [[spot: true], []] do
+        expect_search(bypass, [bid_offer(1, 0.10)])
+
+        assert {:error, %ExAtlas.Error{} = error} =
+                 rent_spawn(opts, [env: %{"HF_TOKEN" => @hf_token}] ++ extra)
+
+        assert error.message =~ "invalid_args"
+        refute inspect(error) =~ @hf_token
+      end
+    end
+
+    test "Vast lists :spot among its capabilities" do
+      assert :spot in ExAtlas.Providers.Vast.capabilities()
+    end
+  end
+
   describe "spawn_compute/1 refusals before any request" do
-    test "spot: true, template_id and network_volume_id are :unsupported", %{
+    test "template_id and network_volume_id are :unsupported", %{
       opts: opts
     } do
       for extra <- [
-            [spot: true],
             [template_id: "tpl_1"],
             [network_volume_id: "vol_1"]
           ] do
