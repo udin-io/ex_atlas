@@ -99,7 +99,13 @@ if Code.ensure_loaded?(Igniter) do
       """)
     end
 
-    defp install_tracking_store(igniter, nil), do: igniter
+    defp install_tracking_store(igniter, nil) do
+      if Keyword.has_key?(igniter.args.options, :repo) do
+        Igniter.add_warning(igniter, "--repo does nothing without --tracking-store ecto.")
+      else
+        igniter
+      end
+    end
 
     defp install_tracking_store(igniter, "ecto") do
       igniter = Enum.reduce(@config_files, igniter, &OrchestratorConfig.include_config/2)
@@ -132,7 +138,19 @@ if Code.ensure_loaded?(Igniter) do
 
     defp select_repo(igniter) do
       {igniter, repos} = Igniter.Libs.Ecto.list_repos(igniter)
-      {igniter, pick_repo(Keyword.get(igniter.args.options, :repo), repos)}
+
+      case Keyword.get(igniter.args.options, :repo) do
+        nil ->
+          {igniter, pick_repo(nil, repos)}
+
+        name ->
+          # `Igniter.Libs.Ecto.list_repos/1` finds only modules that
+          # `use Ecto.Repo` directly; a repo built on a host's own wrapper
+          # module is still a module the host names.
+          repo = Igniter.Project.Module.parse(name)
+          {exists?, igniter} = Igniter.Project.Module.module_exists(igniter, repo)
+          {igniter, pick_repo(name, if(exists?, do: [repo | repos], else: repos))}
+      end
     end
 
     defp pick_repo(nil, []) do

@@ -245,6 +245,21 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
       )
     end
 
+    test "--repo takes a repo built on a wrapper module" do
+      files =
+        host()
+        |> Map.put("lib/test/repo.ex", """
+        defmodule Test.Repo do
+          use Test.BaseRepo
+        end
+        """)
+
+      igniter = install_ecto(files, ["--repo", "Test.Repo"])
+
+      assert igniter.issues == []
+      assert ex_atlas_config(igniter)[:orchestrator][:repo] == Test.Repo
+    end
+
     test "turns a config.exs start_orchestrator: true off, since the supervisor refuses it" do
       files =
         Map.put(host(), "config/config.exs", """
@@ -403,6 +418,12 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
   end
 
   describe "without --tracking-store" do
+    test "warns that --repo does nothing alone" do
+      igniter = IgniterProject.run("ex_atlas.install", ["--repo", "Test.Repo"], host())
+
+      assert_has_warning(igniter, &(&1 =~ "--repo" and &1 =~ "--tracking-store"))
+    end
+
     test "writes no migration, no orchestrator config and no child" do
       igniter = install(host())
 
