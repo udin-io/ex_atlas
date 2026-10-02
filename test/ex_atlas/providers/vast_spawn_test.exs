@@ -456,6 +456,40 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
   end
 
+  describe "spawn_compute/1 rent answers that hide what happened" do
+    setup %{bypass: bypass} do
+      expect_search(bypass, [offer(%{"id" => 1}), offer(%{"id" => 2})])
+      :ok
+    end
+
+    # Req cannot decode the body, and its error keeps the body it read.
+    test "a body that is not JSON prints no echoed value, and tries no other offer", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      for status <- [200, 400, 500] do
+        Bypass.expect_once(bypass, "PUT", "/api/v0/asks/1", fn conn ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(status, ~s({"error":"invalid_args","msg":"bad HF_TOKEN=#{@hf_token}"))
+        end)
+
+        assert {:error, %ExAtlas.Error{} = error} =
+                 rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token})
+
+        refute inspect(error) =~ @hf_token, "a #{status} body leaked"
+        refute inspect(error, structs: false) =~ @hf_token
+        refute Exception.message(error) =~ @hf_token
+
+        if status == 500 do
+          :ok
+        else
+          expect_search(bypass, [offer(%{"id" => 1}), offer(%{"id" => 2})])
+        end
+      end
+    end
+  end
+
   describe "spawn_compute/1 rent timeout" do
     # Req's plug stands in for the network here: Bypass reports a handler the
     # client hung up on as a test failure.
