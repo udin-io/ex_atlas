@@ -1841,6 +1841,28 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert log =~ ":reap_providers"
     end
 
+    # The orphan and the adopted task's replacement share the task's name and
+    # the prefix. Only the live tracker separates them, so the replacement's
+    # record is removed first: the Registry alone must keep it.
+    test "the Reaper deletes the orphan and never the replacement a live tracker holds" do
+      TestOrchestrator.put_env(reap_grace_ms: 0)
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Adopter.run(notify: self())
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      :ok = Memory.delete(new_id)
+      assert {:ok, %{status: :running, name: name}} = Mock.get_compute(new_id, %{})
+      assert name == pod_b.name
+
+      :ok = ExAtlas.Orchestrator.Reaper.reap_now("atlas-", [FaultyProvider])
+
+      assert {:ok, %{status: :terminated}} = Mock.get_compute(pod_b.id, %{})
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
+      assert {:ok, %{compute: %{id: ^new_id}}} = Orchestrator.info(new_id)
+    end
+
     test "the interrupted attempt counts as spent, so a spent budget rents nothing more" do
       {pod_a, _pod_b} = died_mid_respawn(1)
       old_id = pod_a.id
