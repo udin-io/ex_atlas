@@ -136,23 +136,25 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
         updated_at: now
       }
 
-      try do
-        repo.insert_all(Row, [row],
-          on_conflict: {:replace, [:owner, :record, :updated_at]},
-          conflict_target: [:id]
-        )
-
-        :ok
-      rescue
-        error ->
-          Logger.error(
-            "[ExAtlas.Orchestrator.TrackingStore.Ecto] could not write the tracking record " <>
-              "for #{id} (#{Exception.message(error)}). It will not be adopted at the next " <>
-              "boot, and the Reaper will treat it as an orphan."
+      outside_transaction(fn ->
+        try do
+          repo.insert_all(Row, [row],
+            on_conflict: {:replace, [:owner, :record, :updated_at]},
+            conflict_target: [:id]
           )
 
           :ok
-      end
+        rescue
+          error ->
+            Logger.error(
+              "[ExAtlas.Orchestrator.TrackingStore.Ecto] could not write the tracking record " <>
+                "for #{id} (#{Exception.message(error)}). It will not be adopted at the next " <>
+                "boot, and the Reaper will treat it as an orphan."
+            )
+
+            :ok
+        end
+      end)
     end
 
     @impl ExAtlas.Orchestrator.TrackingStore
@@ -177,20 +179,28 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     def delete(id) do
       repo = repo!()
 
-      try do
-        _ = repo.delete_all(from(r in Row, where: r.id == ^id))
-        :ok
-      rescue
-        error ->
-          Logger.error(
-            "[ExAtlas.Orchestrator.TrackingStore.Ecto] could not delete the tracking record " <>
-              "for #{id} (#{Exception.message(error)}). The next boot finds the pod gone " <>
-              "and deletes the record then."
-          )
-
+      outside_transaction(fn ->
+        try do
+          _ = repo.delete_all(from(r in Row, where: r.id == ^id))
           :ok
-      end
+        rescue
+          error ->
+            Logger.error(
+              "[ExAtlas.Orchestrator.TrackingStore.Ecto] could not delete the tracking record " <>
+                "for #{id} (#{Exception.message(error)}). The next boot finds the pod gone " <>
+                "and deletes the record then."
+            )
+
+            :ok
+        end
+      end)
     end
+
+    # `spawn/1` writes from the caller's process, and a repo call in a process
+    # that is inside a transaction joins it. A host that rolls back would erase
+    # the record of a running pod, so every write runs in its own process.
+    # The repo's own timeout bounds the wait.
+    defp outside_transaction(fun), do: fun |> Task.async() |> Task.await(:infinity)
 
     @impl ExAtlas.Orchestrator.TrackingStore
     def all do

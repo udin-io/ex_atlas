@@ -179,6 +179,21 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       assert {:ok, %{respawning: nil}} = Store.get("pod-nil")
     end
 
+    # `spawn/1` writes from the caller's process. A host that spawns inside its
+    # own transaction and then rolls back must not lose the record of a pod
+    # that is running.
+    test "survives a rollback of the caller's transaction", %{tmp_dir: dir} do
+      start!(dir)
+
+      assert {:error, :host_rolled_back} =
+               Repo.transaction(fn ->
+                 :ok = Store.put(record("pod-a"))
+                 Repo.rollback(:host_rolled_back)
+               end)
+
+      assert {:ok, %{id: "pod-a"}} = Store.get("pod-a")
+    end
+
     # The store never writes a row it would refuse to read.
     test "logs and writes nothing for a record over 1 MiB", %{tmp_dir: dir} do
       start!(dir)
@@ -202,6 +217,19 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
   end
 
   describe "delete/1" do
+    test "survives a rollback of the caller's transaction", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Store.put(record("pod-a"))
+
+      assert {:error, :host_rolled_back} =
+               Repo.transaction(fn ->
+                 :ok = Store.delete("pod-a")
+                 Repo.rollback(:host_rolled_back)
+               end)
+
+      assert :error = Store.get("pod-a")
+    end
+
     test "logs and returns :ok when the repo is down", %{tmp_dir: dir} do
       start!(dir)
       :ok = Store.put(record("pod-a"))
