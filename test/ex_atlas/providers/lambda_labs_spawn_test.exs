@@ -298,7 +298,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       for name <-
             ~w(UID EUID PPID SHELLOPTS BASHOPTS BASH_VERSINFO RANDOM SRANDOM SECONDS LINENO) ++
               ~w(GROUPS FUNCNAME HISTCMD OPTIND DIRSTACK PIPESTATUS BASHPID EPOCHSECONDS) ++
-              ~w(EPOCHREALTIME BASH_ENV BASH_ARGV0 COMP_WORDS) do
+              ~w(EPOCHREALTIME BASH_ENV BASH_ARGV0 COMP_WORDS _) do
         assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
                  ExAtlas.spawn_compute(opts ++ [env: %{name => "1000"}]),
                "expected #{name} to be refused"

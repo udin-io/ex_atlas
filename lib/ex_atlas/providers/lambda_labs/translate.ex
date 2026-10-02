@@ -41,7 +41,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   # prefixes, which covers bash 5's `BASH_ARGV0`, `BASH_SUBSHELL` and the rest.
   @bash_names ~w(UID EUID PPID SHELLOPTS BASHOPTS RANDOM SRANDOM SECONDS LINENO GROUPS
                  FUNCNAME HISTCMD OPTIND DIRSTACK PIPESTATUS BASHPID EPOCHSECONDS
-                 EPOCHREALTIME)
+                 EPOCHREALTIME _)
 
   # How long the script waits for the Docker daemon, which cloud-init can
   # reach before `docker.service` is up: 90 tries, 2 s apart.
