@@ -1,8 +1,9 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #90 (#85, Lambda
-`command:`). It feeds the choice of the next feature. Dates are merge dates.
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #97 (#96, an
+interactive Lambda session ends on its report). It feeds the choice of the
+next feature. Dates are merge dates.
 
 ## Next
 
@@ -12,7 +13,7 @@ Nothing filed. The owner picks the next feature after 0.8.0.
 
 | Feature | Ticket | State |
 |---|---|---|
-| Release 0.8.0 | #94 | PR #95: version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag after the merge |
+| Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag after the merge |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider.
@@ -21,7 +22,7 @@ Lambda Labs takes its place as the second provider.
 
 | Feature | PRs | Merged |
 |---|---|---|
-| Lambda Labs provider (feature #83) | #89 (slice 1, #84): spawn through cloud-init, get, list, terminate, GPU types. #90 (slice 2, #85): `command:`, `run_task/1` ended by the host's report, the Reaper on Lambda. #91 (slice 3, #86): `ports:` open in Lambda's firewall | 2026-10-02 |
+| Lambda Labs provider (feature #83) | #89 (slice 1, #84): spawn through cloud-init, get, list, terminate, GPU types. #90 (slice 2, #85): `command:`, `run_task/1` ended by the host's report, the Reaper on Lambda. #91 (slice 3, #86): `ports:` open in Lambda's firewall. #97 (#96): an interactive session with a self-terminating command ends on the report | 2026-10-02 (#97 on merge) |
 | Docs build clean for 0.8.0 | #93 (#92): `bin/ci` fails on an ExDoc warning, every module grouped | 2026-10-02 |
 | S3-compatible data staging (feature #26, milestone Data staging) | #75 (slice 1, #71): the `s3:` option and `Spec.Staging`. #77 (slice 2, #72): the guide and the tested entrypoint. #80 (slice 3, #73): presigned-URL mode. #78 (#76): credentials as `ExAtlas.Secret`. #81 (slice 4, #74): `persist: true` with `s3:`. #82 (#79): `env:` values as `ExAtlas.Secret`, names only in records. #88 (#87): `respawn_credentials:`, a host resolver re-supplies `s3:` and `env:` when an adopted task respawns | 2026-10-02 (#88 on merge) |
 | Cost caps, `max_cost` (feature #28, milestone Provider resource management) | #67 (slice 1, #64): estimate, timer, events. #69 (slice 2, #65): a cap survives a restart. #70 (slice 3, #66): billing reconciliation every 15 min | 2026-10-01 (#70 on merge) |

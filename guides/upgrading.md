@@ -10,7 +10,7 @@ then read its section.
 | `ctx.api_key` and the credentials in `ctx.req_options` are `ExAtlas.Secret` | You wrote a provider module | [Provider modules](#provider-modules-read-secrets-with-reveal) |
 | A cluster needs `:reap_owner`, and upgrades in two deploys | You run more than one machine on one account | [Reap owner](#reap-owner-and-the-two-deploy-upgrade) |
 | Tracking records v2 carry `owner` | You wrote a `TrackingStore` backed by columns | [Tracking store](#tracking-store-add-an-owner-column) |
-| `stop_tracked/1` sends `{:terminating, {:shutdown, :stopped}}`; `terminate_child/2` keeps persisted pods | You match `:shutdown` in a subscriber | [Terminating messages](#terminating-messages) |
+| `stop_tracked/1` sends `{:terminating, {:shutdown, :stopped}}`; `terminate_child/2` keeps persisted pods; interactive deadlines send `{:terminating, _}` | You match `:shutdown`, or `{:task, _}` on an interactive session, in a subscriber | [Terminating messages](#terminating-messages) |
 | Records keep `env:` names only | You use `persist: true` with `env:` or `s3:` | [Adopted respawn](#adopted-respawn-needs-respawn_credentials) |
 | `RunPod`'s `endpoints_module` function is gone | You call it | [Removed function](#removed-the-endpoints_module-function) |
 
@@ -133,6 +133,28 @@ persisted pod. Use `stop_tracked/1` to end one. On Fly, set
 `kill_signal = "SIGTERM"` and a `kill_timeout` of at least 30 seconds. See the
 [CHANGELOG entry][c45]
 (#45).
+
+An interactive session (`Orchestrator.spawn/1` without `mode: :task`) sends
+no `{:task, _}` event any more (#96). Its deadlines announce themselves on
+`:terminating`.
+
+Before:
+
+```elixir
+def handle_info({:task, :timed_out}, state), do: ...
+def handle_info({:task, {:failed, :never_ready}}, state), do: ...
+```
+
+After:
+
+```elixir
+def handle_info({:terminating, :max_runtime}, state), do: ...
+def handle_info({:terminating, :never_ready}, state), do: ...
+```
+
+An interactive session with a non-empty `command:`, a `callback:` and
+`self_terminate: true` also ends `finish_grace_ms` after its finish report,
+with `{:terminating, :finished}`. A `run_task/1` task still sends `{:task, _}`.
 
 ### Adopted respawn needs `respawn_credentials:`
 

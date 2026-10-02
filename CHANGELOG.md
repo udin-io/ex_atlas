@@ -70,6 +70,27 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
 fragment swallowed, so the report never arrived; userinfo showed in `ps`
 wherever curl ran.
 
+### Fixed: an interactive session ends on its command's finish report (#96)
+
+`Orchestrator.spawn/1` with a non-empty `command:`, a `callback:` and
+`self_terminate: true` (the default) now ends on the container's finish
+report, as `run_task/1` does. `finish_grace_ms` (default 60 s) after
+`{:task_report, report}`, the tracker broadcasts `{:terminating, :finished}`
+and deletes the resource. `touch/1` does not postpone it. Before, a Lambda
+instance whose command had exited billed until the idle TTL.
+`self_terminate: false` keeps the session up after the report, as before.
+
+### Changed: interactive deadlines send `{:terminating, _}` (#96)
+
+An interactive session past `max_runtime_ms` sends
+`{:terminating, :max_runtime}`, and one still provisioning at
+`ready_timeout_ms` sends `{:terminating, :never_ready}`. Both used to send
+`{:task, :timed_out}` and `{:task, {:failed, :never_ready}}`, which `Events`
+reserves for `mode: :task`. A host that matched `{:task, _}` on an
+interactive session matches `{:terminating, _}` now; see
+[the upgrading guide](guides/upgrading.md#terminating-messages). Task mode is
+unchanged.
+
 ### Added: Lambda opens an instance's `ports:` in its firewall (#86)
 
 A spawn with `ports:` creates one Lambda firewall ruleset for the instance
