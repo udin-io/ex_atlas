@@ -435,6 +435,39 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       refute "trainer-adopted-s3:latest" in images()
       assert :error = Memory.get(id)
     end
+
+    test "a host store that dropped the marker still adopts, and still refuses the respawn" do
+      compute = orphaned_staged_task("trainer-adopted-s3-nomarker:latest")
+      id = compute.id
+
+      # A host store that keeps only the fields it has columns for hands back
+      # the URIs without `credentials: :not_stored`. `Staging.new/1` would
+      # accept that `s3:`, and a replacement would rent with no keys.
+      {:ok, record} = Memory.get(id)
+
+      :ok =
+        Memory.put(%{
+          record
+          | opts: Keyword.put(record.opts, :s3, Map.delete(record.opts[:s3], :credentials))
+        })
+
+      {:ok, %{opts: stored}} = Memory.get(id)
+      assert stored[:s3] == %{dataset_uri: "s3://bucket/datasets/abc/"}
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      assert {:ok, %{mode: :task}} = Orchestrator.info(id)
+
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-s3-nomarker:latest" in images()
+    end
   end
 
   describe "a store that cannot account for itself" do

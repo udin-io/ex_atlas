@@ -441,7 +441,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def init({:adopted, record}) do
     Process.flag(:trap_exit, true)
 
-    %{compute: compute, opts: opts} = record
+    %{compute: compute} = record
+    opts = adopted_staging(record.opts)
 
     tracking =
       opts |> Keyword.take(@option_keys) |> bound_timers() |> NimbleOptions.validate!(@schema)
@@ -518,6 +519,22 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       reconcile_timeout: nil,
       spend_from: spend_from(compute)
     }
+  end
+
+  # A record never holds `s3:` credentials, so its `s3:` is marked as such
+  # even when a host store dropped the marker: without it a respawn would rent
+  # a replacement with the URIs and no keys.
+  defp adopted_staging(opts) do
+    case Keyword.get(opts, :s3) do
+      nil ->
+        opts
+
+      s3 when is_map(s3) and not is_struct(s3) ->
+        Keyword.put(opts, :s3, Map.put(s3, :credentials, :not_stored))
+
+      other ->
+        Keyword.put(opts, :s3, Spec.Staging.scrub(other))
+    end
   end
 
   # What is left of a wall-clock budget, measured from the spawn that started
