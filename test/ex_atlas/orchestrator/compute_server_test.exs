@@ -294,6 +294,17 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute log =~ @api_key
     end
 
+    test "a function clause crash prints no compute auth token" do
+      {:ok, pid, compute} = spawn_tracked(auth: :bearer)
+      assert is_binary(compute.auth.token)
+
+      log = clause_crash_log(pid)
+
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute log =~ compute.auth.token
+    end
+
     test "a function clause crash prints no req_options :auth or :headers" do
       header_secret = "hdr-tracker-probe-2b9d"
 

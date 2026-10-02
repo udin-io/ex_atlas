@@ -181,4 +181,23 @@ defmodule ExAtlas.CredentialRedactionTest do
       )
     end
   end
+
+  test "inspect/1 of a Compute prints no auth token" do
+    compute = %ExAtlas.Spec.Compute{
+      id: "pod-1",
+      provider: :mock,
+      status: :running,
+      auth: %{
+        scheme: :bearer,
+        token: "tok-redaction-probe-c3f9",
+        header: "Authorization",
+        hash: nil
+      }
+    }
+
+    text = inspect(compute)
+
+    assert text =~ "pod-1"
+    refute text =~ "tok-redaction-probe-c3f9"
+  end
 end
