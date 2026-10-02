@@ -59,7 +59,9 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     Anyone who can write the host's database can write these rows. A row is
     decoded with `Plug.Crypto.non_executable_binary_to_term/2` and `[:safe]`,
     which refuses atoms this node does not have and any function. A row that
-    is not a map with its own `id` is refused too.
+    is not a map with its own `id` is refused too, and so is a compressed row
+    or one over 1 MiB (1,048,576 bytes): a compressed term declares its own decoded
+    size, up to 4 GB. `put/1` logs a record over that size and writes nothing.
 
       * `all/0` answers `{:error, {:undecodable, ids}}` when any row is
         refused. The Adopter then adopts nothing and the Reaper reaps nothing
@@ -85,6 +87,9 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     alias ExAtlas.Orchestrator.TrackingStore.Ecto.Row
 
+    # A record is a few KB. The cap bounds what one row costs to decode.
+    @max_record_bytes 1_048_576
+
     @impl ExAtlas.Orchestrator.TrackingStore
     def child_spec(opts) do
       %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
@@ -105,12 +110,28 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     @impl ExAtlas.Orchestrator.TrackingStore
     def put(%{id: id} = record) do
       repo = repo!()
+      blob = :erlang.term_to_binary(record)
+
+      if byte_size(blob) > @max_record_bytes do
+        Logger.error(
+          "[ExAtlas.Orchestrator.TrackingStore.Ecto] the tracking record for #{id} is " <>
+            "#{byte_size(blob)} bytes, over the #{@max_record_bytes} bytes a row may hold; " <>
+            "it is not written, and the row keeps its previous version, if any."
+        )
+      else
+        write(repo, id, record, blob)
+      end
+
+      :ok
+    end
+
+    defp write(repo, id, record, blob) do
       now = DateTime.utc_now()
 
       row = %{
         id: id,
         owner: owner_column(record),
-        record: :erlang.term_to_binary(record),
+        record: blob,
         inserted_at: now,
         updated_at: now
       }
@@ -192,6 +213,11 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     # `[:safe]` refuses atoms this node does not have; the Plug.Crypto walk
     # refuses functions. Neither error is logged: its message prints the term.
+    defp decode(_id, blob) when not is_binary(blob) or byte_size(blob) > @max_record_bytes,
+      do: :error
+
+    defp decode(_id, <<131, 80, _compressed::binary>>), do: :error
+
     defp decode(id, blob) do
       case Plug.Crypto.non_executable_binary_to_term(blob, [:safe]) do
         %{id: ^id} = record -> {:ok, record}

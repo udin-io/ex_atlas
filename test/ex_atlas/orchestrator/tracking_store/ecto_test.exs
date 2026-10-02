@@ -92,6 +92,32 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       assert Enum.sort(ids) == ["pod-junk", "pod-list", "pod-moved"]
     end
 
+    # A compressed term declares its own decoded size, up to 4 GB, so a row of
+    # a few hundred KB could take the node's memory at boot.
+    test "refuses a compressed row", %{tmp_dir: dir} do
+      start!(dir)
+      blob = :erlang.term_to_binary(record("pod-z"), [:compressed])
+      assert <<131, 80, _rest::binary>> = blob
+      insert_raw!("pod-z", blob)
+
+      assert {:error, {:undecodable, ["pod-z"]}} = Store.all()
+    end
+
+    test "refuses a row over 1 MiB, and reads one just under it", %{tmp_dir: dir} do
+      start!(dir)
+
+      big =
+        :erlang.term_to_binary(record("pod-big", %{user_id: String.duplicate("a", 1_048_576)}))
+
+      near = record("pod-near", %{user_id: String.duplicate("a", 1_047_000)})
+      assert byte_size(:erlang.term_to_binary(near)) <= 1_048_576
+      insert_raw!("pod-big", big)
+      :ok = Store.put(near)
+
+      assert {:error, {:undecodable, ["pod-big"]}} = Store.all()
+      assert {:ok, ^near} = Store.get("pod-near")
+    end
+
     test "answers {:error, _} when the repo is down", %{tmp_dir: dir} do
       start!(dir)
       :ok = Store.put(record("pod-a"))
@@ -151,6 +177,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
 
       assert {:ok, ^old} = Store.get("pod-old")
       assert {:ok, %{respawning: nil}} = Store.get("pod-nil")
+    end
+
+    # The store never writes a row it would refuse to read.
+    test "logs and writes nothing for a record over 1 MiB", %{tmp_dir: dir} do
+      start!(dir)
+      big = record("pod-big", %{user_id: String.duplicate("a", 1_048_576)})
+
+      log = capture_log(fn -> assert :ok = Store.put(big) end)
+      assert log =~ "pod-big"
+      assert log =~ "1048576 bytes"
+      assert :error = Store.get("pod-big")
     end
 
     test "logs and returns :ok when the repo is down, so a tracker runs on",
