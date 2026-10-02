@@ -585,6 +585,29 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       end
     end
 
+    # The trap reads these from the environment Vast injects; an `env:` entry
+    # of the same name could point the delete elsewhere.
+    test "CONTAINER_ID and CONTAINER_API_KEY in env are :validation", %{opts: opts} do
+      for name <- ["CONTAINER_ID", "CONTAINER_API_KEY"] do
+        assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+                 rent_spawn(opts, env: %{name => "1"})
+
+        assert message =~ name
+      end
+    end
+
+    test "a command argument with a NUL byte or not UTF-8 is :validation naming its index", %{
+      opts: opts
+    } do
+      for bad <- ["#{@hf_token}\0x", @hf_token <> <<0xFF>>] do
+        assert {:error, %ExAtlas.Error{kind: :validation} = error} =
+                 rent_spawn(opts, command: ["python", bad])
+
+        assert error.message =~ "argument 1"
+        refute error.message =~ @hf_token
+      end
+    end
+
     test "ATLAS_PORTS in env is :validation", %{opts: opts} do
       assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
                rent_spawn(opts, env: %{"ATLAS_PORTS" => "1/tcp"})
