@@ -156,6 +156,47 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
   end
 
+  describe "spawn_compute/1 launch body" do
+    # From `InstanceLaunchRequest` and `RequestedTagEntry` in Lambda's OpenAPI
+    # spec 1.10.0, https://cloud.lambda.ai/api/v1/openapi.json.
+    @launch_properties ~w(region_name instance_type_name ssh_key_names file_system_names
+                          file_system_mounts hostname name image user_data tags firewall_rulesets)
+    @launch_required ~w(region_name instance_type_name ssh_key_names)
+    @tag_key ~r/^[a-z][a-z0-9-:]+$/
+
+    test "holds only fields Lambda's spec defines, with valid tags", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+      expect_launch(bypass)
+
+      long_image = "registry.example.com/" <> String.duplicate("a", 200) <> ":latest"
+
+      assert {:ok, _} =
+               ExAtlas.spawn_compute(
+                 Keyword.merge(opts,
+                   name: "atlas-x",
+                   image: long_image,
+                   ports: [{8000, :http}],
+                   env: %{"A" => "1"}
+                 )
+               )
+
+      body = launched_body()
+      assert Map.keys(body) -- @launch_properties == []
+      assert @launch_required -- Map.keys(body) == []
+
+      for %{"key" => key, "value" => value} <- body["tags"] do
+        assert key =~ @tag_key
+        assert String.length(value) <= 128
+      end
+
+      # An image longer than a tag value holds gets no atlas-image tag.
+      refute Map.has_key?(tags(body), "atlas-image")
+    end
+  end
+
   describe "spawn_compute/1 SSH key" do
     test "with none in provider_opts or app config, is :validation before any request", %{
       opts: opts
