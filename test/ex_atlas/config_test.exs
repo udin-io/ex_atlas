@@ -61,6 +61,52 @@ defmodule ExAtlas.ConfigTest do
     assert ctx.endpoint == "abc123"
   end
 
+  describe "the provider's app config" do
+    setup do
+      on_exit(fn -> Application.delete_env(:ex_atlas, :runpod) end)
+    end
+
+    test "serves base_url to a call that passes none" do
+      Application.put_env(:ex_atlas, :runpod, base_url: "https://proxy.internal/v1")
+
+      assert Config.build_ctx(:runpod, api_key: "k").base_url == "https://proxy.internal/v1"
+    end
+
+    test "a per-call base_url wins over it" do
+      Application.put_env(:ex_atlas, :runpod, base_url: "https://proxy.internal/v1")
+
+      ctx = Config.build_ctx(:runpod, api_key: "k", base_url: "https://per-call.example")
+
+      assert ctx.base_url == "https://per-call.example"
+    end
+
+    test "control: no base_url anywhere leaves the provider's own" do
+      assert Config.build_ctx(:runpod, api_key: "k").base_url == nil
+    end
+
+    test "serves req_options, and per-call keys win over its keys" do
+      Application.put_env(:ex_atlas, :runpod,
+        req_options: [receive_timeout: 9_000, connect_options: [timeout: 1_000]]
+      )
+
+      ctx = Config.build_ctx(:runpod, api_key: "k", req_options: [receive_timeout: 5_000])
+
+      assert Keyword.get(ctx.req_options, :receive_timeout) == 5_000
+      assert Keyword.get(ctx.req_options, :connect_options) == [timeout: 1_000]
+    end
+
+    test "seals a credential in its req_options, as a per-call one is" do
+      Application.put_env(:ex_atlas, :runpod,
+        req_options: [headers: [{"x-proxy-key", "proxy-secret-7d1e"}]]
+      )
+
+      ctx = Config.build_ctx(:runpod, api_key: "k")
+
+      assert %ExAtlas.Secret{} = Keyword.fetch!(ctx.req_options, :headers)
+      refute inspect(ctx) =~ "proxy-secret-7d1e"
+    end
+  end
+
   test "provider_module maps atoms to modules" do
     assert Config.provider_module(:runpod) == ExAtlas.Providers.RunPod
     assert Config.provider_module(:mock) == ExAtlas.Providers.Mock
