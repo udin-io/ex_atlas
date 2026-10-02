@@ -7,6 +7,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
 
   alias ExAtlas.Orchestrator.Reaper
   alias ExAtlas.Providers.Mock
+  alias ExAtlas.Test.FakeVast
   alias ExAtlas.Test.FaultyProvider
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
   alias ExAtlas.Test.TrackingStore.Memory
@@ -338,5 +339,56 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       mode: :task,
       user_id: nil
     }
+  end
+
+  describe "on Vast" do
+    setup do
+      bypass = Bypass.open()
+      previous = Application.get_env(:ex_atlas, :vast)
+
+      Application.put_env(:ex_atlas, :vast,
+        api_key: "vast-test-key",
+        base_url: "http://localhost:#{bypass.port}"
+      )
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ex_atlas, :vast, previous),
+          else: Application.delete_env(:ex_atlas, :vast)
+      end)
+
+      {:ok, bypass: bypass}
+    end
+
+    # A rent that answered 5xx or timed out may have rented, and nothing
+    # tracks what it rented (risk 54).
+    test "destroys an untracked atlas- instance past the grace window, leaves a younger one", %{
+      bypass: bypass
+    } do
+      TestOrchestrator.put_env(reap_grace_ms: 60 * 60 * 1_000)
+      now = System.os_time(:second)
+
+      instances = [
+        FakeVast.instance(%{"id" => 1, "label" => "atlas-old", "start_date" => now - 7_200}),
+        FakeVast.instance(%{"id" => 2, "label" => "atlas-young", "start_date" => now - 300}),
+        FakeVast.instance(%{"id" => 3, "label" => "other-old", "start_date" => now - 7_200})
+      ]
+
+      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+        FakeVast.json(conn, 200, %{"instances" => instances, "next_token" => nil})
+      end)
+
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
+        send(test_pid, {:destroyed, List.last(conn.path_info)})
+        FakeVast.json(conn, 200, %{"success" => true})
+      end)
+
+      :ok = Reaper.reap_now("atlas-", [:vast])
+
+      assert_received {:destroyed, "1"}
+      refute_received {:destroyed, _}
+    end
   end
 end

@@ -344,22 +344,36 @@ command in a shell that deletes the pod when it ends:
 
 ```sh
 atlas_self_terminate() {
-  curl -sS -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
-    "https://api.runpod.io/v2/pods/$RUNPOD_POD_ID"
+  printf 'header = "Authorization: Bearer %s"\n' "$RUNPOD_API_KEY" |
+    curl -sS -m 30 -K - -X DELETE "https://api.runpod.io/v2/pods/$RUNPOD_POD_ID"
 }
 trap atlas_self_terminate EXIT INT TERM
 /app/train.sh --epochs 3
 ```
 
+The key reaches curl on stdin, so no `ps` in the container shows it. On Vast
+the same wrapper deletes `https://console.vast.ai/api/v0/instances/$CONTAINER_ID/`
+with `$CONTAINER_API_KEY`.
+
 `RUNPOD_POD_ID` and the pod-scoped `RUNPOD_API_KEY` are injected by RunPod, so
-nothing of yours travels to the pod. `trap … EXIT` fires on a crash and on
-SIGTERM/SIGINT as well as on a clean exit. The tracker sees the resulting 404
-and reports `{:task, :completed}`.
+nothing of yours travels to the pod. `trap … EXIT` fires when the command
+exits, fails, or dies from a signal. A SIGTERM to the container's shell alone
+(`docker stop`) waits for the command, and the SIGKILL that follows runs no
+cleanup. The tracker sees the resulting 404 and reports `{:task, :completed}`.
 
 Your image needs a shell and `curl`. If it has neither, pass
 `self_terminate: false` — the task will then always end at `:max_runtime_ms`
 and report `:timed_out`, which is honest but wasteful, so size the deadline
 accordingly.
+
+#### On Vast.ai, the same wrapper
+
+Vast puts `CONTAINER_ID` and `CONTAINER_API_KEY`, a key that can only start,
+stop or destroy that instance, into every container. ExAtlas sends the
+wrapped command as the rent's `args`, which Vast passes to the image's
+entrypoint, and the trap deletes
+`https://console.vast.ai/api/v0/instances/$CONTAINER_ID/`. An image whose
+ENTRYPOINT does not run its arguments (`exec "$@"`) cannot run the wrapper.
 
 #### On Lambda Labs, the host reports instead
 

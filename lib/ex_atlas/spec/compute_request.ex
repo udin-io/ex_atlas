@@ -8,7 +8,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
 
   ## Running a command to completion
 
-  `:command` overrides the image's start command (Runpod's `cmd`),
+  `:command` overrides the image's start command (Runpod's `cmd`, Vast's `args`),
   which is how you run batch work rather than a long-lived service:
 
       command: ["/app/train.sh", "--epochs", "3"]

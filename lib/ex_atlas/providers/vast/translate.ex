@@ -14,6 +14,8 @@ defmodule ExAtlas.Providers.Vast.Translate do
   """
 
   alias ExAtlas.{Error, Secret, Spec}
+  alias ExAtlas.Providers.Shell
+  alias ExAtlas.Providers.Vast.Client
 
   @default_disk_gb 20
   @ports_var "ATLAS_PORTS"
@@ -35,6 +37,17 @@ defmodule ExAtlas.Providers.Vast.Translate do
 
   @env_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
 
+  @vast_vars ~w(CONTAINER_ID CONTAINER_API_KEY)
+
+  # Vast injects `CONTAINER_ID` and `CONTAINER_API_KEY`, a key that can only
+  # start, stop or destroy this instance, into every container. The id is
+  # read at run time: it exists only after the rent answers.
+  @self_delete Shell.delete_request(
+                 "#{Client.base_url()}/api/v0/instances/$CONTAINER_ID/",
+                 "CONTAINER_ID",
+                 "CONTAINER_API_KEY"
+               )
+
   @typedoc """
   What a rent needs from the request alone: the `env` object, its values as
   `ExAtlas.Secret`s, and the `Compute.auth` handle as a `Secret`, since its
@@ -48,14 +61,16 @@ defmodule ExAtlas.Providers.Vast.Translate do
   Returns `{:error, %ExAtlas.Error{kind: :validation}}`, naming no value, for
   no `:image`; an `:image` or `:name` that is not UTF-8; an env name that is
   not `[A-Za-z_][A-Za-z0-9_]*`, which Vast would read as a Docker flag; a
-  value holding a NUL byte or not UTF-8; an `ATLAS_PORTS` in `:env`; and a
-  port that is not `{1..65535, :http | :tcp}`.
+  value or a `:command` argument holding a NUL byte or not UTF-8; an
+  `ATLAS_PORTS`, `CONTAINER_ID` or `CONTAINER_API_KEY` in `:env`; and a port
+  that is not `{1..65535, :http | :tcp}`.
   """
   @spec launch_parts(Spec.ComputeRequest.t()) :: {:ok, parts()} | {:error, Error.t()}
   def launch_parts(%Spec.ComputeRequest{} = request) do
     with :ok <- check_image(request.image),
          :ok <- check_name(request.name),
          :ok <- check_reserved(request.env),
+         :ok <- check_command(request.command),
          {:ok, ports} <- ports(request.ports) do
       {auth_env, auth} = ExAtlas.Auth.for_scheme(request.auth)
       env = request |> Spec.ComputeRequest.container_env() |> Map.merge(auth_env)
@@ -136,10 +151,13 @@ defmodule ExAtlas.Providers.Vast.Translate do
   The `PUT /api/v0/asks/{id}/` body. `env` values stay `ExAtlas.Secret`s
   until `Vast.Client.put/4` encodes them.
 
-  `runtype: "args"` with no `args` runs the image's own entrypoint; `ssh`
-  would replace it with Vast's SSH setup. `cancel_unavail: true` makes Vast
-  refuse an offer it cannot start now, rather than create a stopped instance
-  that bills its disk.
+  `runtype: "args"` runs the image's own entrypoint, with `args` as its
+  arguments; `ssh` would replace it with Vast's SSH setup. `args` is
+  `:command`, wrapped in `sh -c` with a trap that deletes the instance when it
+  ends (see `ExAtlas.Spec.ComputeRequest`); no `:command` sends no `args`, so
+  the image's own command runs. `cancel_unavail: true` makes Vast refuse an
+  offer it cannot start now, rather than create a stopped instance that bills
+  its disk.
   """
   @spec launch_body(Spec.ComputeRequest.t(), parts()) :: map()
   def launch_body(%Spec.ComputeRequest{} = request, parts) do
@@ -149,6 +167,7 @@ defmodule ExAtlas.Providers.Vast.Translate do
       "disk" => disk_gb(request),
       "runtype" => "args",
       "env" => parts.env,
+      "args" => Shell.start_command(request, @self_delete),
       "cancel_unavail" => true
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
@@ -280,10 +299,32 @@ defmodule ExAtlas.Providers.Vast.Translate do
     if String.valid?(name), do: :ok, else: validation(":name is not valid UTF-8")
   end
 
+  # The self-delete trap reads CONTAINER_ID and CONTAINER_API_KEY from what
+  # Vast injects; an `env:` entry of the same name could point it elsewhere.
   defp check_reserved(env) do
-    if Map.has_key?(env, @ports_var),
-      do: validation("#{@ports_var} is set by ExAtlas from :ports; remove it from :env"),
-      else: :ok
+    cond do
+      Map.has_key?(env, @ports_var) ->
+        validation("#{@ports_var} is set by ExAtlas from :ports; remove it from :env")
+
+      name = Enum.find(@vast_vars, &Map.has_key?(env, &1)) ->
+        validation("#{name} is set by Vast in every container; remove it from :env")
+
+      true ->
+        :ok
+    end
+  end
+
+  # A NUL byte cuts the argument short in the container, and invalid UTF-8
+  # cannot be encoded as JSON. The message names the index, never the value.
+  defp check_command(nil), do: :ok
+
+  defp check_command(command) do
+    command
+    |> Enum.with_index()
+    |> Enum.find_value(:ok, fn {arg, i} ->
+      if not String.valid?(arg) or String.contains?(arg, <<0>>),
+        do: validation("command argument #{i} holds a NUL byte or is not valid UTF-8")
+    end)
   end
 
   # A name in Vast's `env` object that starts with `-` is a Docker flag
