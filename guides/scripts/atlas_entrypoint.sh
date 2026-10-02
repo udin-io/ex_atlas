@@ -3,22 +3,34 @@
 #
 #   atlas_entrypoint.sh TRAINER [ARGS...]
 #
-# 1. Pulls ATLAS_DATASET_URI into ATLAS_DATASET_DIR (default /data).
+# 1. Pulls ATLAS_DATASET_URI into ATLAS_DATASET_DIR (default /data), or
+#    downloads the tar archive at the presigned ATLAS_DATASET_URL and unpacks
+#    it there. The URI wins when both are set.
 # 2. Runs the trainer, copying stdout and stderr to ATLAS_LOG_FILE
 #    (default /tmp/atlas.log).
 # 3. On exit, INT or TERM, syncs ATLAS_ARTIFACT_DIR (default /artifacts) and
-#    the log to ATLAS_ARTIFACT_URI.
+#    the log to ATLAS_ARTIFACT_URI, or packs them into one .tar.gz and PUTs it
+#    to the presigned ATLAS_ARTIFACT_URL. The URI wins when both are set.
 #
 # The exit code is the trainer's. A failed upload is printed and changes
 # nothing. The script never deletes the pod: the wrapper that ExAtlas puts
 # around the command does that after this script exits.
 #
-# Credentials come from the environment (AWS_ACCESS_KEY_ID and friends). The
-# script never prints them and never runs with `set -x`.
+# Credentials come from the environment (AWS_ACCESS_KEY_ID and friends, or the
+# presigned URLs, which grant access to whoever holds them). The script never
+# prints them and never runs with `set -x`.
 
 DATASET_DIR=${ATLAS_DATASET_DIR:-/data}
 ARTIFACT_DIR=${ATLAS_ARTIFACT_DIR:-/artifacts}
 LOG=${ATLAS_LOG_FILE:-/tmp/atlas.log}
+
+# The presigned URLs move to unexported variables, so the trainer's
+# environment holds neither and a trainer or library that dumps its environment
+# prints neither. A process running as the same user can still read this
+# script's /proc/<pid>/environ.
+dataset_url=${ATLAS_DATASET_URL:-}
+artifact_url=${ATLAS_ARTIFACT_URL:-}
+unset ATLAS_DATASET_URL ATLAS_ARTIFACT_URL
 
 say() { printf 'atlas_entrypoint: %s\n' "$*" >&2; }
 
@@ -26,6 +38,16 @@ if [ "$#" -eq 0 ]; then
   say "usage: atlas_entrypoint.sh TRAINER [ARGS...]"
   exit 2
 fi
+
+# -q first: ignore a .curlrc in the image, which could turn on --verbose and
+# print the request line. -g: `{ }` and `[ ]` in a URL are not a glob; a glob
+# error prints the whole URL. -f: no response body on an HTTP error; S3's error
+# body for a bad signature echoes the signature. The speed limit ends a
+# stalled transfer, which would otherwise hold the pod, and its bill, until
+# max_runtime_ms.
+fetch() {
+  curl -q -g -f -sS --connect-timeout 30 --speed-limit 1024 --speed-time 120 "$@"
+}
 
 # `--endpoint-url` as well as AWS_ENDPOINT_URL_S3: aws-cli releases without
 # service-specific endpoint variables ignore the variable.
@@ -43,11 +65,30 @@ trainer_pid=
 : > "$LOG"
 
 upload() {
-  [ -n "${ATLAS_ARTIFACT_URI:-}" ] || return 0
-  uri=${ATLAS_ARTIFACT_URI%/}
+  if [ -n "${ATLAS_ARTIFACT_URI:-}" ]; then
+    [ -n "$artifact_url" ] && say "ATLAS_ARTIFACT_URL ignored: ATLAS_ARTIFACT_URI is set"
+    uri=${ATLAS_ARTIFACT_URI%/}
 
-  s3 sync "$ARTIFACT_DIR" "$uri/" || say "artifact upload failed (aws exit $?)"
-  s3 cp "$LOG" "$uri/atlas.log" || say "artifact upload failed: atlas.log (aws exit $?)"
+    s3 sync "$ARTIFACT_DIR" "$uri/" || say "artifact upload failed (aws exit $?)"
+    s3 cp "$LOG" "$uri/atlas.log" || say "artifact upload failed: atlas.log (aws exit $?)"
+  elif [ -n "$artifact_url" ]; then
+    put_archive
+  fi
+}
+
+# One presigned URL writes one object, so the log goes inside the archive. A
+# single PUT holds at most 5 GB.
+put_archive() {
+  archive="$work/artifacts.tar.gz"
+  cp "$LOG" "$ARTIFACT_DIR/atlas.log" || say "could not add atlas.log to the artifacts"
+  # tar exits non-zero on one unreadable file and still packs the rest: send
+  # what it packed.
+  tar -czf "$archive" -C "$ARTIFACT_DIR" . || say "tar exit $? while packing the artifacts"
+  if [ ! -s "$archive" ]; then
+    say "artifact upload failed: no archive to send"
+    return 0
+  fi
+  fetch -T "$archive" "$artifact_url" || say "artifact upload failed (curl exit $?)"
 }
 
 finish() {
@@ -71,14 +112,40 @@ on_signal() {
 trap finish EXIT
 trap on_signal INT TERM
 
+download() {
+  archive="$DATASET_DIR/.atlas_dataset_download"
+  tool=curl
+  fetch -o "$archive" "$dataset_url" || { rc=$?; rm -f "$archive"; return "$rc"; }
+  # A file, not a pipe: tar detects gzip, bzip2 or xz only in a file it can
+  # read twice, and a pipe would hide curl's exit code.
+  tool=tar
+  tar -xf "$archive" -C "$DATASET_DIR"
+  rc=$?
+  rm -f "$archive"
+  return "$rc"
+}
+
+pull=
 if [ -n "${ATLAS_DATASET_URI:-}" ]; then
+  [ -n "$dataset_url" ] && say "ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set"
+  pull=aws
+elif [ -n "$dataset_url" ]; then
+  pull=curl
+fi
+
+if [ -n "$pull" ]; then
   mkdir -p "$DATASET_DIR"
-  s3 sync "$ATLAS_DATASET_URI" "$DATASET_DIR" > "$work/pull" 2>&1
+  if [ "$pull" = aws ]; then
+    tool=aws
+    s3 sync "$ATLAS_DATASET_URI" "$DATASET_DIR" > "$work/pull" 2>&1
+  else
+    download > "$work/pull" 2>&1
+  fi
   rc=$?
   cat "$work/pull"
   cat "$work/pull" >> "$LOG"
   if [ "$rc" -ne 0 ]; then
-    say "dataset pull failed (aws exit $rc); the trainer did not run"
+    say "dataset pull failed ($tool exit $rc); the trainer did not run"
     exit "$rc"
   fi
 fi

@@ -7,6 +7,21 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: presigned-URL mode for `s3:` (#73, slice 3 of #26)
+
+`s3:` takes `dataset_url` and `artifact_url`, two URLs you presign on your
+side. They become `ATLAS_DATASET_URL` and `ATLAS_ARTIFACT_URL`, and the pod
+gets no storage key. Each must be `http://` or `https://` with a host and no
+user info. `Spec.Staging` holds them as `ExAtlas.Secret`s, so `inspect/1`,
+validation errors and crash reports never print them. `s3:` now needs one of
+`dataset_uri`, `artifact_uri`, `dataset_url` or `artifact_url`; the error for
+none says so. A URL also needs a path to an object and only RFC 3986
+characters after the host, with no braces or brackets. The reference
+entrypoint downloads and unpacks the dataset archive with `curl` and `tar`,
+and on exit PUTs one `.tar.gz` of the artifact directory and the log. It
+removes both URLs from the trainer's environment, and calls curl with `-q -g
+-f` and a stall limit. A URI beats a URL for the same side.
+
 ### Changed: credentials travel as `ExAtlas.Secret` (#76)
 
 A tracker or provider crash printed the per-call `api_key:` in its

@@ -205,6 +205,28 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert inspect(compute) =~ ~s(id: "p1")
       refute inspect(compute) =~ "tsec-test-9f2c"
     end
+
+    test "inspect of the compute omits presigned URLs RunPod echoes back", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        json(conn, 201, Map.put(pod("p1", "RUNNING", "t"), "env", body["env"]))
+      end)
+
+      put_url = "https://bucket.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
+
+      {:ok, compute} =
+        ExAtlas.spawn_compute([gpu: :h100, image: "x", s3: %{artifact_url: put_url}] ++ opts)
+
+      # Control: the response did echo the URL.
+      assert compute.raw["env"]["ATLAS_ARTIFACT_URL"] == put_url
+      text = inspect(compute, limit: :infinity, printable_limit: :infinity)
+      assert text =~ ~s(id: "p1")
+      refute text =~ "putsig-a7e3b2"
+    end
   end
 
   describe "get_compute/2" do

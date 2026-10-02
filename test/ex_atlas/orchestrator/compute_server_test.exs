@@ -161,7 +161,8 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
             access_key_id: "tid-test-4b1e",
             secret_access_key: "tsec-test-9f2c",
             session_token: "tses-test-0d7a",
-            dataset_uri: "s3://bucket/datasets/abc/"
+            dataset_uri: "s3://bucket/datasets/abc/",
+            artifact_url: "https://bucket.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
           }
         )
 
@@ -171,6 +172,7 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute text =~ "tid-test-4b1e"
       refute text =~ "tsec-test-9f2c"
       refute text =~ "tses-test-0d7a"
+      refute text =~ "putsig-a7e3b2"
     end
   end
 
@@ -179,11 +181,19 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       access_key_id: "tid-test-4b1e",
       secret_access_key: "tsec-test-9f2c",
       session_token: "tses-test-0d7a",
-      dataset_uri: "s3://bucket/datasets/abc/"
+      dataset_uri: "s3://bucket/datasets/abc/",
+      dataset_url: "https://bucket.s3.amazonaws.com/d.tar.gz?X-Amz-Signature=getsig-5d0c91",
+      artifact_url: "https://bucket.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
     }
 
     defp refute_s3_secrets(text) do
-      for secret <- ["tid-test-4b1e", "tsec-test-9f2c", "tses-test-0d7a"],
+      for secret <- [
+            "tid-test-4b1e",
+            "tsec-test-9f2c",
+            "tses-test-0d7a",
+            "getsig-5d0c91",
+            "putsig-a7e3b2"
+          ],
           do: refute(text =~ secret)
     end
 

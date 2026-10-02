@@ -1,8 +1,8 @@
 defmodule ExAtlas.Guides.AtlasEntrypointTest do
   # Runs the reference entrypoint (guides/scripts/atlas_entrypoint.sh) with
-  # `sh`, a stub `aws` first on PATH, and a trainer that is a few lines of
-  # shell. The stub records its arguments, the way translate_test.exs shims
-  # `curl`.
+  # `sh`, a stub `aws` and a stub `curl` first on PATH, and a trainer that is a
+  # few lines of shell. The stubs record their arguments, the way
+  # translate_test.exs shims `curl`.
   use ExUnit.Case, async: true
 
   @script Path.expand("../../guides/scripts/atlas_entrypoint.sh", __DIR__)
@@ -32,6 +32,57 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
   exit 0
   """
 
+  # Serves $STUB_SERVE for a download and keeps the file of an upload. It acts
+  # as real curl does where a URL could print:
+  # - without -q first, a `verbose` line in $CURL_HOME/.curlrc prints the
+  #   request line;
+  # - without -g, `{` or `[` in the URL is a glob error that prints the URL;
+  # - on an HTTP error, -f prints one line with no URL; without -f the S3
+  #   error body, which echoes the signature, is the output.
+  @curl_stub """
+  #!/bin/sh
+  echo "$*" >> "$STUB_DIR/curl.log"
+  first=$1
+  out=
+  upload=
+  url=
+  fail=
+  glob=on
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o) out=$2; shift 2; continue ;;
+      -T) upload=$2; shift 2; continue ;;
+      -g|--globoff) glob=off ;;
+      --connect-timeout|--speed-limit|--speed-time) shift ;;
+      http://*|https://*) url=$1 ;;
+      -*f*) case "$1" in --*) ;; *) fail=yes ;; esac ;;
+    esac
+    shift
+  done
+  if [ "$first" != "-q" ] && grep -q verbose "${CURL_HOME:-/nonexistent}/.curlrc" 2>/dev/null; then
+    echo "> ${upload:+PUT}${upload:-GET} $url" >&2
+  fi
+  case "$url" in
+    *[{[]*) [ "$glob" = on ] && { printf 'curl: (3) bad range in URL position 9:\n%s\n' "$url" >&2; exit 3; } ;;
+  esac
+  refused() {
+    if [ -n "$fail" ]; then
+      echo "curl: (22) The requested URL returned error: 403" >&2
+      exit 22
+    fi
+    body="<Error><Code>SignatureDoesNotMatch</Code><SignatureProvided>$url</SignatureProvided></Error>"
+    if [ -n "$out" ]; then echo "$body" > "$out"; else echo "$body"; fi
+    exit 0
+  }
+  if [ -n "$upload" ]; then
+    [ -n "$STUB_FAIL_PUT" ] && refused
+    cp "$upload" "$STUB_DIR/uploaded.tar.gz"
+    exit 0
+  fi
+  [ -n "$STUB_FAIL_GET" ] && refused
+  if [ -n "$out" ]; then cp "$STUB_SERVE" "$out"; else cat "$STUB_SERVE"; fi
+  """
+
   setup do
     dir = Path.join(System.tmp_dir!(), "atlas_ep_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -40,6 +91,10 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
     stub = Path.join(dir, "aws")
     File.write!(stub, @stub)
     File.chmod!(stub, 0o755)
+
+    curl = Path.join(dir, "curl")
+    File.write!(curl, @curl_stub)
+    File.chmod!(curl, 0o755)
 
     {:ok, dir: dir}
   end
@@ -64,8 +119,26 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       aws: read(Path.join(dir, "aws.log")),
       trainer: read(Path.join(dir, "trainer.log")),
       uploaded_log: read(Path.join(dir, "uploaded.log")),
-      local_log: read(Path.join(dir, "atlas.log"))
+      local_log: read(Path.join(dir, "atlas.log")),
+      curl: read(Path.join(dir, "curl.log")),
+      archive: unpack(dir, Path.join(dir, "uploaded.tar.gz"))
     }
+  end
+
+  # The files of the archive the stub curl received, by path, or nil.
+  defp unpack(dir, archive) do
+    if File.exists?(archive) do
+      out = Path.join(dir, "unpacked")
+      File.rm_rf!(out)
+      File.mkdir_p!(out)
+      {_, 0} = System.cmd("tar", ["-xzf", archive, "-C", out])
+
+      out
+      |> Path.join("**")
+      |> Path.wildcard(match_dot: true)
+      |> Enum.reject(&File.dir?/1)
+      |> Map.new(&{Path.relative_to(&1, out), File.read!(&1)})
+    end
   end
 
   defp read(path), do: if(File.exists?(path), do: File.read!(path), else: "")
@@ -206,6 +279,289 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       calls = String.split(r.aws, "\n", trim: true)
       assert length(calls) == 3
       refute r.aws =~ "--endpoint-url"
+    end
+  end
+
+  @get_sig "getsig-5d0c91"
+  @put_sig "putsig-a7e3b2"
+  @get_url "https://bkt.s3.amazonaws.com/d.tar.gz?X-Amz-Signature=#{@get_sig}"
+  @put_url "https://bkt.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=#{@put_sig}"
+
+  # A dataset archive in `dir`, built by the system tar; `gzip: false` leaves
+  # it uncompressed.
+  defp dataset_archive(dir, opts \\ []) do
+    src = Path.join(dir, "src")
+    File.mkdir_p!(Path.join(src, "shards"))
+    File.write!(Path.join(src, "train.txt"), "DATASET-ROW-1")
+    File.write!(Path.join([src, "shards", "s0.txt"]), "SHARD-0")
+    archive = Path.join(dir, "dataset.tar")
+    flags = if Keyword.get(opts, :gzip, true), do: "-czf", else: "-cf"
+    {_, 0} = System.cmd("tar", [flags, archive, "-C", src, "."])
+    archive
+  end
+
+  defp reads_dataset,
+    do: [
+      "sh",
+      "-c",
+      "cat \"$ATLAS_DATASET_DIR/train.txt\" \"$ATLAS_DATASET_DIR/shards/s0.txt\" >> \"$ATLAS_TEST_LOG\""
+    ]
+
+  defp upload_calls(r),
+    do: r.curl |> String.split("\n", trim: true) |> Enum.filter(&(&1 =~ ~r/(^| )-T /))
+
+  describe "ATLAS_DATASET_URL" do
+    test "downloads the archive and the trainer sees its files", %{dir: dir} do
+      r =
+        run(dir, reads_dataset(), [
+          {"ATLAS_DATASET_URL", @get_url},
+          {"STUB_SERVE", dataset_archive(dir)}
+        ])
+
+      assert r.status == 0
+      assert r.trainer == "DATASET-ROW-1SHARD-0"
+      assert r.curl =~ @get_url
+      assert r.aws == ""
+    end
+
+    test "an uncompressed tar works too", %{dir: dir} do
+      r =
+        run(dir, reads_dataset(), [
+          {"ATLAS_DATASET_URL", @get_url},
+          {"STUB_SERVE", dataset_archive(dir, gzip: false)}
+        ])
+
+      assert r.status == 0
+      assert r.trainer == "DATASET-ROW-1SHARD-0"
+    end
+
+    test "leaves no download file beside the dataset", %{dir: dir} do
+      run(dir, reads_dataset(), [
+        {"ATLAS_DATASET_URL", @get_url},
+        {"STUB_SERVE", dataset_archive(dir)}
+      ])
+
+      assert dir |> Path.join("data") |> File.ls!() |> Enum.sort() == ["shards", "train.txt"]
+    end
+
+    test "a failed download exits non-zero, runs no trainer and uploads the log", %{dir: dir} do
+      r =
+        run(dir, marker_trainer(), [
+          {"ATLAS_DATASET_URL", @get_url},
+          {"ATLAS_ARTIFACT_URL", @put_url},
+          {"STUB_FAIL_GET", "1"}
+        ])
+
+      assert r.status == 22
+      refute r.trainer =~ "TRAINER-RAN"
+      assert r.output =~ "dataset pull failed (curl exit 22)"
+      assert r.archive["atlas.log"] =~ "returned error: 403"
+    end
+
+    test "a download that is not a tar archive exits non-zero and runs no trainer", %{dir: dir} do
+      junk = Path.join(dir, "junk")
+      File.write!(junk, "<Error><Code>AccessDenied</Code></Error>")
+
+      r = run(dir, marker_trainer(), [{"ATLAS_DATASET_URL", @get_url}, {"STUB_SERVE", junk}])
+
+      assert r.status != 0
+      refute r.trainer =~ "TRAINER-RAN"
+      assert r.output =~ "dataset pull failed (tar exit"
+    end
+
+    test "with ATLAS_DATASET_URI set too, only aws pulls and the URL is ignored", %{dir: dir} do
+      r =
+        run(dir, marker_trainer(), [
+          {"ATLAS_DATASET_URI", "s3://bkt/datasets/abc/"},
+          {"ATLAS_DATASET_URL", @get_url},
+          {"STUB_SERVE", dataset_archive(dir)}
+        ])
+
+      assert r.status == 0
+      assert r.aws =~ "s3 sync s3://bkt/datasets/abc/"
+      assert r.curl == ""
+      assert r.output =~ "ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set"
+      refute r.output =~ @get_sig
+    end
+  end
+
+  describe "ATLAS_ARTIFACT_URL" do
+    defp writes_artifact(code),
+      do: [
+        "sh",
+        "-c",
+        "mkdir -p \"$ATLAS_ARTIFACT_DIR/ckpt\"; echo WEIGHTS > \"$ATLAS_ARTIFACT_DIR/ckpt/model.bin\"; " <>
+          "echo TRAINER-SAYS-BYE; exit #{code}"
+      ]
+
+    test "one PUT carries the artifacts and atlas.log, and the trainer's code stands", %{dir: dir} do
+      r = run(dir, writes_artifact(2), [{"ATLAS_ARTIFACT_URL", @put_url}])
+
+      assert r.status == 2
+      assert [put] = upload_calls(r)
+      assert put =~ @put_url
+      assert r.archive["ckpt/model.bin"] == "WEIGHTS\n"
+      assert r.archive["atlas.log"] =~ "TRAINER-SAYS-BYE"
+      assert r.aws == ""
+    end
+
+    test "a failed PUT is printed and the trainer's code stands", %{dir: dir} do
+      ok =
+        run(dir, writes_artifact(0), [{"ATLAS_ARTIFACT_URL", @put_url}, {"STUB_FAIL_PUT", "1"}])
+
+      assert ok.status == 0
+      assert ok.output =~ "artifact upload failed (curl exit 22)"
+
+      bad =
+        run(dir, writes_artifact(7), [{"ATLAS_ARTIFACT_URL", @put_url}, {"STUB_FAIL_PUT", "1"}])
+
+      assert bad.status == 7
+    end
+
+    test "a SIGTERM reaches the trainer and the archive still uploads", %{dir: dir} do
+      r =
+        run(dir, ["sh", "-c", "kill -TERM $PPID; exec sleep 30"], [
+          {"ATLAS_ARTIFACT_URL", @put_url}
+        ])
+
+      assert r.status == 143
+      assert [_put] = upload_calls(r)
+      assert Map.has_key?(r.archive, "atlas.log")
+    end
+
+    test "an unreadable file is reported and the rest still uploads", %{dir: dir} do
+      trainer = [
+        "sh",
+        "-c",
+        "echo WEIGHTS > \"$ATLAS_ARTIFACT_DIR/model.bin\"; echo X > \"$ATLAS_ARTIFACT_DIR/locked\"; " <>
+          "chmod 000 \"$ATLAS_ARTIFACT_DIR/locked\""
+      ]
+
+      r = run(dir, trainer, [{"ATLAS_ARTIFACT_URL", @put_url}])
+
+      assert r.status == 0
+      assert r.output =~ "while packing the artifacts"
+      assert [_put] = upload_calls(r)
+      # bsdtar stops at the unreadable file and GNU tar skips it, so only the
+      # file packed before it is certain.
+      assert r.archive["model.bin"] == "WEIGHTS\n"
+    end
+
+    test "with ATLAS_ARTIFACT_URI set too, only aws uploads and the URL is ignored", %{dir: dir} do
+      r =
+        run(dir, writes_artifact(0), [
+          {"ATLAS_ARTIFACT_URI", "s3://bkt/artifacts/run-1/"},
+          {"ATLAS_ARTIFACT_URL", @put_url}
+        ])
+
+      assert r.status == 0
+      assert r.aws =~ "s3 sync #{dir}/artifacts s3://bkt/artifacts/run-1/"
+      assert r.aws =~ "atlas.log"
+      assert upload_calls(r) == []
+      assert r.curl == ""
+      assert r.output =~ "ATLAS_ARTIFACT_URL ignored: ATLAS_ARTIFACT_URI is set"
+    end
+
+    test "a URI on one side and a URL on the other both run", %{dir: dir} do
+      r =
+        run(dir, marker_trainer(), [
+          {"ATLAS_DATASET_URI", "s3://bkt/datasets/abc/"},
+          {"ATLAS_ARTIFACT_URL", @put_url}
+        ])
+
+      assert r.status == 0
+      assert r.aws =~ "s3 sync s3://bkt/datasets/abc/"
+      assert [_put] = upload_calls(r)
+    end
+  end
+
+  describe "presigned URLs stay out of what the script prints" do
+    defp assert_no_signature(r) do
+      for sig <- [@get_sig, @put_sig],
+          {where, text} <- [
+            output: r.output,
+            local_log: r.local_log,
+            uploaded_log: (r.archive || %{})["atlas.log"] || ""
+          ] do
+        refute text =~ sig, "#{where} leaked #{sig}"
+      end
+    end
+
+    defp both_urls(dir),
+      do: [
+        {"ATLAS_DATASET_URL", @get_url},
+        {"ATLAS_ARTIFACT_URL", @put_url},
+        {"STUB_SERVE", dataset_archive(dir)}
+      ]
+
+    test "control: a trainer that prints a signature shows up in every place we search", %{
+      dir: dir
+    } do
+      r = run(dir, ["sh", "-c", "echo #{@put_sig}"], both_urls(dir))
+
+      assert r.output =~ @put_sig
+      assert r.local_log =~ @put_sig
+      assert r.archive["atlas.log"] =~ @put_sig
+    end
+
+    test "the trainer's environment holds neither URL", %{dir: dir} do
+      r = run(dir, ["sh", "-c", "env; echo ENV-DUMPED"], both_urls(dir))
+
+      assert r.status == 0
+      # Control: the dump ran and reached every place we search.
+      assert r.archive["atlas.log"] =~ "ENV-DUMPED"
+      assert r.output =~ "STUB_DIR="
+      assert_no_signature(r)
+    end
+
+    test "a URL curl would read as a glob", %{dir: dir} do
+      env = [
+        {"ATLAS_DATASET_URL", @get_url <> "[1-2]"},
+        {"ATLAS_ARTIFACT_URL", @put_url <> "{"},
+        {"STUB_SERVE", dataset_archive(dir)}
+      ]
+
+      r = run(dir, reads_dataset(), env)
+      assert r.status == 0
+      assert [_put] = upload_calls(r)
+      assert_no_signature(r)
+    end
+
+    test "a .curlrc that turns on verbose output", %{dir: dir} do
+      home = Path.join(dir, "curlhome")
+      File.mkdir_p!(home)
+      File.write!(Path.join(home, ".curlrc"), "verbose\n")
+
+      r = run(dir, marker_trainer(), both_urls(dir) ++ [{"CURL_HOME", home}])
+      assert r.status == 0
+      assert_no_signature(r)
+    end
+
+    test "on success", %{dir: dir} do
+      r = run(dir, marker_trainer(), both_urls(dir))
+      assert r.status == 0
+      assert [_put] = upload_calls(r)
+      assert_no_signature(r)
+    end
+
+    test "when the download fails", %{dir: dir} do
+      r = run(dir, marker_trainer(), both_urls(dir) ++ [{"STUB_FAIL_GET", "1"}])
+      assert r.status != 0
+      assert r.archive["atlas.log"] =~ "returned error: 403"
+      assert_no_signature(r)
+    end
+
+    test "when the upload fails", %{dir: dir} do
+      r = run(dir, marker_trainer(4), both_urls(dir) ++ [{"STUB_FAIL_PUT", "1"}])
+      assert r.status == 4
+      assert r.output =~ "artifact upload failed"
+      assert_no_signature(r)
+    end
+
+    test "when a URI overrides each URL", %{dir: dir} do
+      r = run(dir, marker_trainer(), both_urls(dir) ++ uris())
+      assert r.output =~ "ignored"
+      assert_no_signature(r)
     end
   end
 

@@ -138,7 +138,8 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
           {"an s3 URI with no bucket", %{dataset_uri: "s3:///d/"},
            ":dataset_uri must start with s3://"},
           {"an unknown key", %{dataset_uri: "s3://b/d", bucket: "b"}, "unknown key :bucket"},
-          {"neither URI", %{region: "auto"}, "needs :dataset_uri or :artifact_uri"}
+          {"no URI and no URL", %{region: "auto"},
+           "needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url"}
         ] do
       @s3_input s3
       @expected expected
@@ -194,6 +195,67 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
         )
 
       assert req.env == %{"WANDB_PROJECT" => "x", "AWS_SESSION_TOKEN" => "env-token"}
+    end
+  end
+
+  describe "s3: presigned URLs" do
+    @get_sig "getsig-5d0c91"
+    @put_sig "putsig-a7e3b2"
+    @get_url "https://bucket.s3.amazonaws.com/d.tar.gz?X-Amz-Signature=#{@get_sig}"
+    @put_url "https://bucket.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=#{@put_sig}"
+
+    defp refute_signatures(text) do
+      refute text =~ @get_sig
+      refute text =~ @put_sig
+    end
+
+    test "inspect of the request shows neither URL's signature" do
+      req = ComputeRequest.new!(gpu: :h100, s3: %{dataset_url: @get_url, artifact_url: @put_url})
+
+      # Control: the URLs did reach the request.
+      assert ComputeRequest.container_env(req)["ATLAS_DATASET_URL"] == @get_url
+      text = inspect(req, limit: :infinity, printable_limit: :infinity)
+      assert text =~ "Staging"
+      refute_signatures(text)
+    end
+
+    for {name, url} <- [
+          {"an ftp URL", "ftp://x/d?sig=getsig-5d0c91"},
+          {"a URL with no host", "https://"}
+        ] do
+      @url url
+      test "#{name} is refused on :s3 with no URL in the error" do
+        assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
+                 ComputeRequest.new(gpu: :h100, s3: %{dataset_url: @url, artifact_url: @put_url})
+
+        assert Exception.message(error) =~ ":dataset_url must be an http:// or https:// URL"
+        refute_signatures(inspect(error))
+      end
+    end
+
+    test "an artifact URL alone is valid" do
+      assert {:ok, %ComputeRequest{s3: %Staging{}} = req} =
+               ComputeRequest.new(gpu: :h100, s3: %{artifact_url: @put_url})
+
+      assert ComputeRequest.container_env(req) == %{"ATLAS_ARTIFACT_URL" => @put_url}
+    end
+
+    test "an empty s3: is still refused" do
+      assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil}} =
+               ComputeRequest.new(gpu: :h100, s3: %{})
+    end
+
+    test "an env: ATLAS_DATASET_URL beside s3: dataset_url is refused, naming it and no value" do
+      assert {:error, %NimbleOptions.ValidationError{key: :s3} = error} =
+               ComputeRequest.new(
+                 gpu: :h100,
+                 env: %{"ATLAS_DATASET_URL" => "https://x/?sig=envsig-31f0"},
+                 s3: %{dataset_url: @get_url}
+               )
+
+      assert Exception.message(error) =~ "ATLAS_DATASET_URL"
+      refute inspect(error) =~ "envsig-31f0"
+      refute_signatures(inspect(error))
     end
   end
 

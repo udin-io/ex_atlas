@@ -12,6 +12,10 @@ defmodule ExAtlas.Spec.Staging do
         artifact_uri: "s3://bucket/artifacts/run-123/"
       }
 
+  Or, with no storage key on the pod, two URLs you presign on your side:
+
+      s3: %{dataset_url: presigned_get, artifact_url: presigned_put}
+
   | Key | Variable(s) in the container |
   |---|---|
   | `:endpoint` | `AWS_ENDPOINT_URL_S3` |
@@ -21,14 +25,21 @@ defmodule ExAtlas.Spec.Staging do
   | `:session_token` | `AWS_SESSION_TOKEN` |
   | `:dataset_uri` | `ATLAS_DATASET_URI` |
   | `:artifact_uri` | `ATLAS_ARTIFACT_URI` |
+  | `:dataset_url` | `ATLAS_DATASET_URL` |
+  | `:artifact_url` | `ATLAS_ARTIFACT_URL` |
+
+  `s3:` needs at least one of the two URIs and the two URLs. ExAtlas never
+  presigns and never reads a URL's expiry; see the data staging guide.
 
   A key left out sets no variable; no `:endpoint` means AWS S3 itself. Only the
   S3 endpoint variable is set, not the global `AWS_ENDPOINT_URL`, which would
   also redirect every other AWS service the container calls.
 
-  `inspect/1` prints the endpoint, region and URIs, never a credential. The
-  three credential fields hold an `ExAtlas.Secret`, so a printer that skips
-  `Inspect` prints none of them either. Validation errors name the key and the
+  `inspect/1` prints the endpoint, region and URIs, never a credential or a
+  presigned URL: a presigned URL grants access to whoever holds it until it
+  expires. The three credential fields and the two URL fields hold an
+  `ExAtlas.Secret`, so a printer that skips `Inspect` prints none of them
+  either. Validation errors name the key and the
   rule, never a value.
   """
 
@@ -41,7 +52,9 @@ defmodule ExAtlas.Spec.Staging do
             secret_access_key: nil,
             session_token: nil,
             dataset_uri: nil,
-            artifact_uri: nil
+            artifact_uri: nil,
+            dataset_url: nil,
+            artifact_url: nil
 
   @type t :: %__MODULE__{
           endpoint: String.t() | nil,
@@ -50,7 +63,9 @@ defmodule ExAtlas.Spec.Staging do
           secret_access_key: Secret.t() | nil,
           session_token: Secret.t() | nil,
           dataset_uri: String.t() | nil,
-          artifact_uri: String.t() | nil
+          artifact_uri: String.t() | nil,
+          dataset_url: Secret.t() | nil,
+          artifact_url: Secret.t() | nil
         }
 
   @keys [
@@ -60,7 +75,9 @@ defmodule ExAtlas.Spec.Staging do
     :secret_access_key,
     :session_token,
     :dataset_uri,
-    :artifact_uri
+    :artifact_uri,
+    :dataset_url,
+    :artifact_url
   ]
 
   @variables [
@@ -70,7 +87,9 @@ defmodule ExAtlas.Spec.Staging do
     secret_access_key: ["AWS_SECRET_ACCESS_KEY"],
     session_token: ["AWS_SESSION_TOKEN"],
     dataset_uri: ["ATLAS_DATASET_URI"],
-    artifact_uri: ["ATLAS_ARTIFACT_URI"]
+    artifact_uri: ["ATLAS_ARTIFACT_URI"],
+    dataset_url: ["ATLAS_DATASET_URL"],
+    artifact_url: ["ATLAS_ARTIFACT_URL"]
   ]
 
   @doc """
@@ -90,11 +109,13 @@ defmodule ExAtlas.Spec.Staging do
     with {:ok, fields} <- fields(input),
          :ok <- check_values(fields),
          staging = struct!(__MODULE__, fields),
-         :ok <- check_endpoint(staging.endpoint),
+         :ok <- check_http_url(:endpoint, staging.endpoint),
          :ok <- check_uri(:dataset_uri, staging.dataset_uri),
          :ok <- check_uri(:artifact_uri, staging.artifact_uri),
+         :ok <- check_presigned(:dataset_url, staging.dataset_url),
+         :ok <- check_presigned(:artifact_url, staging.artifact_url),
          :ok <- check_credentials(staging),
-         :ok <- check_has_uri(staging) do
+         :ok <- check_has_location(staging) do
       {:ok, seal(staging)}
     end
   end
@@ -125,10 +146,11 @@ defmodule ExAtlas.Spec.Staging do
             "or ComputeRequest.new/1"
   end
 
-  @credentials [:access_key_id, :secret_access_key, :session_token]
+  # A presigned URL is a bearer credential until it expires.
+  @sealed [:access_key_id, :secret_access_key, :session_token, :dataset_url, :artifact_url]
 
   defp seal(staging) do
-    Enum.reduce(@credentials, staging, fn key, acc -> Map.update!(acc, key, &Secret.wrap/1) end)
+    Enum.reduce(@sealed, staging, fn key, acc -> Map.update!(acc, key, &Secret.wrap/1) end)
   end
 
   # --- validation ---
@@ -186,25 +208,54 @@ defmodule ExAtlas.Spec.Staging do
 
   defp non_empty?(value), do: is_binary(value) and value != ""
 
-  defp check_endpoint(nil), do: :ok
+  # The endpoint and the presigned URLs: plain http is allowed, for a local
+  # MinIO.
+  defp check_http_url(_key, nil), do: :ok
 
-  defp check_endpoint(endpoint) do
-    case URI.parse(endpoint) do
+  defp check_http_url(key, url) do
+    case URI.parse(url) do
       %URI{userinfo: userinfo} when userinfo != nil ->
-        error(
-          ":endpoint must not carry user info; pass the keys as :access_key_id and :secret_access_key"
-        )
+        error(userinfo_message(key))
 
       %URI{scheme: scheme, host: host, port: port}
       when scheme in ["http", "https"] and is_binary(host) and port in 1..65_535 ->
-        if host =~ ~r/\A[A-Za-z0-9.\-\[\]:]+\z/, do: :ok, else: endpoint_error()
+        if host =~ ~r/\A[A-Za-z0-9.\-\[\]:]+\z/, do: :ok, else: http_url_error(key)
 
       _other ->
-        endpoint_error()
+        http_url_error(key)
     end
   end
 
-  defp endpoint_error, do: error(":endpoint must be an http:// or https:// URL")
+  defp userinfo_message(:endpoint),
+    do:
+      ":endpoint must not carry user info; pass the keys as :access_key_id and :secret_access_key"
+
+  defp userinfo_message(key), do: "#{inspect(key)} must not carry user info"
+
+  defp http_url_error(key), do: error("#{inspect(key)} must be an http:// or https:// URL")
+
+  # After the host, only RFC 3986 characters, without `[ ]`: curl reads `{ }`
+  # and `[ ]` as a glob and prints the whole URL in its error. A URL with no
+  # object path makes `curl -T` append the file name to it.
+  defp check_presigned(_key, nil), do: :ok
+
+  defp check_presigned(key, url) do
+    with :ok <- check_http_url(key, url) do
+      %URI{path: path, query: query} = URI.parse(url)
+
+      cond do
+        not (url =~ ~r/\A[\x21-\x7E]+\z/ and
+                 "#{path}?#{query}" =~ ~r/\A[A-Za-z0-9\-._~:\/?#@!$&'()*+,;=%]*\z/) ->
+          error("#{inspect(key)} must hold only URL characters (RFC 3986, no braces or brackets)")
+
+        path in [nil, "", "/"] ->
+          error("#{inspect(key)} must name an object: a path after the host")
+
+        true ->
+          :ok
+      end
+    end
+  end
 
   defp check_uri(_key, nil), do: :ok
 
@@ -228,10 +279,15 @@ defmodule ExAtlas.Spec.Staging do
 
   defp check_credentials(_staging), do: :ok
 
-  defp check_has_uri(%__MODULE__{dataset_uri: nil, artifact_uri: nil}),
-    do: error("needs :dataset_uri or :artifact_uri")
+  defp check_has_location(%__MODULE__{
+         dataset_uri: nil,
+         artifact_uri: nil,
+         dataset_url: nil,
+         artifact_url: nil
+       }),
+       do: error("needs :dataset_uri, :artifact_uri, :dataset_url or :artifact_url")
 
-  defp check_has_uri(_staging), do: :ok
+  defp check_has_location(_staging), do: :ok
 
   defp error(detail) do
     {:error,

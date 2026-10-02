@@ -1097,5 +1097,14 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert env["AWS_SECRET_ACCESS_KEY"] == "tsec-test-9f2c"
       assert env["ATLAS_ARTIFACT_URI"] == "s3://bucket/artifacts/run-123/"
     end
+
+    test "two presigned URLs POST ATLAS_DATASET_URL and ATLAS_ARTIFACT_URL and no AWS_* key" do
+      get_url = "https://bucket.s3.amazonaws.com/d.tar.gz?X-Amz-Signature=getsig-5d0c91"
+      put_url = "https://bucket.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
+
+      env = pod_env(s3: %{dataset_url: get_url, artifact_url: put_url})
+
+      assert env == %{"ATLAS_DATASET_URL" => get_url, "ATLAS_ARTIFACT_URL" => put_url}
+    end
   end
 end

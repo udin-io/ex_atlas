@@ -368,7 +368,13 @@ artifacts. ExAtlas makes no S3 call itself.
 | `region` | `AWS_REGION`, `AWS_DEFAULT_REGION` |
 | `access_key_id`, `secret_access_key` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (both or neither) |
 | `session_token` | `AWS_SESSION_TOKEN` (needs both keys) |
-| `dataset_uri`, `artifact_uri` | `ATLAS_DATASET_URI`, `ATLAS_ARTIFACT_URI` (`s3://bucket/...`; at least one) |
+| `dataset_uri`, `artifact_uri` | `ATLAS_DATASET_URI`, `ATLAS_ARTIFACT_URI` (`s3://bucket/...`) |
+| `dataset_url`, `artifact_url` | `ATLAS_DATASET_URL`, `ATLAS_ARTIFACT_URL` (presigned `http://` or `https://` URLs) |
+
+`s3:` needs at least one URI or URL. Presigned URLs put no storage key on the
+pod: `s3: %{dataset_url: presigned_get, artifact_url: presigned_put}`. You
+presign them yourself, for example with `ExAws.S3.presigned_url/5`; ExAtlas
+never presigns.
 
 - A key left out sets no variable. No `endpoint` means AWS S3 itself.
 - An `env:` entry that `s3:` would also set raises, naming the variable.
@@ -380,8 +386,9 @@ artifacts. ExAtlas makes no S3 call itself.
   are refused.
 - `s3:` goes to the request only, never to a provider's ctx.
   `spawn_compute/2`, which takes a built request, raises on an `s3:` option.
-- The credentials never appear in `inspect/1` of an ExAtlas struct, in a
-  tracker's crash report, or in a tracking record. A respawn re-injects them.
+- The credentials and presigned URLs never appear in `inspect/1` of an
+  ExAtlas struct, in a tracker's crash report, or in a tracking record. A
+  respawn re-injects them.
 - `persist: true` with `s3:` is refused for now: a tracking record never holds
   the credentials, so an adopted task would respawn without them.
 
@@ -729,7 +736,7 @@ to know each provider's native shape.
   `ComputeRequest.container_env/1` returns the env a provider sends to the
   container.
 - `ExAtlas.Spec.Staging` — the validated `s3:` option. `inspect/1` shows the
-  endpoint, region and URIs, never a credential.
+  endpoint, region and URIs, never a credential or a presigned URL.
 - `ExAtlas.Spec.Compute` — output. Fields: `:id`, `:provider`, `:status`,
   `:public_ip`, `:ports`, `:gpu_type`, `:gpu_count`, `:cost_per_hour`,
   `:region`, `:image`, `:name`, `:auth`, `:created_at`, `:raw`.
@@ -1421,8 +1428,9 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
 - **`s3:` credentials go to a third-party GPU host.** They sit in the pod's
   environment, where anyone with access to the pod can read them. Give the
   pod keys scoped to the dataset and artifact prefixes, with a short life
-  (`session_token`). ExAtlas keeps them out of its own structs, crash reports
-  and tracking records.
+  (`session_token`), or pass two presigned URLs instead (`dataset_url`,
+  `artifact_url`), which reach one object each until they expire. ExAtlas
+  keeps both out of its own structs, crash reports and tracking records.
 - **Outbound egress.** RunPod's `*.proxy.runpod.net` is world-reachable.
   If the pod inside doesn't validate `ATLAS_PRESHARED_KEY` on every request,
   anyone with the URL can hit it.

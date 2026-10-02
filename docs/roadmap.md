@@ -1,14 +1,13 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #77 (slice 2 of
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #80 (slice 3 of
 feature #26). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
 | Item | Ticket | State |
 |---|---|---|
-| Data staging slice 3: presigned-URL mode | #73 | Open, after #72 (PR #77) |
 | Data staging slice 4: `persist: true` with `s3:` | #74 | Open, after #71 |
 | Release 0.8.0 (owner ids, cost caps, `Timer` bound) | none filed | `CHANGELOG.md` lists it as Unreleased; `mix.exs` says 0.7.0 |
 
@@ -18,6 +17,7 @@ feature #26). It feeds the choice of the next feature. Dates are merge dates.
 |---|---|---|
 | S3-compatible data staging (feature #26, milestone Data staging) | Slice 1 (#71): the `s3:` option, `Spec.Staging`, `ComputeRequest.container_env/1`; `inspect(%Compute{})` hides `raw`; `env:` errors carry no values | #75 |
 | | Slice 2 (#72): `guides/data_staging.md` and the tested `guides/scripts/atlas_entrypoint.sh` | #77 |
+| | Slice 3 (#73): presigned-URL mode, `dataset_url` and `artifact_url`, and the entrypoint's `curl` branch | #80 |
 | | Follow-up #76: credentials (`api_key:`, `req_options:` secrets, `s3:` keys, `compute.auth`) print as `#ExAtlas.Secret<redacted>` or not at all in crash reports | #78 |
 
 ## Shipped
