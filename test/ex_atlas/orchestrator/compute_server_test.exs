@@ -1,9 +1,13 @@
 defmodule ExAtlas.Orchestrator.ComputeServerTest do
   use ExUnit.Case, async: false
 
+  import Plug.Conn, only: [put_req_header: 3]
+
   alias ExAtlas.Callback
+  alias ExAtlas.Callback.Token
   alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Events}
   alias ExAtlas.Providers.Mock
+  alias ExAtlas.Spec.ComputeRequest
   alias ExAtlas.Test.FaultyProvider
 
   setup do: ExAtlas.Test.Orchestrator.start!()
@@ -1776,11 +1780,102 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
 
-      # The credential in the replacement's env is the same one: it is bound to
-      # the task, not to a compute id that no longer exists.
+      # The credential is bound to the task, not to a compute id that no
+      # longer exists, so the replacement reports under the same task id.
       assert :ok = Callback.ingest(task_id, :progress, %{"pct" => 50})
 
       assert_receive {:atlas_compute, ^new_id, {:progress, %{"pct" => 50}}}, 2_000
+    end
+
+    # The token each pod was rented with, read from the request its provider
+    # received: what the container finds in `ATLAS_CALLBACK_TOKEN`.
+    defp pod_token(%{raw: %{request: request}}),
+      do: ComputeRequest.container_env(request)["ATLAS_CALLBACK_TOKEN"]
+
+    defp post_report(path, token, body) do
+      :post
+      |> Plug.Test.conn(path, body)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> Callback.Plug.call([])
+    end
+
+    # Pod A is preempted and pod B replaces it. Returns both as the provider
+    # rented them, and subscribes to B's topic.
+    defp respawned_task(base) do
+      {pid, pod_a, task_id} = start_reporting_task(base)
+      old_id = pod_a.id
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      {:ok, pod_b} = Mock.get_compute(new_id, %{})
+
+      {pid, pod_a, pod_b, task_id}
+    end
+
+    test "a finish from the pod a respawn replaced gets 410 and ends nothing",
+         %{base: base} do
+      {pid, pod_a, pod_b, _task_id} = respawned_task(base)
+      new_id = pod_b.id
+      ref = Process.monitor(pid)
+
+      assert post_report("/finish", pod_token(pod_a), ~s({"exit_code":0})).status == 410
+
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      refute_received {:atlas_compute, _, {:task, _}}
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
+    end
+
+    test "control: the replacement's own finish is accepted and ends the task on its code",
+         %{base: base} do
+      {pid, _pod_a, pod_b, _task_id} = respawned_task(base)
+      new_id = pod_b.id
+      ref = Process.monitor(pid)
+
+      assert post_report("/finish", pod_token(pod_b), ~s({"exit_code":3})).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 3}}}, 2_000
+      :ok = Mock.forget(new_id)
+
+      assert_receive {:atlas_compute, ^new_id, {:task, {:failed, {:exit_code, 3}}}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "progress and logs from the replaced pod get 410 and reach no subscriber",
+         %{base: base} do
+      {_pid, pod_a, pod_b, _task_id} = respawned_task(base)
+      new_id = pod_b.id
+
+      assert post_report("/progress", pod_token(pod_a), ~s({"pct":99})).status == 410
+      assert post_report("/logs", pod_token(pod_a), ~s({"lines":["stale"]})).status == 410
+
+      refute_receive {:atlas_compute, ^new_id, {:progress, _}}, 200
+      refute_received {:atlas_compute, ^new_id, {:log, _}}
+    end
+
+    test "control: progress and logs from the replacement reach subscribers",
+         %{base: base} do
+      {_pid, _pod_a, pod_b, _task_id} = respawned_task(base)
+      new_id = pod_b.id
+
+      assert post_report("/progress", pod_token(pod_b), ~s({"pct":50})).status == 202
+      assert post_report("/logs", pod_token(pod_b), ~s({"lines":["fresh"]})).status == 202
+
+      assert_receive {:atlas_compute, ^new_id, {:progress, %{"pct" => 50}}}, 2_000
+      assert_receive {:atlas_compute, ^new_id, {:log, %{"lines" => ["fresh"]}}}, 2_000
+    end
+
+    # 0.8.0 minted no attempt, and a pod it rented may still be running. Its
+    # report is accepted unchecked, even after a respawn: see #100.
+    test "a token with no attempt, as 0.8.0 minted it, is still accepted after a respawn",
+         %{base: base} do
+      {_pid, _pod_a, pod_b, task_id} = respawned_task(base)
+      new_id = pod_b.id
+      token = Token.mint(task_id, Callback.kinds())
+
+      assert post_report("/finish", token, ~s({"exit_code":0})).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 0}}}, 2_000
     end
   end
 

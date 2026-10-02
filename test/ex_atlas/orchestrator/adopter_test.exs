@@ -55,6 +55,17 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     compute
   end
 
+  defp pod_token(%{raw: %{request: request}}),
+    do: ExAtlas.Spec.ComputeRequest.container_env(request)["ATLAS_CALLBACK_TOKEN"]
+
+  defp post_finish(token, exit_code) do
+    :post
+    |> Plug.Test.conn("/finish", ~s({"exit_code":#{exit_code}}))
+    |> Plug.Conn.put_req_header("content-type", "application/json")
+    |> Plug.Conn.put_req_header("authorization", "Bearer " <> token)
+    |> ExAtlas.Callback.Plug.call([])
+  end
+
   defp backdate!(id, ago_ms) do
     {:ok, record} = Memory.get(id)
     :ok = Memory.put(%{record | spawned_at_ms: record.spawned_at_ms - ago_ms})
@@ -96,6 +107,40 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       id = compute.id
       assert_receive {:atlas_compute, ^id, {:progress, %{"step" => 2}}}, 2_000
+    end
+
+    test "after a respawn, refuses the replaced pod's report and accepts the replacement's" do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            callback: "https://app.example.com/atlas/cb",
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 2}
+          )
+        )
+
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_b} = Mock.get_compute(new_id, %{})
+      assert {:ok, %{respawns: 1}} = Memory.get(new_id)
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      TestOrchestrator.sync_registry()
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(pod_token(pod_a), 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+
+      assert post_finish(pod_token(pod_b), 4).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
     end
   end
 
