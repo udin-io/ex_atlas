@@ -10,6 +10,7 @@ names the PR or issue that holds the reasoning.
 | Decision | Alternative not taken | Where |
 |---|---|---|
 | An adopted task takes `:base_url` and `:req_options` from `config :ex_atlas, <provider>`, as `:api_key`; a record stores neither, and every rewrite drops them from an older one | Keep storing them and refuse a record whose URL differs from config: it still reads a value the store's writer chose, and refuses live pods after a host changes its URL | #125 |
+| An adopted task drops every credential key from its record's opts too (`:api_key` and the rest of `scrub_opts/1`'s list) | Trust a stored `:api_key` as a per-call one: it would point polls and the respawn's rent at the writer's account (review finding) | #125 |
 | Drop all of `:req_options` from the record | Drop a list of Req keys (`base_url`, `plug`, `connect_options`): Req adds keys, and a deny-list misses them | #125 |
 | `Config.build_ctx/2` reads `base_url:` and `req_options:` from every provider's app config; per-call `req_options` merge over config key by key | Keep #85's per-client `base_url:` fallback: RunPod had none, so an adopted RunPod task would lose a proxy. On RunPod it sets the management URL, as a per-call `base_url:` does | #125 |
 | The Adopter adopts a record only when its provider is built in or declares `@behaviour ExAtlas.Provider` | Tighten `Config.provider_module/1` for every call: a caller's own `provider:` is trusted code | #125 |

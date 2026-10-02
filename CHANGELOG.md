@@ -23,8 +23,9 @@ provider calls, with the API key from your config.
 ```
 
 - A record no longer stores `base_url:` or `req_options:`. An adopted task
-  takes both from config, and the first rewrite of an older record drops
-  them. The Adopter logs the keys of a record that held them, never the
+  takes both from config, and ignores an `api_key:` a record holds, as it
+  always took the key from config. The first rewrite of a record drops all
+  three. The Adopter logs the keys of a record that held them, never the
   values.
 - The Adopter adopts a record only when its provider is built in or a module
   that declares `@behaviour ExAtlas.Provider`. Any other record is skipped,

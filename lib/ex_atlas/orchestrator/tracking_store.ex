@@ -160,9 +160,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   adopted task calls its provider with this node's API key. So the record
   steers neither where those calls go nor which code makes them:
 
-    * `:base_url` and `:req_options` come from
-      `config :ex_atlas, <provider>, base_url: ..., req_options: [...]`, as
-      `:api_key` does. A record does not store them; one written before this
+    * `:api_key`, `:base_url` and `:req_options` come from
+      `config :ex_atlas, <provider>`, never from the record: a stored key
+      would point every call at the writer's own account. A record does not store them; one written before this
       rule keeps them, the adopted task ignores them, and the first rewrite of
       the record drops them. A host that passes either per call to a
       `persist: true` spawn sets them in config too, or its adopted tasks call
@@ -171,9 +171,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       that declares `@behaviour ExAtlas.Provider`. Any other record is
       skipped, kept, and logged.
 
-  The record still chooses what a respawn after adoption rents: the image,
-  command and GPU. A writer needs a live pod of this account for it to come
-  to that.
+  The record still chooses what a respawn after adoption rents (the image,
+  command, GPU and env names) and the callback descriptor its token is minted
+  over. With `respawn_credentials:`, the resolver's secrets go into that
+  image. A writer needs a live pod of this account that then fails for it to
+  come to that (issue 131).
 
   ## A store shared by several nodes
 
