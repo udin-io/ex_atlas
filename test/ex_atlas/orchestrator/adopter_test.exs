@@ -144,6 +144,116 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  # A record 0.8.0 wrote: its callback descriptor has no attempt, and the pod's
+  # token, minted from it, signs none. `respawns` is what 0.8.0 had spent.
+  describe "a task whose pod holds a token with no attempt (0.8.0)" do
+    defp orphaned_0_8_0_task(respawns, overrides \\ []) do
+      compute =
+        orphaned_task(
+          Keyword.merge(
+            [
+              callback: "https://app.example.com/atlas/cb",
+              spot: true,
+              status_poll_ms: false,
+              on_failure: {:respawn, 2}
+            ],
+            overrides
+          )
+        )
+
+      {:ok, record} = Memory.get(compute.id)
+      callback = Map.delete(Keyword.fetch!(record.opts, :callback), :attempt)
+      opts = Keyword.put(record.opts, :callback, callback)
+      :ok = Memory.put(%{record | opts: opts, respawns: respawns})
+
+      {compute, ExAtlas.Callback.Token.mint(callback.task_id, callback.kinds)}
+    end
+
+    test "the pod's report is accepted after adoption" do
+      {compute, claimless} = orphaned_0_8_0_task(0)
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      assert post_finish(claimless, 4).status == 202
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
+    # 0.8.0 respawned this task once: its current pod is claim-less too, and
+    # reading a claim-less token as attempt 0 would refuse its real report.
+    test "the pod 0.8.0 itself respawned still reports after adoption" do
+      {compute, claimless} = orphaned_0_8_0_task(1)
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      assert post_finish(claimless, 4).status == 202
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
+    test "after this version respawns it, the replaced pod's report gets 410" do
+      {compute, claimless} = orphaned_0_8_0_task(0, status_poll_ms: 30)
+      old_id = compute.id
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_b} = Mock.get_compute(new_id, %{})
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(claimless, 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
+
+      assert post_finish(pod_token(pod_b), 4).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
+    # The report passes the Registry check while the pod is the current one,
+    # then waits in the tracker's mailbox behind the poll that respawns.
+    test "a report queued behind the respawn is dropped" do
+      {compute, claimless} =
+        orphaned_0_8_0_task(0, provider: ExAtlas.Test.FaultyProvider, status_poll_ms: 30)
+
+      old_id = compute.id
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, pid} = Orchestrator.lookup(old_id)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      ExAtlas.Test.FaultyProvider.arm(:get_compute, {:block, self()})
+      assert_receive {:blocked, :get_compute, poller}, 2_000
+      ExAtlas.Test.FaultyProvider.reset()
+      :ok = Mock.forget(old_id)
+
+      :sys.suspend(pid)
+      send(poller, :release)
+      await_mailbox(pid)
+
+      assert post_finish(claimless, 0).status == 202
+      :sys.resume(pid)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      assert Process.alive?(pid)
+    end
+
+    defp await_mailbox(pid, tries \\ 2_000) do
+      case Process.info(pid, :message_queue_len) do
+        {:message_queue_len, n} when n > 0 ->
+          :ok
+
+        _ when tries > 0 ->
+          Process.sleep(1)
+          await_mailbox(pid, tries - 1)
+      end
+    end
+  end
+
   describe "the carried deadline" do
     test "a budget already spent while the node was down fires immediately" do
       compute = orphaned_task()

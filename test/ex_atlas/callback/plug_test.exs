@@ -188,6 +188,25 @@ defmodule ExAtlas.Callback.PlugTest do
       assert post("/progress", current, ~s({"pct":1})).status == 202
     end
 
+    test "a token with no attempt gets 410 once the current pod holds one" do
+      task = "task-#{System.unique_integer([:positive])}"
+      {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, 1)
+      claimless = Token.mint(task, Callback.kinds())
+
+      assert post("/finish", claimless, ~s({"exit_code":0})).status == 410
+      refute_received {:atlas_callback, _, _}
+      refute_received {:atlas_callback, _, _, _}
+    end
+
+    test "control: a token with no attempt gets 202 while the current pod holds none" do
+      task = "task-#{System.unique_integer([:positive])}"
+      {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, :claimless)
+      claimless = Token.mint(task, Callback.kinds())
+
+      assert post("/finish", claimless, ~s({"exit_code":0})).status == 202
+      assert_received {:atlas_callback, :finish, %{exit_code: 0}, nil}
+    end
+
     test "a pod that floods with its own attempt token is throttled at burst + 1" do
       task = "task-#{System.unique_integer([:positive])}"
       {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, 1)

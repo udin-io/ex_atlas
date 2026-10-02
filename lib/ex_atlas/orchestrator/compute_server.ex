@@ -855,6 +855,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def handle_info({:atlas_callback, kind, payload, attempt}, %{respawns: attempt} = state),
     do: handle_info({:atlas_callback, kind, payload}, state)
 
+  # A claim-less token (0.8.0's) is the current pod's only while the current
+  # pod holds none: the same test `Callback.ingest/3` made against the Registry,
+  # made again against the state a respawn may have moved since.
+  def handle_info({:atlas_callback, kind, payload, nil}, state) do
+    if callback_value(state) == :claimless,
+      do: handle_info({:atlas_callback, kind, payload}, state),
+      else: {:noreply, state}
+  end
+
   def handle_info({:atlas_callback, _kind, _payload, _stale_attempt}, state),
     do: {:noreply, state}
 
@@ -1703,12 +1712,22 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # *not* re-keyed on a respawn: the task id is what the credential in the
   # pod's environment is bound to, and it has to keep working when the compute
   # id underneath it is replaced. The value is the current attempt, which
-  # `ExAtlas.Callback.ingest/3` compares with the token's.
+  # `ExAtlas.Callback.ingest/3` compares with the token's, or `:claimless` while
+  # the current pod's own token signs none.
   defp register_callback(%{callback_task_id: nil}), do: :ok
 
-  defp register_callback(%{callback_task_id: task_id, respawns: respawns}) do
-    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, respawns)
+  defp register_callback(%{callback_task_id: task_id} = state) do
+    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, callback_value(state))
     :ok
+  end
+
+  # A callback descriptor stored by 0.8.0 has no `:attempt`, and neither does
+  # the token minted from it. A respawn writes one (`next_attempt/2`).
+  defp callback_value(%{opts: opts, respawns: respawns}) do
+    case Keyword.get(opts, :callback) do
+      %{attempt: _} -> respawns
+      _no_attempt -> :claimless
+    end
   end
 
   defp advance_callback(%{callback_task_id: nil}, _attempt), do: :ok
