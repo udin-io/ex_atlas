@@ -137,7 +137,7 @@ defmodule ExAtlas.Orchestrator.Lease do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
       :ok ->
         state = hold(state, now)
-        safely(fn -> release_lost_trackers(state) end)
+        release_lost_trackers(state)
         if claiming?(state, now), do: claim(state, now), else: state
 
       other ->
