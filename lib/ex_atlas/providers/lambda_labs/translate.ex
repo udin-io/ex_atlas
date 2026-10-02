@@ -17,6 +17,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   """
 
   alias ExAtlas.{Error, Secret, Spec}
+  alias ExAtlas.Providers.Shell
 
   @tag_ports "atlas-ports"
   @tag_created_at "atlas-created-at"
@@ -302,7 +303,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   defp user_data(image, env, ports) do
     names = env |> Map.keys() |> Enum.sort()
 
-    exports = Enum.map(names, fn name -> "export #{name}=#{shell_quote(env[name])}\n" end)
+    exports = Enum.map(names, fn name -> "export #{name}=#{Shell.quote_arg(env[name])}\n" end)
 
     flags =
       Enum.map(ports, fn {port, _} -> " -p #{port}:#{port}" end) ++
@@ -324,7 +325,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         "exec \"$DOCKER_BIN\" run --detach --name atlas --gpus all --restart no",
         flags,
         " ",
-        shell_quote(image),
+        Shell.quote_arg(image),
         "\n"
       ])
 
@@ -337,10 +338,6 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       {:ok, script}
     end
   end
-
-  # POSIX single quotes: nothing inside is shell syntax, and an embedded `'`
-  # closes, escapes and reopens.
-  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
 
   defp tags(image, ports, now) do
     ports_value = Enum.map_join(ports, ",", fn {port, protocol} -> "#{port}/#{protocol}" end)

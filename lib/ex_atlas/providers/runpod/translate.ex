@@ -9,6 +9,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   """
 
   alias ExAtlas.Providers.RunPod.Client
+  alias ExAtlas.Providers.Shell
   alias ExAtlas.Spec
 
   # v2 requires a name. This one never starts with the Reaper's default
@@ -217,7 +218,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       |> Enum.join(" ")
 
     "atlas_self_terminate() { atlas_code=$?; #{body} }; " <>
-      "trap atlas_self_terminate EXIT INT TERM; " <> shell_join(command)
+      "trap atlas_self_terminate EXIT INT TERM; " <> Shell.join(command)
   end
 
   defp self_delete(false), do: nil
@@ -240,12 +241,6 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       ~s(-d "{\\"exit_code\\":$atlas_code}" ) <>
       ~s("$ATLAS_CALLBACK_URL/finish" || true;)
   end
-
-  defp shell_join(command), do: command |> Enum.map_join(" ", &shell_quote/1)
-
-  # Single-quote everything and escape embedded single quotes the POSIX way, so
-  # a command argument can never be read as shell syntax by the wrapper.
-  defp shell_quote(arg), do: "'" <> String.replace(arg, "'", "'\\''") <> "'"
 
   defp pod_status("RUNNING"), do: :running
   defp pod_status("EXITED"), do: :stopped
