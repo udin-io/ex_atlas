@@ -79,9 +79,14 @@ defmodule ExAtlas.Error do
       provider: provider,
       status: status,
       message: extract_message(body),
-      raw: drop_error_values(body)
+      raw: error_raw(status, body)
     )
   end
+
+  # A 2xx the caller did not expect carries the resource, which can hold the
+  # credentials the request set (a RunPod pod body echoes its `env`).
+  defp error_raw(status, _body) when status in 200..299, do: nil
+  defp error_raw(_status, body), do: drop_error_values(body)
 
   # RFC 9457 problem details (Runpod REST v2): `detail` says what went wrong,
   # `errors` lists each invalid field.

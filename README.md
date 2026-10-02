@@ -863,7 +863,8 @@ to know each provider's native shape.
 - `ExAtlas.Spec.Compute` — output. Fields: `:id`, `:provider`, `:status`,
   `:public_ip`, `:ports`, `:gpu_type`, `:gpu_count`, `:cost_per_hour`,
   `:region`, `:image`, `:name`, `:auth`, `:created_at`, `:raw`.
-  `inspect/1` leaves out `:raw`: RunPod echoes the container env there.
+  `inspect/1` leaves out `:raw`. RunPod's `raw` omits the pod's `env`, which
+  the API echoes back with the container's credentials.
 - `ExAtlas.Spec.JobRequest` / `ExAtlas.Spec.Job` — serverless jobs.
 - `ExAtlas.Spec.Endpoint` — serverless endpoint from `list_endpoints/1`.
 - `ExAtlas.Spec.GpuType` — catalog entries returned by `list_gpu_types/1`.
