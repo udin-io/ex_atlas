@@ -16,7 +16,7 @@ respawn after adoption). It feeds the choice of the next feature. Dates are merg
 |---|---|---|
 | Lambda Labs provider (#83) | 1, #84: spawn a container through cloud-init, get, list, terminate, GPU types | PR #89 |
 | Lambda Labs provider (#83) | 2, #85: `command:`, `run_task/1`, the Reaper on Lambda | Filed |
-| Lambda Labs provider (#83) | 3, #86: open `ports:` in Lambda's firewall | Filed |
+| Lambda Labs provider (#83) | 3, #86: open `ports:` in Lambda's firewall | PR #91 |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider.

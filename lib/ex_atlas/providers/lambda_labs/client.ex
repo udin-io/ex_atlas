@@ -67,6 +67,18 @@ defmodule ExAtlas.Providers.LambdaLabs.Client do
   end
 
   @doc """
+  DELETE `path` and return its `data`. Retried on a 429 only, which means
+  Lambda did nothing.
+  """
+  @spec delete(ExAtlas.Provider.ctx(), String.t()) :: {:ok, term()} | {:error, ExAtlas.Error.t()}
+  def delete(ctx, path) do
+    ctx
+    |> api()
+    |> Req.delete(url: path, retry: &HTTP.retry_rate_limited/2)
+    |> handle(path)
+  end
+
+  @doc """
   GET `path`, following `page_token` until Lambda returns none.
 
   Returns `{:ok, [entry]}`. A failed page, a page whose `data` is not a list

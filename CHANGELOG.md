@@ -25,13 +25,34 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
   `get_compute/2` and `list_compute/1` rebuild `ports`, URLs and
   `created_at` on any node.
 - `stop/2`, `start/2`, `spot: true`, `template_id:`, `network_volume_id:`
-  and `command:` return `:unsupported`. Open `ports:` in Lambda's firewall
-  yourself for now.
+  and `command:` return `:unsupported`.
 - `raw` leaves out `jupyter_token` and `jupyter_url`. A refused launch keeps
   its status and Lambda's error code, and withholds Lambda's message, which
   can echo `user_data`.
 - An env name starting `DOCKER_` or `LD_`, a value or image that is not
   UTF-8, and an image starting with `-` are `:validation`.
+
+### Added: Lambda opens an instance's `ports:` in its firewall (#86)
+
+A spawn with `ports:` creates one Lambda firewall ruleset for the instance
+and launches the instance with it attached.
+
+- The ruleset is `atlas-<instance name>-<8 hex>` and holds one TCP rule per
+  distinct port, from `provider_opts: %{source_network: cidr}` or
+  `0.0.0.0/0`. A `source_network` that is not a string is `:validation`.
+  `ports: []` creates no ruleset, and neither does `us-south-1`, where Lambda
+  applies no firewall rules.
+- A refused ruleset create fails the spawn before the launch. A launch
+  Lambda refuses with a 4xx deletes the ruleset it created; after a 5xx or a
+  timeout the ruleset stays, since the instance may hold it.
+- `terminate/2` deletes the instance, then its ruleset. Lambda refuses while
+  the instance still uses the ruleset (`firewall-rulesets/firewall-ruleset-in-use`);
+  `terminate/2` still returns `:ok`. Every spawn with `ports:` first deletes
+  rulesets named `atlas-...-<8 hex>` that no instance uses and that are 5
+  minutes old or more, at most 10 a spawn. A ruleset you name `atlas-prod` is
+  yours.
+- `terminate/2` makes one more call, `GET /firewall-rulesets`, to find the
+  instance's ruleset.
 
 ### Changed: spawn POSTs retry on a 429 only (#84)
 
