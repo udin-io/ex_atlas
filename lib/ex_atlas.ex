@@ -101,6 +101,12 @@ defmodule ExAtlas do
   """
   @spec spawn_compute(opts()) :: {:ok, Spec.Compute.t()} | {:error, term()}
   def spawn_compute(opts) when is_list(opts) do
+    # Checked here, not by `Keyword.split/2` below: a non-atom key would skip
+    # validation and reach the provider ctx, credentials and all.
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError, "spawn_compute/1 expects a keyword list with atom keys"
+    end
+
     {provider, opts} = Config.pop_provider!(opts)
     {request_opts, config_opts} = split_compute_request_opts(opts)
     req = Spec.ComputeRequest.new!(request_opts)

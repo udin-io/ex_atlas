@@ -145,7 +145,8 @@ defmodule ExAtlas.Spec.ComputeRequest do
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, NimbleOptions.ValidationError.t()}
   def new(opts) do
-    with {:ok, opts} <- opts |> normalize() |> NimbleOptions.validate(@schema),
+    with {:ok, opts} <- normalize(opts),
+         {:ok, opts} <- NimbleOptions.validate(opts, @schema),
          :ok <- validate_env(opts[:env]),
          {:ok, staging} <- Staging.new(opts[:s3]),
          :ok <- check_env_overlap(opts[:env], staging) do
@@ -214,6 +215,22 @@ defmodule ExAtlas.Spec.ComputeRequest do
      }}
   end
 
-  defp normalize(opts) when is_map(opts), do: Map.to_list(opts)
-  defp normalize(opts) when is_list(opts), do: opts
+  # NimbleOptions raises on a non-keyword list with the offending pair, values
+  # included, in its message; a function clause error carries the argument.
+  defp normalize(opts) when is_map(opts) and not is_struct(opts), do: normalize(Map.to_list(opts))
+
+  defp normalize(opts) when is_list(opts) do
+    if Keyword.keyword?(opts), do: {:ok, opts}, else: shape_error()
+  end
+
+  defp normalize(_opts), do: shape_error()
+
+  defp shape_error do
+    {:error,
+     %NimbleOptions.ValidationError{
+       key: nil,
+       value: nil,
+       message: "expected a keyword list or a map with atom keys"
+     }}
+  end
 end

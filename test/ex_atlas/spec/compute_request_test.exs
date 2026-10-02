@@ -223,4 +223,32 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
       refute_secrets(Exception.message(error))
     end
   end
+
+  describe "input shapes that are not keyword opts" do
+    test "a string key is refused without printing its value" do
+      assert {:error, %NimbleOptions.ValidationError{value: nil} = error} =
+               ComputeRequest.new(%{:gpu => :h100, "s3" => @s3})
+
+      assert Exception.message(error) =~ "atom keys"
+      refute_secrets(inspect(error))
+    end
+
+    test "a non-keyword pair in a list is refused without printing it" do
+      assert {:error, %NimbleOptions.ValidationError{value: nil} = error} =
+               ComputeRequest.new([gpu: :h100] ++ [{"s3", @s3}])
+
+      refute_secrets(inspect(error))
+    end
+
+    test "a tuple instead of opts is refused without printing it" do
+      assert {:error, %NimbleOptions.ValidationError{value: nil} = error} =
+               ComputeRequest.new({:s3, @s3})
+
+      refute_secrets(inspect(error))
+    end
+
+    test "a map with atom keys still works (control)" do
+      assert {:ok, %ComputeRequest{s3: %Staging{}}} = ComputeRequest.new(%{gpu: :h100, s3: @s3})
+    end
+  end
 end

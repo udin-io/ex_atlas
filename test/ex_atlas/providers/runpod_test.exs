@@ -174,6 +174,17 @@ defmodule ExAtlas.Providers.RunPodTest do
       refute_received :posted
     end
 
+    test "a string-keyed s3 option raises without printing it", %{ctx_opts: opts} do
+      error =
+        assert_raise ArgumentError, fn ->
+          ExAtlas.spawn_compute(
+            [gpu: :h100, image: "x"] ++ opts ++ [{"s3", %{secret_access_key: "tsec-test-9f2c"}}]
+          )
+        end
+
+      refute Exception.message(error) =~ "tsec-test-9f2c"
+    end
+
     test "inspect of the compute omits the env RunPod echoes back", %{
       bypass: bypass,
       ctx_opts: opts
