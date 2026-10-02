@@ -1533,7 +1533,10 @@ mandate Req — it's an implementation choice of the bundled providers.
 - **v0.1** — RunPod (full surface), Mock provider, orchestrator, auth,
   LiveDashboard page.
 - **v0.8** — Lambda Labs compute: spawn, get, list, terminate, `command:`,
-  `run_task/1` and the Reaper. `ports:` open in Lambda's firewall.
+  `run_task/1` and the Reaper. `ports:` open in Lambda's firewall. Also
+  `s3:` data staging, `persist: true` with `respawn_credentials:`, cost caps
+  (`max_cost`), `ExAtlas.Secret` credentials and `:reap_owner`. See
+  [Upgrading](guides/upgrading.md).
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
 - Vast.ai.
