@@ -13,6 +13,19 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     end
   end
 
+  defmodule ExAtlas.Orchestrator.TrackingStore.Ecto.Lease do
+    @moduledoc false
+    # The table migration step 2 creates: one row per `:reap_owner`.
+
+    use Ecto.Schema
+
+    @primary_key {:owner, :string, autogenerate: false}
+    schema "atlas_owner_leases" do
+      field(:expires_at, :utc_datetime_usec)
+      timestamps(type: :utc_datetime_usec)
+    end
+  end
+
   defmodule ExAtlas.Orchestrator.TrackingStore.Ecto do
     @moduledoc """
     `ExAtlas.Orchestrator.TrackingStore` in a table of the host's own Ecto repo.
@@ -93,7 +106,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     require Logger
 
-    alias ExAtlas.Orchestrator.TrackingStore.Ecto.Row
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto.{Lease, Row}
 
     # A record is a few KB. The cap bounds what one row costs to decode.
     @max_record_bytes 1_048_576
@@ -254,6 +267,92 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       end
     rescue
       _error -> :error
+    end
+
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def renew_lease(owner, expires_at_ms) when is_binary(owner) and is_integer(expires_at_ms) do
+      repo = repo!()
+      now = DateTime.utc_now()
+      expires_at = usec(expires_at_ms)
+      row = %{owner: owner, expires_at: expires_at, inserted_at: now, updated_at: now}
+
+      # The write runs in a linked task, so its raise is caught there.
+      outside_transaction(fn ->
+        try do
+          repo.insert_all(Lease, [row],
+            on_conflict: {:replace, [:expires_at, :updated_at]},
+            conflict_target: [:owner]
+          )
+
+          :ok
+        rescue
+          error -> {:error, error}
+        end
+      end)
+    end
+
+    defp usec(ms), do: DateTime.from_unix!(ms * 1_000, :microsecond)
+
+    # Each row is claimed by its own conditional UPDATE, which sets the owner
+    # column and the record together: the record holds `:owner` too, under
+    # its signature. The WHERE re-checks the old owner and its expired lease,
+    # so of two claimers one writes the row and the other matches nothing,
+    # and an owner that renewed since the read keeps it.
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def claim_expired(claimer, now_ms, rewrite)
+        when is_binary(claimer) and is_integer(now_ms) and is_function(rewrite, 1) do
+      repo = repo!()
+      now = usec(now_ms)
+
+      candidates =
+        repo.all(
+          from(r in Row,
+            where: r.owner in subquery(expired_owners(claimer, now)),
+            select: {r.id, r.owner, r.record}
+          )
+        )
+
+      {:ok, Enum.flat_map(candidates, &claim_row(repo, &1, claimer, now, rewrite))}
+    rescue
+      error -> {:error, error}
+    end
+
+    defp expired_owners(claimer, now) do
+      from(l in Lease, where: l.expires_at < ^now and l.owner != ^claimer, select: l.owner)
+    end
+
+    defp claim_row(repo, {id, old_owner, blob}, claimer, now, rewrite) do
+      with {:ok, record} <- decode(id, blob),
+           {:ok, %{id: ^id, owner: ^claimer} = claimed} <- rewrite.(record),
+           new_blob = :erlang.term_to_binary(claimed),
+           true <- byte_size(new_blob) <= @max_record_bytes,
+           1 <- update_claimed(repo, id, old_owner, claimer, new_blob, now) do
+        [claimed]
+      else
+        _skipped_or_lost -> []
+      end
+    end
+
+    defp update_claimed(repo, id, old_owner, claimer, blob, now) do
+      query =
+        from(r in Row,
+          where:
+            r.id == ^id and r.owner == ^old_owner and
+              r.owner in subquery(expired_owners(claimer, now))
+        )
+
+      outside_transaction(fn ->
+        try do
+          {count, _} =
+            repo.update_all(query,
+              set: [owner: claimer, record: blob, updated_at: DateTime.utc_now()]
+            )
+
+          count
+        rescue
+          _error -> 0
+        end
+      end)
     end
 
     defp owner_column(%{owner: owner}) when is_binary(owner), do: owner

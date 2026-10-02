@@ -280,6 +280,35 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   @callback child_spec(keyword()) :: Supervisor.child_spec()
 
+  @doc """
+  Record that `owner`'s lease runs until `expires_at_ms` (wall clock, ms).
+
+  Optional. A store that implements it and `c:claim_expired/3` lets a live
+  node take over the records of a node whose lease expired; see
+  `ExAtlas.Orchestrator.Lease`.
+  """
+  @callback renew_lease(owner :: String.t(), expires_at_ms :: integer()) ::
+              :ok | {:error, term()}
+
+  @doc """
+  Hand `claimer` the records of every other owner whose lease expired before
+  `now_ms`.
+
+  For each such record the store calls `rewrite`, which returns the record
+  as `claimer` owns it, or `:skip`. The store writes it only if, at the
+  write, the row still names the old owner and that owner's lease is still
+  expired, in one atomic statement, so two claimers never both take a
+  record. Answers the records it wrote. An owner with no lease row is never
+  expired.
+  """
+  @callback claim_expired(
+              claimer :: String.t(),
+              now_ms :: integer(),
+              rewrite :: (record() -> {:ok, record()} | :skip)
+            ) :: {:ok, [record()]} | {:error, term()}
+
+  @optional_callbacks renew_lease: 2, claim_expired: 3
+
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a
   # half-understood record could arm the wrong deadline on a live GPU.
