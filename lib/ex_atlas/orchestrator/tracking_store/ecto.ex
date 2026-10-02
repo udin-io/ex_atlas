@@ -44,7 +44,8 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     the Adopter's `all/0` would find no repo. Shutdown runs in reverse, so the
     trackers write their records while the repo is still up.
 
-    Starting the store with no `:repo` configured raises `ArgumentError`.
+    Starting the store with no `:repo` configured, or before the repo runs,
+    raises `ArgumentError`.
     Postgres and SQLite work; MySQL does not, since its upsert takes no
     conflict target.
 
@@ -96,14 +97,25 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     end
 
     @doc """
-    Checks that `:repo` is configured, and starts no process.
+    Checks that `:repo` is configured and running, and starts no process.
 
-    Raises `ArgumentError` when it is not, so a host that forgot it finds out
-    at boot rather than at its first deploy.
+    Raises `ArgumentError` otherwise, so a host finds a missing repo, or an
+    orchestrator started before it, at boot rather than at its first deploy.
+    `start_orchestrator: true` boots ExAtlas's tree before the host's repo, so
+    it fails here too.
     """
     @spec start_link(keyword()) :: :ignore
     def start_link(_opts \\ []) do
-      _ = repo!()
+      repo = repo!()
+
+      unless GenServer.whereis(repo.get_dynamic_repo()) do
+        raise ArgumentError,
+              "#{inspect(repo)} is not running, and #{inspect(__MODULE__)} reads it at " <>
+                "boot. Set `config :ex_atlas, start_orchestrator: false` and start " <>
+                "ExAtlas.Orchestrator.Supervisor after #{inspect(repo)} in your " <>
+                "application's children."
+      end
+
       :ignore
     end
 

@@ -134,6 +134,36 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
     assert error.message =~ "ExAtlas.Orchestrator.Supervisor"
   end
 
+  test "refuses to start before the host's repo", %{database: db} do
+    children = [OrchestratorSupervisor, {Repo, database: db, log: false}]
+
+    assert {:error, reason} =
+             start_supervised(%{
+               id: :host,
+               start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]},
+               type: :supervisor
+             })
+
+    assert inspect(reason) =~ "ExAtlas.Test.Repo is not running"
+    refute Process.whereis(ExAtlas.Orchestrator.ComputeSupervisor)
+  end
+
+  # ExAtlas's own application boots before the host's repo, so this pairing
+  # would come up with no store every boot.
+  test "start_orchestrator: true with the Ecto store refuses to boot ExAtlas's tree" do
+    Application.put_env(:ex_atlas, :start_orchestrator, true)
+    children = ExAtlas.Application.orchestrator_children()
+
+    assert {:error, reason} =
+             start_supervised(%{
+               id: :atlas_tree,
+               start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]},
+               type: :supervisor
+             })
+
+    assert inspect(reason) =~ "ExAtlas.Test.Repo is not running"
+  end
+
   test "spawn/1 with no tree running raises, naming both ways to start it" do
     error =
       assert_raise RuntimeError, fn ->

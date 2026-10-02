@@ -249,6 +249,15 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       end
     end
 
+    test "raises ArgumentError naming the start order when the repo is not running" do
+      Application.put_env(:ex_atlas, :orchestrator, repo: Repo)
+      on_exit(fn -> Application.delete_env(:ex_atlas, :orchestrator) end)
+
+      error = assert_raise ArgumentError, fn -> Store.start_link([]) end
+      assert error.message =~ "ExAtlas.Test.Repo is not running"
+      assert error.message =~ "ExAtlas.Orchestrator.Supervisor"
+    end
+
     test "raises ArgumentError when :repo is not a module" do
       Application.put_env(:ex_atlas, :orchestrator, repo: "MyApp.Repo")
       on_exit(fn -> Application.delete_env(:ex_atlas, :orchestrator) end)
