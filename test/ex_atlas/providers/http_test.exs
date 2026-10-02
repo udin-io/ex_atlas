@@ -29,6 +29,59 @@ defmodule ExAtlas.Providers.HTTPTest do
     end
   end
 
+  describe "handle_response/3 with a Req exception that carries the response body" do
+    @echo ~s({"env": {"K": "#{@secret}"}})
+
+    defp req_error(plug, options) do
+      [plug: plug, retry: false]
+      |> Keyword.merge(options)
+      |> Req.new()
+      |> Req.get(url: "http://atlas.test/x")
+      |> HTTP.handle_response(200..299, :runpod)
+    end
+
+    defp prints?(error) do
+      Enum.any?(
+        [inspect(error, structs: false, limit: :infinity), Exception.message(error)],
+        &(&1 =~ @secret)
+      )
+    end
+
+    test "a body that fails to decompress is withheld" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+        |> Plug.Conn.send_resp(400, @echo)
+      end
+
+      assert {:error, %ExAtlas.Error{} = error} = req_error(plug, compressed: true)
+
+      refute prints?(error)
+      assert %{kind: :transport, raw: nil} = error
+      assert error.message =~ "Req.DecompressError"
+    end
+
+    test "a caller's decoder that returns the body in its exception is withheld" do
+      codec = fn body -> {:error, %JSON.DecodeError{message: "bad", data: body, offset: 0}} end
+      plug = fn conn -> Req.Test.json(%{conn | status: 400}, %{"env" => %{"K" => @secret}}) end
+
+      assert {:error, %ExAtlas.Error{} = error} = req_error(plug, decoders: [json: codec])
+
+      refute prints?(error)
+      assert %{kind: :provider, raw: nil} = error
+    end
+
+    test "control: a transport timeout keeps its reason" do
+      plug = fn conn -> Req.Test.transport_error(conn, :timeout) end
+
+      assert {:error,
+              %ExAtlas.Error{kind: :transport, raw: %Req.TransportError{reason: :timeout}} = error} =
+               req_error(plug, [])
+
+      assert error.message == "timeout"
+    end
+  end
+
   describe "handle_response/3 with an env deeper in the error body" do
     defp error_raw(body, status \\ 409) do
       {:error, %ExAtlas.Error{} = error} =

@@ -114,9 +114,10 @@ defmodule ExAtlas.Providers.HTTP do
     end
   end
 
-  # Req's JSON decoder fails with the whole body in `data`, and a body can
-  # echo the request. The error keeps neither.
-  def handle_response({:error, %Jason.DecodeError{}}, _expected, provider) do
+  # A JSON decoder fails with the whole body in `data`, and a body can echo
+  # the request. The error keeps neither.
+  def handle_response({:error, %struct{}}, _expected, provider)
+      when struct in [Jason.DecodeError, JSON.DecodeError] do
     {:error,
      ExAtlas.Error.new(:provider,
        provider: provider,
@@ -124,12 +125,30 @@ defmodule ExAtlas.Providers.HTTP do
      )}
   end
 
-  def handle_response({:error, %{__exception__: true} = exception}, _expected, provider) do
+  # These carry a socket-level reason, never response bytes.
+  def handle_response({:error, %struct{} = exception}, _expected, provider)
+      when struct in [
+             Req.TransportError,
+             Mint.TransportError,
+             Finch.Error,
+             Req.TooManyRedirectsError
+           ] do
     {:error,
      ExAtlas.Error.new(:transport,
        provider: provider,
        message: Exception.message(exception),
        raw: exception
+     )}
+  end
+
+  # Any other exception can hold the body: `Req.DecompressError` keeps it in
+  # `data`, Mint's `{:unexpected_data, data}` and a caller's decoder in their
+  # message. The error names the exception and keeps nothing else.
+  def handle_response({:error, %struct{__exception__: true}}, _expected, provider) do
+    {:error,
+     ExAtlas.Error.new(:transport,
+       provider: provider,
+       message: "#{inspect(struct)}; ExAtlas withholds its details, which can echo the request"
      )}
   end
 
