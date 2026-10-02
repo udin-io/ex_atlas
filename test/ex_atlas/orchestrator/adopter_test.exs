@@ -1035,23 +1035,26 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
 
     test "a result the replacement could not use ends the task without a crash" do
+      # Each case with the part of the message that names what was wrong.
       bad_results = [
-        # No `:s3`, which the record left without credentials.
-        {:return, {:ok, env: @resolved_env}},
-        # `s3: nil` drops the staging the task was rented with.
-        {:return, {:ok, s3: nil, env: @resolved_env}},
+        {{:return, {:ok, env: @resolved_env}}, "returned no :s3"},
+        {:fixed_s3, "returned no :env"},
+        {{:return, {:ok, s3: nil, env: @resolved_env}}, "returned s3: nil"},
         # The stored marker passed back, as a careless merge would.
-        {:return, {:ok, s3: Map.put(@creds, :credentials, :not_stored), env: @resolved_env}},
-        # An `env:` that sets a variable `s3:` sets: `spawn_compute/1` raises on it.
-        {:merge_s3, @creds, [env: Map.put(@resolved_env, "AWS_REGION", "us-east-1")]},
-        # A value that is not a string.
-        {:merge_s3, @creds, [env: %{@resolved_env | "HF_TOKEN" => 42}]},
-        {:merge_s3, @creds, [env: @resolved_env, api_key: "sk-not-mine"]},
-        {:return, {:ok, %{s3: @creds}}},
-        {:return, :ok}
+        {{:return, {:ok, s3: Map.put(@creds, :credentials, :not_stored), env: @resolved_env}},
+         "credentials: :not_stored"},
+        # `spawn_compute/1` raises on an `env:` that sets a variable `s3:` sets.
+        {{:merge_s3, @creds, [env: Map.put(@resolved_env, "AWS_REGION", "us-east-1")]},
+         "AWS_REGION"},
+        {{:merge_s3, @creds, [env: %{@resolved_env | "HF_TOKEN" => 42}]},
+         ~s(the value of "HF_TOKEN" is not a string)},
+        {{:merge_s3, @creds, [env: @resolved_env, api_key: "sk-not-mine"]}, "the key :api_key"},
+        {{:merge_s3, @creds, [env: :not_a_map]}, ":env that is not a map"},
+        {{:return, {:ok, %{s3: @creds}}}, "not a keyword list"},
+        {{:return, :ok}, "something other than {:ok, keyword}"}
       ]
 
-      for {script, n} <- Enum.with_index(bad_results) do
+      for {{script, expected}, n} <- Enum.with_index(bad_results) do
         image = "trainer-resolver-bad-#{n}:latest"
         compute = orphaned_resolved_task(image, script, name: "atlas-bad-#{n}")
         id = compute.id
@@ -1059,7 +1062,10 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
         message = assert_refused(id, pid, image)
 
         assert message =~ "ExAtlas.Test.CredentialResolver.resolve/2", "case #{n}: #{message}"
-        for value <- @resolved_values, do: refute(message =~ value, "case #{n} printed a value")
+        assert message =~ expected, "case #{n}: #{message}"
+
+        for value <- ["sk-not-mine" | @resolved_values],
+            do: refute(message =~ value, "case #{n} printed a value")
       end
     end
 
