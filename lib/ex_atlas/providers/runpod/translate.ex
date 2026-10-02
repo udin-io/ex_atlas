@@ -172,75 +172,18 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   # --- start command + self-termination ---
 
-  # An absent and an empty `cmd` alike leave the image's own CMD to run.
-  # Wrapping an empty command would fire the trap immediately and delete the
-  # pod before anything ran, so both mean "leave it unset".
-  defp start_cmd(%Spec.ComputeRequest{command: nil}), do: nil
-  defp start_cmd(%Spec.ComputeRequest{command: []}), do: nil
-
-  # Nothing to trap for: no self-termination asked for and nothing to report.
-  defp start_cmd(%Spec.ComputeRequest{command: cmd, self_terminate: false, callback: nil}),
-    do: cmd
-
-  defp start_cmd(%Spec.ComputeRequest{command: cmd} = req),
-    do: ["sh", "-c", wrapped(req, cmd)]
-
-  # Nothing outside the container learns the command's exit code: REST v2's
-  # `runtime` carries uptime and utilisation, not container state, and under
-  # v1 a pod whose command exited went on reading `RUNNING` and billing.
-  #
-  # The only party that knows the container ended is the container. RunPod
-  # injects `RUNPOD_POD_ID` and a pod-scoped `RUNPOD_API_KEY` into every
-  # container, so it can delete itself with no secret of ours travelling to the
-  # pod. `trap … EXIT INT TERM` means a crash and a signal clean up too, not
-  # just a clean exit.
-  #
-  # `curl` rather than `runpodctl`: curl is in nearly every base image and
-  # runpodctl in nearly none. An image with neither wants
-  # `self_terminate: false` and the orchestrator's `:max_runtime_ms` backstop.
-  #
-  # What this cannot cover: SIGKILL, the OOM killer, and a wedged process —
-  # nothing runs in the container at all in those cases. That is precisely the
-  # set `ExAtlas.Orchestrator.run_task/1`'s deadline exists for, which is why
-  # the two mechanisms are both required rather than alternatives.
-  # `atlas_code=$?` must be the very first thing in the trap: anything else runs
-  # first and clobbers the status we are trying to report.
-  #
-  # The finish POST goes *before* the DELETE, and swallows its own failure, for
-  # two reasons. It has to be a marker written while the pod still exists, so a
-  # later disappearance is no longer ambiguous — that is the spot fix. And the
-  # DELETE is the line that stops the meter, so an unreachable callback host
-  # must never be able to skip it. `-m` bounds the same risk in time.
-  defp wrapped(req, command) do
-    body =
-      [finish_report(req.callback), self_delete(req.self_terminate)]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join(" ")
-
-    "atlas_self_terminate() { atlas_code=$?; #{body} }; " <>
-      "trap atlas_self_terminate EXIT INT TERM; " <> Shell.join(command)
-  end
-
-  defp self_delete(false), do: nil
-
-  defp self_delete(true) do
-    url = "#{Client.management_url()}/pods/$RUNPOD_POD_ID"
-
-    "curl -sS -m 30 -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\" \"#{url}\";"
-  end
-
-  defp finish_report(nil), do: nil
-
-  # Every value here comes from the container's own environment rather than
-  # being interpolated into the script, so a callback URL can never be read as
-  # shell syntax.
-  defp finish_report(%{}) do
-    ~s(curl -sS -m 10 -X POST ) <>
-      ~s(-H "Authorization: Bearer $ATLAS_CALLBACK_TOKEN" ) <>
-      ~s(-H "Content-Type: application/json" ) <>
-      ~s(-d "{\\"exit_code\\":$atlas_code}" ) <>
-      ~s("$ATLAS_CALLBACK_URL/finish" || true;)
-  end
+  # RunPod injects `RUNPOD_POD_ID` and a pod-scoped `RUNPOD_API_KEY` into
+  # every container. See `Shell.start_command/2` for the trap.
+  defp start_cmd(req),
+    do:
+      Shell.start_command(
+        req,
+        Shell.delete_request(
+          "#{Client.management_url()}/pods/$RUNPOD_POD_ID",
+          "RUNPOD_POD_ID",
+          "RUNPOD_API_KEY"
+        )
+      )
 
   defp pod_status("RUNNING"), do: :running
   defp pod_status("EXITED"), do: :stopped

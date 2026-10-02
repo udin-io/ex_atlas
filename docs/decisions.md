@@ -19,6 +19,12 @@ names the PR or issue that holds the reasoning.
 | `cancel_unavail: true` on every rent | Vast's default, which can create a stopped instance that bills its disk | #99 |
 | `ATLAS_PORTS` in the container env records each port's protocol | Read every port as `:tcp`: Vast's port map holds numbers only | #99 |
 | `list_gpu_types/1` searches once per catalog GPU | One search: Vast returns at most 64 offers, the cheapest few GPUs | #99 |
+| `command:` goes to the image's entrypoint as `args`, wrapped in `sh -c` | Override the entrypoint with `onstart: "sh"`: `command:` would mean something else than RunPod's `cmd`, and an image's setup entrypoint would not run | #105 |
+| One trap wrapper in `Providers.Shell` for RunPod and Vast | A Vast-only script: the two would fail differently | #105 |
+| The container's DELETE reads `$CONTAINER_ID` and calls `console.vast.ai` | The instance id in the body, which exists only after the rent answers; the configured `base_url`, a test or proxy host the container would send its key to | #105 |
+| Curl reads the Bearer header from stdin (`-K -`), written by the `printf` builtin | `-H` on argv, which `ps` shows to every process in the container | #105 |
+| The wrapper checks the id (`[A-Za-z0-9_-]`) and each key or token (`[A-Za-z0-9._-]`) before it sends, and skips the request otherwise | Escape the value into curl's config syntax: one missed character class sets any curl option | #105 |
+| A SIGTERM to the wrapper's shell waits for the command, as `sh` does | Run the command in the background and forward the signal: a RunPod spot stop would then report an exit code, and read as a failed task, not a preemption to respawn | #105 |
 
 ## Docs build (#92)
 

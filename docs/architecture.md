@@ -25,7 +25,7 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Facade | `ExAtlas` (`dispatch/3`, `dispatch_optional/3`), `ExAtlas.Config` (its `seal_credentials/1` wraps credentials), `ExAtlas.Secret`, `ExAtlas.Error` |
 | Contract | `ExAtlas.Provider` (behaviour, optional callbacks) |
-| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Vast` (with `Client`, `Translate`), `Providers.Shell` (POSIX quoting for both providers' scripts), `Providers.Mock`, the stub `Providers.Fly` (built with `Providers.Stub`) |
+| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Vast` (with `Client`, `Translate`), `Providers.Shell` (POSIX quoting for the providers' scripts, and the trap that reports a command's exit and deletes its RunPod pod or Vast instance), `Providers.Mock`, the stub `Providers.Fly` (built with `Providers.Stub`) |
 | Specs | `ExAtlas.Spec.*`: `ComputeRequest` (its `container_env/1` is the env every provider sends), `Staging` (the `s3:` option), `Compute`, `Spend`, `Template`, `NetworkVolume`, `Endpoint`, `Job`, `GpuType` and the request structs |
 | Callback | `ExAtlas.Callback`, `Callback.Plug`, `Callback.Token`, `Callback.Limiter` |
 | Auth | `ExAtlas.Auth` (the env and handle for each `auth:` scheme, shared by providers), `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` |
@@ -228,7 +228,8 @@ sequenceDiagram
 
 Vast is a marketplace. `Providers.Vast` searches the on-demand offers and
 rents the cheapest in the first hinted country, trying the next of three
-only when Vast refused the rent. Added in #99.
+only when Vast refused the rent. Added in #99. With `command:` the container
+deletes its own instance when the command ends (#105).
 
 ```mermaid
 sequenceDiagram
@@ -244,7 +245,7 @@ sequenceDiagram
   API-->>V: offers, cheapest first, at most 64
   V->>T: pick(offers, region_hints)
   T-->>V: at most 3, first hinted country else anywhere
-  V->>API: PUT /api/v0/asks/offer_id/ (runtype args, cancel_unavail, env), 429 retried, no redirect
+  V->>API: PUT /api/v0/asks/offer_id/ (runtype args, cancel_unavail, env, args), 429 retried, no redirect
   alt 2xx with new_contract
     API-->>V: new_contract
     V-->>Host: Compute provisioning, cost_per_hour, region
@@ -254,7 +255,11 @@ sequenceDiagram
   else 5xx, timeout or no new_contract: may have rented
     V-->>Host: error, Vast's msg withheld, no retry
   end
-  API->>VH: docker create and start the image
+  API->>VH: docker create and start the image, args to its entrypoint
+  opt command with self_terminate true
+    VH->>VH: sh -c runs the command, trap EXIT INT TERM
+    VH->>API: DELETE /api/v0/instances/CONTAINER_ID/, CONTAINER_API_KEY on curl stdin
+  end
   Host->>V: ExAtlas.get_compute(id)
   V->>API: GET /api/v0/instances/id/
   API-->>V: actual_status, public_ipaddr, ports map, extra_env
@@ -347,8 +352,11 @@ classDiagram
   class Shell["Providers.Shell"] {
     quote_arg(value)
     join(command)
+    start_command(request, delete)
+    delete_request(url, key_var)
   }
   class Vast["Providers.Vast"] {
+    capabilities: raw_tcp, self_terminate
     spawn_compute, get_compute, list_compute
     terminate, list_gpu_types
     stop and start return unsupported
@@ -378,6 +386,7 @@ classDiagram
   VastTranslate ..> Auth
   VastTranslate ..> GpuCatalog
   VastTranslate ..> ComputeRequest
+  VastTranslate ..> Shell
   LambdaLabs --> LambdaClient
   LambdaLabs --> LambdaTranslate
   LambdaLabs --> LambdaFirewall
