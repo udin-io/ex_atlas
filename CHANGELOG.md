@@ -25,6 +25,16 @@ Tracking records and tracker crash reports drop `s3:`, and
 `persist: true` with `s3:` is refused until slice 4 (#74). A provider builds its
 container env from the new `ComputeRequest.container_env/1`.
 
+### Added: a data staging guide and a reference entrypoint (#72, slice 2 of #26)
+
+`guides/data_staging.md` describes the container contract for the variables
+`s3:` sets, the stores (Tigris, R2, MinIO, AWS S3) and what ends a run before
+the upload. `guides/scripts/atlas_entrypoint.sh` pulls `ATLAS_DATASET_URI`,
+runs your trainer with its output copied to a log, and on exit, `INT` or `TERM`
+uploads the artifact directory and `atlas.log` to `ATLAS_ARTIFACT_URI`. The
+exit code is the trainer's. A failed upload is printed and changes no exit
+code. Its tests run it with a stub `aws`.
+
 ### Fixed: secrets in `inspect/1` and in `env:` errors (#71)
 
 - `inspect/1` of an `ExAtlas.Spec.Compute` no longer prints `:raw`. RunPod's
