@@ -1,7 +1,7 @@
 # Architecture
 
-This page maps ExAtlas's modules and processes as they exist on the branch of
-PR #70, read from `lib/`. It exists so a new reader finds the orchestrator's
+This page maps ExAtlas's modules and processes as they exist on main after
+PR #102, read from `lib/`. It exists so a new reader finds the orchestrator's
 parts and their start order without reading 3,000 lines. The library has no
 database and no web UI. It runs inside the host application's VM.
 
@@ -12,6 +12,8 @@ database and no web UI. It runs inside the host application's VM.
 | Host Phoenix app | Calls `ExAtlas` and `ExAtlas.Orchestrator`; subscribes to `ExAtlas.PubSub` topics `"compute:<id>"` |
 | RunPod | HTTPS through `Req` (`ExAtlas.Providers.RunPod.Client`): pods, catalog, billing, templates, volumes, endpoints, jobs |
 | Lambda Cloud API v1 | HTTPS through `Req` (`ExAtlas.Providers.LambdaLabs.Client`): instance types, firewall rulesets, launch, get, list, terminate |
+| Vast.ai API | HTTPS through `Req` (`ExAtlas.Providers.Vast.Client`): offer search, rent, get, list (v1, paged by `next_token`), destroy |
+| A Vast instance | A marketplace host runs the image as a Docker container with its own entrypoint; Vast maps each container port to a random host port |
 | A Lambda instance | cloud-init runs the `user_data` script ExAtlas wrote; it starts the container with `docker run`. With a callback, a `systemd-run` unit POSTs the container's exit code to `Callback.Plug` |
 | A running pod | POSTs to the host through `ExAtlas.Callback.Plug` (progress, logs, finish) |
 | Fly.io | `ExAtlas.Fly.*`: deploys, log streams, tokens |
@@ -23,7 +25,7 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Facade | `ExAtlas` (`dispatch/3`, `dispatch_optional/3`), `ExAtlas.Config` (its `seal_credentials/1` wraps credentials), `ExAtlas.Secret`, `ExAtlas.Error` |
 | Contract | `ExAtlas.Provider` (behaviour, optional callbacks) |
-| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Shell` (POSIX quoting for both providers' scripts), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast` (built with `Providers.Stub`) |
+| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Vast` (with `Client`, `Translate`), `Providers.Shell` (POSIX quoting for both providers' scripts), `Providers.Mock`, the stub `Providers.Fly` (built with `Providers.Stub`) |
 | Specs | `ExAtlas.Spec.*`: `ComputeRequest` (its `container_env/1` is the env every provider sends), `Staging` (the `s3:` option), `Compute`, `Spend`, `Template`, `NetworkVolume`, `Endpoint`, `Job`, `GpuType` and the request structs |
 | Callback | `ExAtlas.Callback`, `Callback.Plug`, `Callback.Token`, `Callback.Limiter` |
 | Auth | `ExAtlas.Auth` (the env and handle for each `auth:` scheme, shared by providers), `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` |
@@ -215,6 +217,45 @@ sequenceDiagram
   FW->>L: DELETE /firewall-rulesets/id (the in-use refusal is ignored)
 ```
 
+## A Vast.ai spawn
+
+Vast is a marketplace. `Providers.Vast` searches the on-demand offers and
+rents the cheapest in the first hinted country, trying the next of three
+only when Vast refused the rent. Added in #99.
+
+```mermaid
+sequenceDiagram
+  participant Host as Host app
+  participant V as Providers.Vast
+  participant T as Vast.Translate
+  participant API as console.vast.ai
+  participant VH as Vast host, Docker
+  Host->>V: ExAtlas.spawn_compute(provider: :vast, gpu:, image:, env:, ports:)
+  V->>T: launch_parts(request)
+  T-->>V: env object, values as Secrets, -p flags, ATLAS_PORTS, auth handle
+  V->>API: POST /api/v0/bundles/ (gpu_name in names, num_gpus, disk, ports, ondemand)
+  API-->>V: offers, cheapest first, at most 64
+  V->>T: pick(offers, region_hints)
+  T-->>V: at most 3, first hinted country else anywhere
+  V->>API: PUT /api/v0/asks/offer_id/ (runtype args, cancel_unavail, env), 429 retried, no redirect
+  alt 2xx with new_contract
+    API-->>V: new_contract
+    V-->>Host: Compute provisioning, cost_per_hour, region
+  else 4xx other than 401, 403, 408, 429: nothing rented
+    API-->>V: error code
+    V->>API: PUT the next offer
+  else 5xx, timeout or no new_contract: may have rented
+    V-->>Host: error, Vast's msg withheld, no retry
+  end
+  API->>VH: docker create and start the image
+  Host->>V: ExAtlas.get_compute(id)
+  V->>API: GET /api/v0/instances/id/
+  API-->>V: actual_status, public_ipaddr, ports map, extra_env
+  V-->>Host: Compute running, http://ip:host_port, raw from an allow-list
+  Host->>V: ExAtlas.terminate(id)
+  V->>API: DELETE /api/v0/instances/id/
+```
+
 ## A Lambda task, ended by the host's report
 
 A Lambda instance holds no key that can delete it. With `command:` and a
@@ -300,9 +341,36 @@ classDiagram
     quote_arg(value)
     join(command)
   }
+  class Vast["Providers.Vast"] {
+    spawn_compute, get_compute, list_compute
+    terminate, list_gpu_types
+    stop and start return unsupported
+  }
+  class VastClient["Vast.Client"] {
+    get(ctx, path)
+    post(ctx, path, body, opts)
+    put(ctx, path, body, opts)
+    delete(ctx, path)
+    list_instances(ctx)
+  }
+  class VastTranslate["Vast.Translate"] {
+    launch_parts(request)
+    offer_query(request)
+    pick(offers, region_hints)
+    launch_body(request, parts)
+    launched_compute(id, request, parts, offer)
+    instance_to_compute(instance)
+    gpu_types(offers_by_gpu)
+  }
   class RunPodTranslate["RunPod.Translate"]
   RunPodClient ..> HTTP
   LambdaClient ..> HTTP
+  VastClient ..> HTTP
+  Vast --> VastClient
+  Vast --> VastTranslate
+  VastTranslate ..> Auth
+  VastTranslate ..> GpuCatalog
+  VastTranslate ..> ComputeRequest
   LambdaLabs --> LambdaClient
   LambdaLabs --> LambdaTranslate
   LambdaLabs --> LambdaFirewall

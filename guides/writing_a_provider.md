@@ -207,5 +207,8 @@ resource.
 - `ExAtlas.Providers.LambdaLabs` (+ `LambdaLabs.Translate`, `LambdaLabs.Client`)
   — a provider whose cloud rents VMs: it runs the container through cloud-init
   `user_data` and rebuilds the `Compute` from instance tags.
-- `ExAtlas.Providers.Stub` — the macro used by the Fly and Vast placeholders
-  to reserve names before their real implementations land.
+- `ExAtlas.Providers.Vast` (+ `Vast.Translate`, `Vast.Client`) — a
+  marketplace provider: a spawn searches offers and rents the cheapest, and
+  a refused rent tries the next one.
+- `ExAtlas.Providers.Stub` — the macro used by the Fly placeholder to reserve
+  its name before a real implementation lands.

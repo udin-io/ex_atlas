@@ -67,6 +67,16 @@ defmodule ExAtlas.Providers.HTTP do
     end
   end
 
+  # Req's JSON decoder fails with the whole body in `data`, and a body can
+  # echo the request. The error keeps neither.
+  def handle_response({:error, %Jason.DecodeError{}}, _expected, provider) do
+    {:error,
+     ExAtlas.Error.new(:provider,
+       provider: provider,
+       message: "the response body is not valid JSON; ExAtlas withholds it"
+     )}
+  end
+
   def handle_response({:error, %{__exception__: true} = exception}, _expected, provider) do
     {:error,
      ExAtlas.Error.new(:transport,

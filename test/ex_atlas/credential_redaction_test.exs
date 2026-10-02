@@ -304,6 +304,138 @@ defmodule ExAtlas.CredentialRedactionTest do
     end
   end
 
+  # Vast's refused rent carries a `msg` that can echo the request. Every path
+  # a spawn prints through: the error, its message, telemetry and Req's log.
+  describe "the Vast provider" do
+    @env_value "hf-vast-redaction-probe-81b2"
+
+    setup do
+      bypass = Bypass.open()
+      test_pid = self()
+      handler = "vast-redaction-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ex_atlas, :vast, :request],
+        &__MODULE__.forward_event/4,
+        test_pid
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      Bypass.stub(bypass, "POST", "/api/v0/bundles", fn conn ->
+        ExAtlas.Test.FakeVast.json(conn, 200, %{"offers" => [ExAtlas.Test.FakeVast.offer()]})
+      end)
+
+      opts = [
+        provider: :vast,
+        api_key: @key,
+        base_url: "http://localhost:#{bypass.port}",
+        gpu: :rtx_4090,
+        image: "nginx",
+        env: %{"HF_TOKEN" => @env_value}
+      ]
+
+      {:ok, bypass: bypass, opts: opts}
+    end
+
+    def forward_event(event, measurements, meta, pid), do: send(pid, {event, measurements, meta})
+
+    # The server answers with Vast's error shape, echoing the env value and
+    # the key, and tells the test what it received.
+    defp answer_rent(bypass, status) do
+      test_pid = self()
+
+      Bypass.expect(bypass, "PUT", "/api/v0/asks/:id", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:rent_body, raw, Plug.Conn.get_req_header(conn, "authorization")})
+
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "0")
+        |> ExAtlas.Test.FakeVast.json(status, %{
+          "success" => false,
+          "error" => "invalid_args",
+          "msg" => "bad env HF_TOKEN=#{@env_value} for key #{@key}"
+        })
+      end)
+    end
+
+    for status <- [400, 429, 500] do
+      test "a rent answered #{status} prints no env value or key in the error, telemetry or log",
+           %{bypass: bypass, opts: opts} do
+        answer_rent(bypass, unquote(status))
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert {:error, %ExAtlas.Error{} = error} = ExAtlas.spawn_compute(opts)
+            send(self(), {:error, error})
+          end)
+
+        assert_received {:error, error}
+
+        # Control: the value and the key reached Vast, so the refutes below
+        # are not vacuous.
+        assert_received {:rent_body, raw, ["Bearer " <> @key]}
+        assert raw =~ @env_value
+
+        for text <- [inspect(error), Exception.message(error), inspect(error, structs: false)] do
+          refute text =~ @env_value
+          refute text =~ @key
+        end
+
+        assert_received {[:ex_atlas, :vast, :request], %{status: 200}, search_meta}
+        assert_received {[:ex_atlas, :vast, :request], %{status: unquote(status)}, rent_meta}
+
+        for meta <- [search_meta, rent_meta] do
+          refute inspect(meta) =~ @env_value
+          refute inspect(meta) =~ @key
+        end
+
+        refute log =~ @env_value
+        refute log =~ @key
+      end
+    end
+
+    test "control: a 429 logs Req's retry line, so the log refute reads a real log", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      answer_rent(bypass, 429)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> ExAtlas.spawn_compute(opts) end)
+
+      assert log =~ "retry"
+    end
+
+    test "a rent that times out prints no env value or key", %{opts: opts} do
+      test_pid = self()
+
+      plug = fn conn ->
+        case conn.method do
+          "POST" ->
+            ExAtlas.Test.FakeVast.json(conn, 200, %{"offers" => [ExAtlas.Test.FakeVast.offer()]})
+
+          "PUT" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:rent_body, raw})
+            Req.Test.transport_error(conn, :timeout)
+        end
+      end
+
+      assert {:error, %ExAtlas.Error{kind: :transport} = error} =
+               ExAtlas.spawn_compute(Keyword.put(opts, :req_options, plug: plug))
+
+      # Control: the value went out in the rent, so the refutes are not vacuous.
+      assert_received {:rent_body, raw}
+      assert raw =~ @env_value
+
+      for text <- [inspect(error), Exception.message(error), inspect(error, structs: false)] do
+        refute text =~ @env_value
+        refute text =~ @key
+      end
+    end
+  end
+
   test "inspect/1 of a Compute prints no auth token" do
     compute = %ExAtlas.Spec.Compute{
       id: "pod-1",
