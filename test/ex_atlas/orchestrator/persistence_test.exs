@@ -81,6 +81,61 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       refute no_budget =~ "cannot respawn after a restart"
     end
 
+    # Issue 138: an unsigned record adopts only a pod this node's Reaper would
+    # delete, so a restart leaves this one untracked.
+    test "with no callback secret and a name outside the prefix, warns that a restart will not adopt it" do
+      Application.put_env(:ex_atlas, :callback, [])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _pid, _compute} = Orchestrator.spawn(task_opts(name: "trainer"))
+        end)
+
+      assert log =~ ~s("trainer" will not be adopted after a restart)
+      assert log =~ "config :ex_atlas, :callback, secret:"
+    end
+
+    test "with no callback secret and no name, it warns too" do
+      Application.put_env(:ex_atlas, :callback, [])
+      ExAtlas.Test.Orchestrator.put_env(reap_owner: "m1")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _, _} = Orchestrator.spawn(Keyword.delete(task_opts(), :name))
+        end)
+
+      assert log =~ "nil will not be adopted after a restart"
+    end
+
+    test "control: a prefixed name, a callback secret, or no persist does not warn that" do
+      Application.put_env(:ex_atlas, :callback, [])
+
+      prefixed =
+        ExUnit.CaptureLog.capture_log(fn -> {:ok, _, _} = Orchestrator.spawn(task_opts()) end)
+
+      ExAtlas.Test.Orchestrator.put_env(reap_owner: "m1")
+
+      stamped =
+        ExUnit.CaptureLog.capture_log(fn -> {:ok, _, _} = Orchestrator.spawn(task_opts()) end)
+
+      not_persisted =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _, _} = Orchestrator.spawn(task_opts(name: "trainer", persist: false))
+        end)
+
+      Application.put_env(:ex_atlas, :callback,
+        secret: ExAtlas.Test.Orchestrator.callback_secret()
+      )
+
+      signed =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _, _} = Orchestrator.spawn(task_opts(name: "trainer"))
+        end)
+
+      for log <- [prefixed, stamped, not_persisted, signed],
+          do: refute(log =~ "will not be adopted after a restart")
+    end
+
     test "writes a record holding what it takes to rebuild the tracker" do
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 
