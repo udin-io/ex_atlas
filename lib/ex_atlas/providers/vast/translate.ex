@@ -83,6 +83,15 @@ defmodule ExAtlas.Providers.Vast.Translate do
     end
   end
 
+  @doc """
+  The offer search body that finds the cheapest offers of `canonical`, for
+  `list_gpu_types/1`.
+  """
+  @spec gpu_type_query(atom()) :: {:ok, map()} | {:error, Error.t()}
+  def gpu_type_query(canonical) do
+    with {:ok, query} <- gpu_query(canonical), do: {:ok, Map.merge(query, base_query())}
+  end
+
   defp base_query do
     %{
       "verified" => %{"eq" => true},
@@ -193,6 +202,38 @@ defmodule ExAtlas.Providers.Vast.Translate do
       created_at: started_at(instance["start_date"]),
       raw: Map.drop(instance, ["extra_env", "onstart", "jupyter_token"])
     }
+  end
+
+  @doc """
+  Turn offers into `ExAtlas.Spec.GpuType`s: one per Vast GPU name, or per
+  name and memory class where the catalog splits a name by `gpu_ram` (the
+  A100), each at its lowest on-demand price.
+  """
+  @spec gpu_types([{atom(), [map()]}]) :: [Spec.GpuType.t()]
+  def gpu_types(offers_by_gpu) do
+    offers_by_gpu
+    |> Enum.flat_map(fn {canonical, offers} ->
+      offers
+      |> Enum.filter(&(is_map(&1) and is_binary(&1["gpu_name"])))
+      |> Enum.map(&{canonical, &1})
+    end)
+    |> Enum.group_by(fn {canonical, offer} -> {offer["gpu_name"], canonical} end)
+    |> Enum.map(fn {{name, canonical}, entries} ->
+      cheapest = entries |> Enum.map(&elem(&1, 1)) |> Enum.min_by(&price_key(&1["dph_total"]))
+
+      %Spec.GpuType{
+        id: name,
+        provider: :vast,
+        canonical: canonical,
+        display_name: name,
+        memory_gb: memory_gb(cheapest["gpu_ram"]),
+        lowest_price_per_hour: number_or_nil(cheapest["dph_total"]),
+        stock: :unknown,
+        cloud_type: :any,
+        raw: %{"gpu_name" => name, "dph_total" => cheapest["dph_total"]}
+      }
+    end)
+    |> Enum.sort_by(&{&1.id, &1.memory_gb})
   end
 
   @doc "Whether `gpu_type` is one of `canonical`'s Vast names."
@@ -424,6 +465,10 @@ defmodule ExAtlas.Providers.Vast.Translate do
   end
 
   defp started_at(_epoch), do: nil
+
+  # "A100 SXM4" offers 81920 MB.
+  defp memory_gb(mb) when is_number(mb) and mb > 0, do: round(mb / 1024)
+  defp memory_gb(_mb), do: nil
 
   defp count(n) when is_integer(n) and n > 0, do: n
   defp count(_n), do: nil

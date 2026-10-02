@@ -244,6 +244,95 @@ defmodule ExAtlas.Providers.VastTest do
     end
   end
 
+  describe "list_gpu_types/1" do
+    test "returns one GpuType per Vast name at its lowest on-demand price", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      test_pid = self()
+
+      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+        {query, conn} = read_json(conn)
+        send(test_pid, {:query, query})
+
+        offers =
+          case query["gpu_name"]["in"] do
+            ["RTX 4090"] ->
+              [
+                offer(%{"id" => 1, "dph_total" => 0.51}),
+                offer(%{"id" => 2, "dph_total" => 0.39})
+              ]
+
+            ["H100 SXM" | _] ->
+              [
+                offer(%{
+                  "id" => 3,
+                  "gpu_name" => "H100 SXM",
+                  "gpu_ram" => 81_920,
+                  "dph_total" => 2.1
+                }),
+                offer(%{
+                  "id" => 4,
+                  "gpu_name" => "H100 NVL",
+                  "gpu_ram" => 95_830,
+                  "dph_total" => 2.4
+                })
+              ]
+
+            ["A100 SXM4", "A100 PCIE"] ->
+              ram = query["gpu_ram"]
+              gb = if Map.has_key?(ram, "gte"), do: 81_920, else: 40_960
+
+              [
+                offer(%{
+                  "id" => 5,
+                  "gpu_name" => "A100 SXM4",
+                  "gpu_ram" => gb,
+                  "dph_total" => gb / 100_000
+                })
+              ]
+
+            _ ->
+              []
+          end
+
+        json(conn, 200, %{"offers" => offers})
+      end)
+
+      assert {:ok, types} = ExAtlas.list_gpu_types(opts)
+
+      assert [a100_40, a100_80, h100_nvl, h100_sxm, rtx_4090] = types
+      assert %Spec.GpuType{id: "RTX 4090", canonical: :rtx_4090, provider: :vast} = rtx_4090
+      assert rtx_4090.lowest_price_per_hour == 0.39
+      assert rtx_4090.memory_gb == 24
+      assert %{id: "H100 SXM", canonical: :h100, memory_gb: 80} = h100_sxm
+      assert %{id: "H100 NVL", canonical: :h100, lowest_price_per_hour: 2.4} = h100_nvl
+      assert %{id: "A100 SXM4", canonical: :a100_40g, memory_gb: 40} = a100_40
+      assert %{id: "A100 SXM4", canonical: :a100_80g, memory_gb: 80} = a100_80
+
+      # One on-demand search per catalog GPU.
+      queries =
+        for _ <- Spec.GpuCatalog.supported_gpus(:vast) do
+          assert_received {:query, query}
+          query
+        end
+
+      assert Enum.all?(queries, &(&1["type"] == "ondemand"))
+    end
+
+    test "a failed search fails the call", %{bypass: bypass, opts: opts} do
+      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+        json(conn, 401, %{
+          "success" => false,
+          "error" => "auth_error",
+          "msg" => "Invalid user key"
+        })
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :unauthorized}} = ExAtlas.list_gpu_types(opts)
+    end
+  end
+
   describe "the client" do
     test "every request emits [:ex_atlas, :vast, :request] without the key", %{
       bypass: bypass,

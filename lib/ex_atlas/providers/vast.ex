@@ -98,7 +98,25 @@ defmodule ExAtlas.Providers.Vast do
   def start(_id, _ctx), do: unsupported("Vast start/2 is not in this ExAtlas release")
 
   @impl true
-  def list_gpu_types(_ctx), do: unsupported("Vast list_gpu_types/1 is not built yet")
+  # One search per catalog GPU: Vast returns at most 64 offers a search, so
+  # one search across every GPU would list only the cheapest few.
+  def list_gpu_types(ctx) do
+    :vast
+    |> Spec.GpuCatalog.supported_gpus()
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, []}, fn canonical, {:ok, acc} ->
+      {:ok, query} = Translate.gpu_type_query(canonical)
+
+      case search(ctx, query) do
+        {:ok, offers} -> {:cont, {:ok, [{canonical, offers} | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, found} -> {:ok, Translate.gpu_types(found)}
+      error -> error
+    end
+  end
 
   # --- spawn ---
 
