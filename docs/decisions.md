@@ -165,7 +165,9 @@ names the PR or issue that holds the reasoning.
 | Resolve at respawn, not at adoption | Resolve when adopting: most adopted tasks never respawn | #87 |
 | A callback token signs its pod's attempt; a report from an earlier attempt gets 410 | A new `task_id` per pod: it names the Limiter bucket, the record and `ATLAS_TASK_ID` | #100 |
 | The Registry value holds the current attempt, and the tracker checks a queued report again | A `GenServer.call` from `ingest/3`: delivery must stay a `send` | #100 |
-| A token with no attempt, as 0.8.0 minted it, is accepted unchecked | Read it as attempt 0: a respawned 0.8.0 pod's real report would get 410 | #100 |
+| A token with no attempt, as 0.8.0 minted it, is accepted unchecked | Read it as attempt 0: a respawned 0.8.0 pod's real report would get 410 | #100, replaced by the next two rows |
+| A token with no attempt is accepted only while the tracker's current pod holds such a token too: the Registry value is `:claimless` until the first respawn this version makes | Reject it always (every running 0.8.0 pod loses its reports); accept it for a deprecation window with a warning (leaves the hole open); read it as attempt 0 (refuses a pod 0.8.0 itself respawned) | #110 |
+| A bare `task_id` passed to `ingest/3` stays unchecked, whatever the current pod holds | Refuse it once a pod signs an attempt: it breaks every hand-rolled controller that passes `claims.task_id` | #110 |
 | The resolver returns `s3:` whole; `info.s3` gives the stored parts without the marker | ExAtlas merges keys onto the stored parts: presigned mode stores no URL | #87 |
 | `env:` must cover every stored name and replaces the stored env whole | Run with the names it returns: a container would miss a value it was rented with | #87 |
 | The resolver runs in a task under the poll `Task.Supervisor`, bounded at 30 s; a raise, throw or exit is caught inside it, so no crash report prints its value | Call inline: a hung resolver would hold the tracker forever | #87 |

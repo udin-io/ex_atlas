@@ -161,7 +161,13 @@ sequenceDiagram
   Note over CS: a queued message with attempt 0 is dropped
 ```
 
-A token minted by 0.8.0 has no attempt and goes unchecked (risk 49).
+A token minted by 0.8.0 has no attempt (#110). `ComputeServer` registers
+`:claimless` instead of the attempt while its current pod holds such a token (a
+task adopted from a 0.8.0 record, not respawned since), and `ingest/3` accepts
+a claim-less token only against that value. The first respawn this version makes
+registers the attempt, so the replaced pod's claim-less token gets 410. The
+tracker repeats the test for a claim-less report already in its mailbox. A task
+that 0.8.0 itself respawned keeps two claim-less pods, which risk 49 records.
 
 ## What a cost cap does
 
