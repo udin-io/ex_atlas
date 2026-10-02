@@ -160,14 +160,16 @@ defmodule ExAtlas.Orchestrator.Reaper do
      })}
   end
 
-  # With no tracking store there is nothing to adopt and nothing to wait for,
-  # so the Reaper behaves exactly as it did before adoption existed.
-  #
-  # With one, a Reaper restarted after the Adopter's one signal takes the
-  # outcome its tree recorded. A new tree has a new supervisor pid, so an
-  # outcome from an earlier start of the app never opens its gate.
+  # A Reaper restarted after the Adopter's one signal takes the outcome its
+  # tree recorded, even when the store was switched off since. A new tree has
+  # a new supervisor pid, so an outcome from an earlier start of the app never
+  # opens its gate. With no record and no store there is nothing to wait for.
   defp initial_adoption do
-    if TrackingStore.impl(), do: recorded_adoption() || :pending, else: :settled
+    cond do
+      recorded = recorded_adoption() -> recorded
+      TrackingStore.impl() -> :pending
+      true -> :settled
+    end
   end
 
   @adoption_key {__MODULE__, :adoption}

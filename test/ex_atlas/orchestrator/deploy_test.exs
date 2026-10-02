@@ -284,15 +284,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
 
   describe "a Reaper that restarts after a failed adoption" do
     test "stays disabled for the boot and says so" do
-      Application.put_env(
-        :ex_atlas,
-        :orchestrator,
-        Keyword.put(
-          Application.get_env(:ex_atlas, :orchestrator),
-          :tracking_store,
-          ExAtlas.Test.TrackingStore.Raising
-        )
-      )
+      put_orchestrator_env(tracking_store: ExAtlas.Test.TrackingStore.Raising)
 
       sup = boot()
       {:ok, orphan} = spawn_orphan()
@@ -306,6 +298,25 @@ defmodule ExAtlas.Orchestrator.DeployTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
       assert log =~ "reaping is DISABLED for this boot"
     end
+
+    test "stays disabled when the store is switched off before it restarts" do
+      put_orchestrator_env(tracking_store: ExAtlas.Test.TrackingStore.Raising)
+      sup = boot()
+      {:ok, orphan} = spawn_orphan()
+
+      # With no store a fresh Reaper reaps at once; this boot's failed
+      # adoption still says this node cannot tell its pods from orphans.
+      put_orchestrator_env(tracking_store: false)
+      crash_reaper(sup)
+      tick()
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+    end
+  end
+
+  defp put_orchestrator_env(overrides) do
+    env = Keyword.merge(Application.get_env(:ex_atlas, :orchestrator), overrides)
+    Application.put_env(:ex_atlas, :orchestrator, env)
   end
 
   defp spawn_orphan do
