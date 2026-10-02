@@ -64,6 +64,9 @@ defmodule ExAtlas.Providers.Vast do
 
   @bundles "/api/v0/bundles/"
 
+  # Searches in flight at once in `list_gpu_types/1`.
+  @search_concurrency 4
+
   @impl true
   def capabilities, do: [:raw_tcp, :self_terminate, :spot]
 
@@ -123,27 +126,40 @@ defmodule ExAtlas.Providers.Vast do
   def start(_id, _ctx), do: unsupported("Vast start/2 is not in this ExAtlas release")
 
   @impl true
-  # Two searches per catalog GPU, on-demand and interruptible: Vast returns at
-  # most 64 offers a search, so one search across every GPU would list only
-  # the cheapest few.
+  # Two searches per catalog GPU, on-demand and interruptible, four at a
+  # time: Vast returns at most 64 offers a search, so one search across every
+  # GPU would list only the cheapest few. A failed on-demand search fails the
+  # call; a failed bid search leaves that GPU without a spot price.
   def list_gpu_types(ctx) do
-    with {:ok, on_demand} <- search_each_gpu(ctx, :ondemand),
-         {:ok, bid} <- search_each_gpu(ctx, :bid) do
+    searches =
+      for canonical <- :vast |> Spec.GpuCatalog.supported_gpus() |> Enum.sort(),
+          type <- [:ondemand, :bid],
+          do: {canonical, type}
+
+    results =
+      searches
+      |> Task.async_stream(&gpu_search(ctx, &1),
+        max_concurrency: @search_concurrency,
+        timeout: :infinity
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    with {:ok, on_demand} <- found(results, :ondemand, :fail) do
+      {:ok, bid} = found(results, :bid, :skip)
       {:ok, Translate.gpu_types(on_demand, bid)}
     end
   end
 
-  defp search_each_gpu(ctx, type) do
-    :vast
-    |> Spec.GpuCatalog.supported_gpus()
-    |> Enum.sort()
-    |> Enum.reduce_while({:ok, []}, fn canonical, {:ok, acc} ->
-      {:ok, query} = Translate.gpu_type_query(canonical, type)
+  defp gpu_search(ctx, {canonical, type}) do
+    {:ok, query} = Translate.gpu_type_query(canonical, type)
+    {type, canonical, search(ctx, query)}
+  end
 
-      case search(ctx, query) do
-        {:ok, offers} -> {:cont, {:ok, [{canonical, offers} | acc]}}
-        {:error, _} = err -> {:halt, err}
-      end
+  defp found(results, type, on_error) do
+    Enum.reduce_while(results, {:ok, []}, fn
+      {^type, canonical, {:ok, offers}}, {:ok, acc} -> {:cont, {:ok, [{canonical, offers} | acc]}}
+      {^type, _canonical, {:error, _} = err}, _acc when on_error == :fail -> {:halt, err}
+      _other, acc -> {:cont, acc}
     end)
   end
 

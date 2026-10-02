@@ -258,38 +258,40 @@ defmodule ExAtlas.Providers.Vast.Translate do
   @doc """
   Turn offers into `ExAtlas.Spec.GpuType`s: one per Vast GPU name, or per
   name and memory class where the catalog splits a name by `gpu_ram` (the
-  A100), each at its lowest on-demand price. `spot_price_per_hour` is the
-  lowest `min_bid` among `bid_offers_by_gpu`, the interruptible search of
-  the same GPUs, or `nil` when none has one.
+  A100). `lowest_price_per_hour` is the lowest on-demand `dph_total`, `nil`
+  for a GPU only `bid_offers_by_gpu` lists. `spot_price_per_hour` is the
+  lowest `dph_total` among that interruptible search's offers with a
+  `min_bid`: the bid plus the disk's storage, what a rent bills. It is `nil`
+  when none has one.
   """
   @spec gpu_types([{atom(), [map()]}], [{atom(), [map()]}]) :: [Spec.GpuType.t()]
-  def gpu_types(offers_by_gpu, bid_offers_by_gpu \\ []) do
-    spot_prices =
+  def gpu_types(offers_by_gpu, bid_offers_by_gpu) do
+    on_demand = group_by_gpu(offers_by_gpu)
+
+    bid =
       bid_offers_by_gpu
       |> group_by_gpu()
-      |> Map.new(fn {key, entries} ->
-        bids =
-          for {_canonical, %{"min_bid" => bid}} <- entries, is_number(bid) and bid > 0, do: bid
+      |> Map.new(fn {key, offers} -> {key, Enum.filter(offers, &biddable?(&1, true))} end)
 
-        {key, if(bids != [], do: Enum.min(bids))}
-      end)
-
-    offers_by_gpu
-    |> group_by_gpu()
-    |> Enum.map(fn {{name, canonical} = key, entries} ->
-      cheapest = entries |> Enum.map(&elem(&1, 1)) |> Enum.min_by(&price_key(&1["dph_total"]))
+    on_demand
+    |> Map.keys()
+    |> Enum.concat(Map.keys(bid))
+    |> Enum.uniq()
+    |> Enum.map(fn {name, canonical} = key ->
+      demand = cheapest(on_demand[key])
+      spot = cheapest(bid[key])
 
       %Spec.GpuType{
         id: name,
         provider: :vast,
         canonical: canonical,
         display_name: name,
-        memory_gb: memory_gb(cheapest["gpu_ram"]),
-        lowest_price_per_hour: number_or_nil(cheapest["dph_total"]),
-        spot_price_per_hour: spot_prices[key],
+        memory_gb: memory_gb((demand || spot)["gpu_ram"]),
+        lowest_price_per_hour: demand && number_or_nil(demand["dph_total"]),
+        spot_price_per_hour: spot && cost_per_hour(spot, true),
         stock: :unknown,
         cloud_type: :any,
-        raw: %{"gpu_name" => name, "dph_total" => cheapest["dph_total"]}
+        raw: %{"gpu_name" => name, "dph_total" => demand && demand["dph_total"]}
       }
     end)
     |> Enum.sort_by(&{&1.id, &1.memory_gb})
@@ -298,12 +300,17 @@ defmodule ExAtlas.Providers.Vast.Translate do
   defp group_by_gpu(offers_by_gpu) do
     offers_by_gpu
     |> Enum.flat_map(fn {canonical, offers} ->
-      offers
-      |> Enum.filter(&(is_map(&1) and is_binary(&1["gpu_name"])))
-      |> Enum.map(&{canonical, &1})
+      for offer <- offers,
+          is_map(offer),
+          is_binary(offer["gpu_name"]),
+          do: {{offer["gpu_name"], canonical}, offer}
     end)
-    |> Enum.group_by(fn {canonical, offer} -> {offer["gpu_name"], canonical} end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
   end
+
+  defp cheapest(nil), do: nil
+  defp cheapest([]), do: nil
+  defp cheapest(offers), do: Enum.min_by(offers, &price_key(&1["dph_total"]))
 
   @doc """
   Whether `compute` runs one of `canonical`'s Vast names, with the GPU
