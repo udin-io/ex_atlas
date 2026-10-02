@@ -63,13 +63,36 @@ defmodule ExAtlas.Config do
   carries `opts` prints them.
 
   `ExAtlas.Orchestrator.spawn/1` runs this before anything else reads its
-  opts; `build_ctx/2` runs it for every provider call.
+  opts; `build_ctx/2` runs it for every provider call. An `:api_key` that is
+  not a string, or an `ExAtlas.Secret` of one, is an error with `key: :api_key`
+  and `value: nil`, so no message prints it.
   """
-  @spec seal_credentials(opts()) :: {:ok, opts()}
+  @spec seal_credentials(opts()) :: {:ok, opts()} | {:error, NimbleOptions.ValidationError.t()}
   def seal_credentials(opts) do
     case Keyword.fetch(opts, :api_key) do
-      :error -> {:ok, opts}
-      {:ok, key} -> {:ok, Keyword.put(opts, :api_key, Secret.wrap(key))}
+      :error ->
+        {:ok, opts}
+
+      {:ok, key} ->
+        with {:ok, secret} <- seal_api_key(key), do: {:ok, Keyword.put(opts, :api_key, secret)}
+    end
+  end
+
+  defp seal_api_key(key) do
+    secret = Secret.wrap(key)
+
+    case Secret.reveal(secret) do
+      value when is_binary(value) or is_nil(value) ->
+        {:ok, secret}
+
+      _other ->
+        {:error,
+         %NimbleOptions.ValidationError{
+           key: :api_key,
+           value: nil,
+           message:
+             "invalid value for :api_key option: expected a string or an ExAtlas.Secret of one"
+         }}
     end
   end
 
@@ -109,7 +132,9 @@ defmodule ExAtlas.Config do
   """
   @spec build_ctx(atom() | module(), opts()) :: ExAtlas.Provider.ctx()
   def build_ctx(provider, opts) do
-    {:ok, opts} = seal_credentials(opts)
+    opts = ok!(seal_credentials(opts))
+    # A key from app config or the environment gets the same check.
+    api_key = ok!(provider |> resolve_api_key(opts) |> seal_api_key())
 
     opts
     |> Keyword.drop(@resolved_opts)
@@ -119,11 +144,14 @@ defmodule ExAtlas.Config do
     |> Map.new()
     |> Map.merge(%{
       provider: provider,
-      api_key: provider |> resolve_api_key(opts) |> Secret.wrap(),
+      api_key: api_key,
       base_url: Keyword.get(opts, :base_url),
       req_options: Keyword.get(opts, :req_options, [])
     })
   end
+
+  defp ok!({:ok, value}), do: value
+  defp ok!({:error, error}), do: raise(error)
 
   @doc "Resolve the module that implements `ExAtlas.Provider` for a given provider atom."
   @spec provider_module(atom() | module()) :: module()

@@ -78,4 +78,43 @@ defmodule ExAtlas.CredentialRedactionTest do
       assert reveal(ctx.api_key) == @key
     end
   end
+
+  describe "an api_key that is not a string" do
+    test "is refused by name before any provider call, and never printed" do
+      charlist = ~c"sk-charlist-probe-41b0"
+
+      text =
+        crash_text(fn -> ExAtlas.get_compute("pod-1", provider: :runpod, api_key: charlist) end)
+
+      assert text =~ "NimbleOptions.ValidationError"
+      assert text =~ ":api_key"
+      refute text =~ "sk-charlist-probe-41b0"
+    end
+
+    test "is refused from application config too" do
+      Application.put_env(:ex_atlas, ClauseProvider, api_key: ~c"sk-charlist-probe-41b0")
+
+      text = crash_text(fn -> ExAtlas.get_compute("pod-1", provider: ClauseProvider) end)
+
+      assert text =~ ":api_key"
+      refute text =~ "sk-charlist-probe-41b0"
+    end
+
+    test "is an error from Orchestrator.spawn/1, before the provider is called" do
+      ExAtlas.Test.Orchestrator.start!()
+
+      assert {:error, %NimbleOptions.ValidationError{key: :api_key, value: nil} = error} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x-api-key-invalid",
+                 api_key: ~c"sk-charlist-probe-41b0"
+               )
+
+      refute inspect(error) =~ "sk-charlist-probe-41b0"
+      refute Exception.message(error) =~ "sk-charlist-probe-41b0"
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      refute Enum.any?(computes, &(&1.image == "x-api-key-invalid"))
+    end
+  end
 end
