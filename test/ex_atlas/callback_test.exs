@@ -164,6 +164,16 @@ defmodule ExAtlas.CallbackTest do
       assert again[:callback] == first[:callback]
     end
 
+    test "a prepared descriptor with no attempt, as 0.8.0 built it, starts at attempt 0" do
+      {:ok, first} = Callback.prepare(callback: "https://app.example.com/cb")
+      built_by_0_8_0 = Keyword.update!(first, :callback, &Map.delete(&1, :attempt))
+
+      {:ok, again} = Callback.prepare(built_by_0_8_0)
+
+      assert {:ok, %{attempt: 0}} =
+               Callback.verify(Callback.env(again[:callback])["ATLAS_CALLBACK_TOKEN"])
+    end
+
     test "the token expires with the work, not long after it" do
       {:ok, opts} =
         Callback.prepare(callback: "https://app.example.com/cb", max_runtime_ms: 60_000)
