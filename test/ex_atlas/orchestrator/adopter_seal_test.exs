@@ -201,6 +201,31 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
 
       assert_respawn_refused(id, "trainer-signed:latest")
     end
+
+    # The tracker rents from the opts it checked at adoption, but its record
+    # writes start from what the store holds then. An edit made after the
+    # check must not come back signed.
+    test "edited in the store after adoption, is not re-signed by the respawn", %{
+      tmp_dir: dir
+    } do
+      store = start_ecto!(dir)
+      %{id: id} = orphaned_task()
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      {:ok, record} = store.get(id)
+      put_row!(put_in(record.opts[:image], "attacker/miner:latest"))
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      # Control: the rent used the opts checked at adoption.
+      assert "trainer-signed:latest" in images()
+      refute "attacker/miner:latest" in images()
+      assert {:ok, replacement} = store.get(new_id)
+      refute TrackingStore.sealed?(replacement)
+    end
   end
 
   describe "a record from 0.8.0, with no signature" do
