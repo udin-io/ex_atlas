@@ -119,6 +119,15 @@ defmodule ExAtlas.Providers.HTTPTest do
     test "a wrapped errors list drops the rejected value too" do
       body = %{"error" => %{"errors" => [%{"message" => "bad", "value" => @secret}]}}
       assert error_raw(body, 422) == %{"error" => %{"errors" => [%{"message" => "bad"}]}}
+
+      cause = %{"errors" => [%{"message" => "m", "value" => @secret}]}
+      body = %{"errors" => [%{"message" => "bad", "cause" => cause}]}
+
+      assert error_raw(body, 422) == %{
+               "errors" => [
+                 %{"message" => "bad", "cause" => %{"errors" => [%{"message" => "m"}]}}
+               ]
+             }
     end
 
     test "a body with both a string and an atom errors list drops value from each" do
