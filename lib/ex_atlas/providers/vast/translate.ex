@@ -254,18 +254,25 @@ defmodule ExAtlas.Providers.Vast.Translate do
   @doc """
   Turn offers into `ExAtlas.Spec.GpuType`s: one per Vast GPU name, or per
   name and memory class where the catalog splits a name by `gpu_ram` (the
-  A100), each at its lowest on-demand price.
+  A100), each at its lowest on-demand price. `spot_price_per_hour` is the
+  lowest `min_bid` among `bid_offers_by_gpu`, the interruptible search of
+  the same GPUs, or `nil` when none has one.
   """
-  @spec gpu_types([{atom(), [map()]}]) :: [Spec.GpuType.t()]
-  def gpu_types(offers_by_gpu) do
+  @spec gpu_types([{atom(), [map()]}], [{atom(), [map()]}]) :: [Spec.GpuType.t()]
+  def gpu_types(offers_by_gpu, bid_offers_by_gpu \\ []) do
+    spot_prices =
+      bid_offers_by_gpu
+      |> group_by_gpu()
+      |> Map.new(fn {key, entries} ->
+        bids =
+          for {_canonical, %{"min_bid" => bid}} <- entries, is_number(bid) and bid > 0, do: bid
+
+        {key, if(bids != [], do: Enum.min(bids))}
+      end)
+
     offers_by_gpu
-    |> Enum.flat_map(fn {canonical, offers} ->
-      offers
-      |> Enum.filter(&(is_map(&1) and is_binary(&1["gpu_name"])))
-      |> Enum.map(&{canonical, &1})
-    end)
-    |> Enum.group_by(fn {canonical, offer} -> {offer["gpu_name"], canonical} end)
-    |> Enum.map(fn {{name, canonical}, entries} ->
+    |> group_by_gpu()
+    |> Enum.map(fn {{name, canonical} = key, entries} ->
       cheapest = entries |> Enum.map(&elem(&1, 1)) |> Enum.min_by(&price_key(&1["dph_total"]))
 
       %Spec.GpuType{
@@ -275,12 +282,23 @@ defmodule ExAtlas.Providers.Vast.Translate do
         display_name: name,
         memory_gb: memory_gb(cheapest["gpu_ram"]),
         lowest_price_per_hour: number_or_nil(cheapest["dph_total"]),
+        spot_price_per_hour: spot_prices[key],
         stock: :unknown,
         cloud_type: :any,
         raw: %{"gpu_name" => name, "dph_total" => cheapest["dph_total"]}
       }
     end)
     |> Enum.sort_by(&{&1.id, &1.memory_gb})
+  end
+
+  defp group_by_gpu(offers_by_gpu) do
+    offers_by_gpu
+    |> Enum.flat_map(fn {canonical, offers} ->
+      offers
+      |> Enum.filter(&(is_map(&1) and is_binary(&1["gpu_name"])))
+      |> Enum.map(&{canonical, &1})
+    end)
+    |> Enum.group_by(fn {canonical, offer} -> {offer["gpu_name"], canonical} end)
   end
 
   @doc """

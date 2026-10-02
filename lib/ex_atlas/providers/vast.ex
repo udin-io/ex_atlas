@@ -121,24 +121,28 @@ defmodule ExAtlas.Providers.Vast do
   def start(_id, _ctx), do: unsupported("Vast start/2 is not in this ExAtlas release")
 
   @impl true
-  # One search per catalog GPU: Vast returns at most 64 offers a search, so
-  # one search across every GPU would list only the cheapest few.
+  # Two searches per catalog GPU, on-demand and interruptible: Vast returns at
+  # most 64 offers a search, so one search across every GPU would list only
+  # the cheapest few.
   def list_gpu_types(ctx) do
+    with {:ok, on_demand} <- search_each_gpu(ctx, :ondemand),
+         {:ok, bid} <- search_each_gpu(ctx, :bid) do
+      {:ok, Translate.gpu_types(on_demand, bid)}
+    end
+  end
+
+  defp search_each_gpu(ctx, type) do
     :vast
     |> Spec.GpuCatalog.supported_gpus()
     |> Enum.sort()
     |> Enum.reduce_while({:ok, []}, fn canonical, {:ok, acc} ->
-      {:ok, query} = Translate.gpu_type_query(canonical)
+      {:ok, query} = Translate.gpu_type_query(canonical, type)
 
       case search(ctx, query) do
         {:ok, offers} -> {:cont, {:ok, [{canonical, offers} | acc]}}
         {:error, _} = err -> {:halt, err}
       end
     end)
-    |> case do
-      {:ok, found} -> {:ok, Translate.gpu_types(found)}
-      error -> error
-    end
   end
 
   # --- spawn ---

@@ -285,7 +285,7 @@ defmodule ExAtlas.Providers.VastTest do
   end
 
   describe "list_gpu_types/1" do
-    test "returns one GpuType per Vast name at its lowest on-demand price", %{
+    test "returns one GpuType per Vast name at its lowest on-demand and bid prices", %{
       bypass: bypass,
       opts: opts
     } do
@@ -336,6 +336,17 @@ defmodule ExAtlas.Providers.VastTest do
               []
           end
 
+        # A bid search answers with the same offers, each with a min_bid at a
+        # third of its on-demand price; the H100 NVL has none.
+        offers =
+          if query["type"] == "bid" do
+            for o <- offers, o["gpu_name"] != "H100 NVL" do
+              Map.put(o, "min_bid", Float.round(o["dph_total"] / 3, 4))
+            end
+          else
+            offers
+          end
+
         json(conn, 200, %{"offers" => offers})
       end)
 
@@ -345,19 +356,26 @@ defmodule ExAtlas.Providers.VastTest do
       assert %Spec.GpuType{id: "RTX 4090", canonical: :rtx_4090, provider: :vast} = rtx_4090
       assert rtx_4090.lowest_price_per_hour == 0.39
       assert rtx_4090.memory_gb == 24
+      assert rtx_4090.spot_price_per_hour == 0.13
+      assert %{spot_price_per_hour: nil} = h100_nvl
+      assert %{spot_price_per_hour: 0.7} = h100_sxm
       assert %{id: "H100 SXM", canonical: :h100, memory_gb: 80} = h100_sxm
       assert %{id: "H100 NVL", canonical: :h100, lowest_price_per_hour: 2.4} = h100_nvl
       assert %{id: "A100 SXM4", canonical: :a100_40g, memory_gb: 40} = a100_40
       assert %{id: "A100 SXM4", canonical: :a100_80g, memory_gb: 80} = a100_80
 
-      # One on-demand search per catalog GPU.
+      # One on-demand and one bid search per catalog GPU.
       queries =
-        for _ <- Spec.GpuCatalog.supported_gpus(:vast) do
+        for _ <- Spec.GpuCatalog.supported_gpus(:vast), _type <- 1..2 do
           assert_received {:query, query}
           query
         end
 
-      assert Enum.all?(queries, &(&1["type"] == "ondemand"))
+      assert Enum.frequencies_by(queries, & &1["type"]) ==
+               %{
+                 "ondemand" => length(Spec.GpuCatalog.supported_gpus(:vast)),
+                 "bid" => length(Spec.GpuCatalog.supported_gpus(:vast))
+               }
     end
 
     test "a failed search fails the call", %{bypass: bypass, opts: opts} do
