@@ -293,6 +293,41 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     end
   end
 
+  # A provider whose list raises: RunPod's with no API key configured, which
+  # the default `reap_providers: [:runpod]` lists on a Vast-only host.
+  defmodule RaisingListProvider do
+    @moduledoc false
+    def capabilities, do: []
+
+    def list_compute(_filters, _ctx),
+      do: raise(ExAtlas.Error.new(:unauthorized, message: "no API key configured"))
+  end
+
+  describe "a provider whose list raises" do
+    setup do
+      TestOrchestrator.put_env(
+        tracking_store: false,
+        reap_grace_ms: 0,
+        reap_interval_ms: 60_000,
+        reap_providers: [RaisingListProvider, :mock],
+        reap_name_prefix: "atlas-"
+      )
+
+      {:ok, reaper: start_supervised!(Reaper)}
+    end
+
+    test "does not stop the tick: the next provider's orphan is reclaimed", %{reaper: reaper} do
+      {:ok, compute} = spawn_untracked()
+
+      log = capture_log(fn -> assert :ticked = surviving_tick(reaper) end)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ inspect(RaisingListProvider)
+      assert log =~ ":unauthorized"
+      refute log =~ "no API key configured"
+    end
+  end
+
   describe "without a tracking store" do
     setup do
       TestOrchestrator.put_env(
@@ -323,6 +358,13 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     send(reaper, :reap)
     _ = :sys.get_state(reaper)
     :ok
+  end
+
+  defp surviving_tick(reaper) do
+    :ok = tick(reaper)
+    :ticked
+  catch
+    :exit, reason -> {:crashed, reason}
   end
 
   defp record_for(compute) do

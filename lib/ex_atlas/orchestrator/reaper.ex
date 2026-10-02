@@ -347,7 +347,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # Returns the ids left alone so far, so a periodic Reaper logs each one once
   # per boot rather than once per tick.
   defp reap_provider(provider, prefix, grace_ms, owner, left_alone) do
-    case ExAtlas.list_compute(provider: provider) do
+    case list_compute(provider) do
       {:ok, computes} ->
         tracked = registered_ids()
         store = TrackingStore.impl()
@@ -368,6 +368,27 @@ defmodule ExAtlas.Orchestrator.Reaper do
         left_alone
     end
   end
+
+  # A list that raises (RunPod with no API key, which the default
+  # `reap_providers` lists on a Vast-only host) skips that provider, not the
+  # tick: a crash would restart the Reaper gated, and no Adopter signals again.
+  # The log keeps the error's kind, never its message, which can carry a
+  # provider's response.
+  defp list_compute(provider) do
+    ExAtlas.list_compute(provider: provider)
+  rescue
+    error ->
+      Logger.warning(
+        "[ExAtlas.Orchestrator.Reaper] listing #{inspect(provider)} raised " <>
+          "#{inspect(error.__struct__)}#{error_kind(error)}; its orphans are not reaped this " <>
+          "tick. Configure its API key, or remove it from :reap_providers."
+      )
+
+      :error
+  end
+
+  defp error_kind(%ExAtlas.Error{kind: kind}), do: " (#{inspect(kind)})"
+  defp error_kind(_error), do: ""
 
   # With no owner the gate has already checked this node is alone, and every
   # untracked prefixed pod is its own, as before owners existed.
