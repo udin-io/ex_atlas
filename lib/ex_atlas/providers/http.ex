@@ -85,7 +85,7 @@ defmodule ExAtlas.Providers.HTTP do
     if status_in?(status, expected) do
       {:ok, body}
     else
-      {:error, ExAtlas.Error.from_response(status, body, provider)}
+      {:error, ExAtlas.Error.from_response(status, drop_env(body), provider)}
     end
   end
 

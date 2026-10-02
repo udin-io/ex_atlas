@@ -1483,6 +1483,56 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:ok, %{raw: ^endpoint}} = RunPod.get_endpoint("ep1", ctx)
       assert {:ok, %{raw: ^template}} = RunPod.get_template("t1", ctx)
     end
+
+    test "an error status whose body echoes the resource keeps env out of the error", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      ctx = ExAtlas.Config.build_ctx(:runpod, opts ++ [req_options: [retry: false]])
+
+      for status <- [302, 400, 404, 409, 500, 503] do
+        Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+          json(conn, status, @env_endpoint)
+        end)
+
+        Bypass.expect_once(bypass, "GET", "/templates/t1", fn conn ->
+          json(conn, status, @env_template)
+        end)
+
+        assert {:error, %ExAtlas.Error{status: ^status} = from_endpoint} =
+                 RunPod.get_endpoint("ep1", ctx)
+
+        assert {:error, %ExAtlas.Error{status: ^status} = from_template} =
+                 RunPod.get_template("t1", ctx)
+
+        for error <- [from_endpoint, from_template] do
+          refute prints(error) =~ @env_secret
+          # Control: the rest of the body stays for the caller to read.
+          assert error.raw["id"] in ["ep1", "t1"]
+        end
+      end
+    end
+
+    test "an error body that is plain text still reads as the message", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      ctx = ExAtlas.Config.build_ctx(:runpod, opts ++ [req_options: [retry: false]])
+
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+        Plug.Conn.resp(conn, 502, "bad gateway")
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 502, message: "bad gateway"}} =
+               RunPod.get_endpoint("ep1", ctx)
+    end
+
+    test "an error body with no env keeps its raw whole", %{bypass: bypass, ctx: ctx} do
+      body = %{"detail" => "no such endpoint", "id" => "ep1"}
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn -> json(conn, 404, body) end)
+
+      assert {:error, %ExAtlas.Error{raw: ^body}} = RunPod.get_endpoint("ep1", ctx)
+    end
   end
 
   describe "compute_spend/3" do
