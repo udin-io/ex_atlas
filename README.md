@@ -1329,7 +1329,9 @@ Seven things to know before you rely on it:
   takes over" needs leases and is out of scope. A store that maps fields to
   columns needs a nullable `owner` column, and from v0.8.0 the four cost
   columns `max_cost`, `spent_usd`, `cost_rate` and `cost_since_ms` (the last
-  two nullable). See "More than one node".
+  two nullable). It needs a nullable integer `respawning` column too: without
+  it, a pod rented by a respawn the node died in keeps a token the next boot
+  accepts. See "More than one node".
 - **A graceful deploy keeps the pod; your kill signal decides the rest.** On
   SIGTERM the BEAM stops the app and every tracker runs `terminate/2`. A
   `persist: true` task whose container has not reported an exit code keeps its

@@ -164,7 +164,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   A store that maps record fields to columns needs a nullable `owner` column.
   Without it every record comes back unowned, and every node adopts it. It
   needs the four cost columns too, `cost_rate` and `cost_since_ms` nullable:
-  without them an adopted task's budget refills.
+  without them an adopted task's budget refills. And a nullable integer
+  `respawning`: without it, a pod rented by a respawn the node died in keeps a
+  token the next boot accepts.
 
   A per-node DETS file (the default) holds only that node's records, so it
   needs none of this.
