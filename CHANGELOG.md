@@ -10,7 +10,7 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ### Added: Vast.ai `spot: true` rents interruptible offers (#112)
 
 `spot: true` on `provider: :vast` searches `type: "bid"` offers and rents the
-cheapest by `min_bid`, bidding exactly that price. An outbid instance reads
+cheapest, bidding exactly its `min_bid`. An outbid instance reads
 `exited`, which the orchestrator already classes as `:preempted`, so
 `on_failure: {:respawn, n}` rents a replacement and destroys the old instance:
 
@@ -21,7 +21,7 @@ ExAtlas.Orchestrator.run_task(
   callback: "https://app.example.com/atlas/cb",
   on_failure: {:respawn, 3}, max_runtime_ms: :timer.hours(4)
 )
-# compute.cost_per_hour => the offer's min_bid, below its on-demand dph_total
+# compute.cost_per_hour => the bid plus the disk, below the on-demand dph_total
 ```
 
 - An offer with no positive numeric `min_bid` is skipped; Vast is never
@@ -29,9 +29,14 @@ ExAtlas.Orchestrator.run_task(
   `:provider`.
 - `provider_opts: %{offer_id: id}` with `spot: true` is `:validation`: that
   rent searches nothing, so it has no `min_bid`.
+- A bid search lists `dph_total` as the offer's `min_bid` plus the disk's
+  storage, and sorts by it. The pick follows that order, and `cost_per_hour`
+  is that `dph_total`.
 - `capabilities/0` adds `:spot`. `list_gpu_types/1` fills
-  `spot_price_per_hour` from a second, `type: "bid"` search per GPU, so it
-  sends 26 searches, not 13.
+  `spot_price_per_hour` from a second, `type: "bid"` search per GPU: 26
+  searches, not 13, four at a time. A failed bid search leaves
+  `spot_price_per_hour` `nil` and keeps the on-demand prices. A GPU only the
+  bid search lists has `lowest_price_per_hour: nil`.
 - Pass a `callback:` to a spot task you respawn. A finished task deletes
   its instance, which reads like an outbid one; the finish report tells the
   tracker the task completed.

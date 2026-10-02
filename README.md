@@ -670,8 +670,8 @@ compute.ports
   ```
 - The Reaper covers Vast with `reap_providers: [:vast]`. It lists with no
   per-call options, so set `config :ex_atlas, :vast, api_key:`.
-- `spot: true` rents the cheapest interruptible offer by `min_bid`, bidding
-  exactly that price; `cost_per_hour` is the bid. An outbid instance reads
+- `spot: true` rents the cheapest interruptible offer, bidding exactly its
+  `min_bid`; `cost_per_hour` is the bid plus the disk. An outbid instance reads
   `exited`, so `on_failure: {:respawn, n}` rents a replacement. Pass a
   `callback:` to a spot task you respawn, or a finished task (which deletes
   its instance) reads as outbid and runs again. `provider_opts: %{offer_id: id}`
