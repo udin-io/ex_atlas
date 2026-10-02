@@ -10,7 +10,7 @@ defmodule ExAtlas.CallbackTest do
 
   defp task_id, do: "task-#{System.unique_integer([:positive])}"
 
-  defp register(task_id, attempt \\ nil),
+  defp register(task_id, attempt \\ 0),
     do: Registry.register(ComputeRegistry, {:callback, task_id}, attempt)
 
   describe "verify/1" do

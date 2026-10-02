@@ -16,8 +16,8 @@ defmodule ExAtlas.Callback.PlugTest do
 
   defp tracked_task(kinds \\ Callback.kinds()) do
     task = "task-#{System.unique_integer([:positive])}"
-    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, nil)
-    {task, Token.mint(task, kinds)}
+    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task}, 0)
+    {task, Token.mint(task, kinds, attempt: 0)}
   end
 
   defp post(path, token, body, headers \\ []) do
@@ -40,7 +40,7 @@ defmodule ExAtlas.Callback.PlugTest do
       conn = post("/progress", token, ~s({"seq":1,"pct":42,"step":"epoch 2"}))
 
       assert conn.status == 202
-      assert_receive {:atlas_callback, :progress, %{"pct" => 42, "seq" => 1}}
+      assert_receive {:atlas_callback, :progress, %{"pct" => 42, "seq" => 1}, 0}
     end
 
     test "a log batch is accepted and reaches the tracker" do
@@ -49,7 +49,7 @@ defmodule ExAtlas.Callback.PlugTest do
       conn = post("/logs", token, ~s({"seq":7,"lines":["loss 0.4","loss 0.3"]}))
 
       assert conn.status == 202
-      assert_receive {:atlas_callback, :log, %{"lines" => ["loss 0.4", "loss 0.3"]}}
+      assert_receive {:atlas_callback, :log, %{"lines" => ["loss 0.4", "loss 0.3"]}, 0}
     end
 
     test "a finish report is accepted and reaches the tracker" do
@@ -58,7 +58,7 @@ defmodule ExAtlas.Callback.PlugTest do
       conn = post("/finish", token, ~s({"exit_code":0}))
 
       assert conn.status == 202
-      assert_receive {:atlas_callback, :finish, %{exit_code: 0}}
+      assert_receive {:atlas_callback, :finish, %{exit_code: 0}, 0}
     end
 
     test "the response body never echoes the token back" do
