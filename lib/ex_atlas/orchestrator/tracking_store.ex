@@ -85,6 +85,14 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     * `:max_runtime_ms`, `:respawns` — budgets that must not refill. A
       restarted 90-minute task gets what is *left* of 90 minutes, and a
       `{:respawn, n}` budget already spent stays spent.
+    * `:respawning` — the attempt a respawn started and has not finished, or
+      `nil`. The respawn writes it before it rents the replacement, so a node
+      that dies before the record moves to the replacement leaves this mark.
+      The next boot then counts that attempt as spent and refuses its token:
+      the replacement it rented is an orphan no tracker holds. A record
+      without the field, as 0.8.0 wrote it, reads as `nil`. Keep it: a store
+      that drops it adopts that task as if no respawn had started, and the
+      orphan's reports pass once the task respawns again.
     * `:callback_task_id` — so `{:callback, task_id}` is re-registered and
       in-flight pod callbacks stop answering `410 Gone`. Not a secret:
       `ExAtlas.Callback.Token` is stateless (`Plug.Crypto.sign/3`), carries its
@@ -199,6 +207,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
           required(:spawned_at_ms) => integer(),
           required(:max_runtime_ms) => pos_integer() | false,
           required(:respawns) => non_neg_integer(),
+          optional(:respawning) => pos_integer() | nil,
           required(:callback_task_id) => String.t() | nil,
           required(:report) => map() | nil,
           required(:mode) => :interactive | :task,
@@ -297,6 +306,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       spawned_at_ms: System.system_time(:millisecond),
       max_runtime_ms: Keyword.get(tracking, :max_runtime_ms, false),
       respawns: 0,
+      respawning: nil,
       callback_task_id: callback_task_id(Keyword.get(tracking, :callback)),
       report: nil,
       mode: Keyword.get(tracking, :mode, :interactive),

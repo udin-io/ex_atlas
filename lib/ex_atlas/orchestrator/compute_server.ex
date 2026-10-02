@@ -1132,6 +1132,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     # From here on, the preempted pod's reports are stale.
     attempt = state.respawns + 1
     advance_callback(state, attempt)
+    # Before the rent: a node that dies before `carry_record/3` leaves the
+    # replacement with no record, and this mark tells the next boot that its
+    # attempt is spent (risk 51).
+    update_record(state, &Map.put(&1, :respawning, attempt))
 
     case spawn_replacement(%{state | opts: next_attempt(state.opts, attempt)}) do
       {:ok, replacement, opts} ->
@@ -1501,12 +1505,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         attempt = state.respawns + 1
 
         store.put(
-          TrackingStore.scrub_env(%{
-            record
-            | id: new_id,
+          TrackingStore.scrub_env(
+            Map.merge(record, %{
+              id: new_id,
               respawns: attempt,
+              respawning: nil,
               opts: next_attempt(record.opts, attempt)
-          })
+            })
+          )
         )
 
         store.delete(old_id)
