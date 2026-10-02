@@ -516,7 +516,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   @doc """
   Normalize a RunPod serverless endpoint body. `raw` is the body without
-  `"env"` and without the `"env"` of its embedded `"template"`.
+  `"env"` and without the `"env"` of its embedded `"template"` and `"workers"`.
   """
   @spec endpoint_to_spec(map()) :: Spec.Endpoint.t()
   def endpoint_to_spec(%{} = raw) do

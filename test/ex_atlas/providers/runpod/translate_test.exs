@@ -943,6 +943,13 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       refute Map.has_key?(raw, "env")
     end
 
+    test "raw drops the env of each worker pod an endpoint lists" do
+      body = Map.put(@endpoint, "workers", [%{"id" => "p1", "env" => %{"K" => "v"}}])
+
+      assert %Spec.Endpoint{raw: %{"workers" => [pod]}} = Translate.endpoint_to_spec(body)
+      assert pod == %{"id" => "p1"}
+    end
+
     test "raw keeps an endpoint body that has no env whole" do
       body = %{"id" => "a", "template" => %{"id" => "t"}, "workers" => %{"min" => 1}}
       assert %Spec.Endpoint{raw: ^body} = Translate.endpoint_to_spec(body)
