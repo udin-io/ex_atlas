@@ -72,6 +72,24 @@ defmodule ExAtlas.Providers.HTTP do
   def drop_env(list) when is_list(list), do: Enum.map(list, &drop_env/1)
   def drop_env(other), do: other
 
+  @doc """
+  Drop `env` at any depth from an error body, under a string or an atom key.
+
+  An error body can wrap the resource it refuses (`{"conflict": {"env": ..}}`),
+  and a caller's `decode_json: [keys: :atoms]` makes the keys atoms. `Error.raw`
+  keeps the rest of the body for debugging. A resource's own `raw` uses the
+  targeted `drop_env/1`, which leaves unknown nested fields alone.
+  """
+  @spec drop_env_deep(term()) :: term()
+  def drop_env_deep(%{} = map) when not is_struct(map) do
+    map
+    |> Map.drop(["env", :env])
+    |> Map.new(fn {key, value} -> {key, drop_env_deep(value)} end)
+  end
+
+  def drop_env_deep(list) when is_list(list), do: Enum.map(list, &drop_env_deep/1)
+  def drop_env_deep(other), do: other
+
   @doc "Merge the caller's `ctx.req_options` in last, so they win."
   @spec merge_user_options(Req.Request.t(), ExAtlas.Provider.ctx()) :: Req.Request.t()
   def merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
@@ -92,13 +110,14 @@ defmodule ExAtlas.Providers.HTTP do
     if status_in?(status, expected) do
       {:ok, body}
     else
-      {:error, ExAtlas.Error.from_response(status, drop_env(body), provider)}
+      {:error, ExAtlas.Error.from_response(status, drop_env_deep(body), provider)}
     end
   end
 
-  # Req's JSON decoder fails with the whole body in `data`, and a body can
-  # echo the request. The error keeps neither.
-  def handle_response({:error, %Jason.DecodeError{}}, _expected, provider) do
+  # A JSON decoder fails with the whole body in `data`, and a body can echo
+  # the request. The error keeps neither.
+  def handle_response({:error, %struct{}}, _expected, provider)
+      when struct in [Jason.DecodeError, JSON.DecodeError] do
     {:error,
      ExAtlas.Error.new(:provider,
        provider: provider,
@@ -106,12 +125,30 @@ defmodule ExAtlas.Providers.HTTP do
      )}
   end
 
-  def handle_response({:error, %{__exception__: true} = exception}, _expected, provider) do
+  # These carry a socket-level reason, never response bytes.
+  def handle_response({:error, %struct{} = exception}, _expected, provider)
+      when struct in [
+             Req.TransportError,
+             Mint.TransportError,
+             Finch.Error,
+             Req.TooManyRedirectsError
+           ] do
     {:error,
      ExAtlas.Error.new(:transport,
        provider: provider,
        message: Exception.message(exception),
        raw: exception
+     )}
+  end
+
+  # Any other exception can hold the body: `Req.DecompressError` keeps it in
+  # `data`, Mint's `{:unexpected_data, data}` and a caller's decoder in their
+  # message. The error names the exception and keeps nothing else.
+  def handle_response({:error, %struct{__exception__: true}}, _expected, provider) do
+    {:error,
+     ExAtlas.Error.new(:transport,
+       provider: provider,
+       message: "#{inspect(struct)}; ExAtlas withholds its details, which can echo the request"
      )}
   end
 

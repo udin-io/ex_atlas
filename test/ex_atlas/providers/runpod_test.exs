@@ -1527,6 +1527,20 @@ defmodule ExAtlas.Providers.RunPodTest do
                RunPod.get_endpoint("ep1", ctx)
     end
 
+    test "an error body that wraps the resource keeps env out of the error", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      ctx = ExAtlas.Config.build_ctx(:runpod, opts ++ [req_options: [retry: false]])
+      body = %{"detail" => "in use", "conflict" => %{"id" => "ep1", "env" => @env_leaf}}
+
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn -> json(conn, 409, body) end)
+
+      assert {:error, %ExAtlas.Error{raw: raw} = error} = RunPod.get_endpoint("ep1", ctx)
+      refute prints(error) =~ @env_secret
+      assert raw == %{"detail" => "in use", "conflict" => %{"id" => "ep1"}}
+    end
+
     test "an error body with no env keeps its raw whole", %{bypass: bypass, ctx: ctx} do
       body = %{"detail" => "no such endpoint", "id" => "ep1"}
       Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn -> json(conn, 404, body) end)
