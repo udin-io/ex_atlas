@@ -401,6 +401,22 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       assert {:ok, %{owner: "m9", user_id: "moved"}} = Store.get("pod-a")
     end
 
+    # A database writer moves a live node's row to an owner it made up, whose
+    # lease it set in the past. The record still names its signed owner.
+    test "leaves a row whose owner column differs from the record's own :owner", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 9_000)
+      Repo.query!("UPDATE atlas_tracking_records SET owner = 'ghost' WHERE id = 'pod-a'")
+      :ok = Store.renew_lease("ghost", 1_000)
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, to("m2"))
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+      assert owner_column("pod-a") == "ghost"
+    end
+
     test "two nodes claiming at once leave each record with exactly one owner", %{
       tmp_dir: dir
     } do

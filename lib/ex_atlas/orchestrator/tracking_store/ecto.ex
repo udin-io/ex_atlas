@@ -332,8 +332,11 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       from(l in Lease, where: l.expires_at < ^now and l.owner != ^claimer, select: l.owner)
     end
 
+    # The column is only a copy for queries; the record's own `:owner` sits
+    # under its signature. A row whose column was moved to another owner is
+    # not that owner's to hand over.
     defp claim_row(repo, {id, old_owner, blob}, claimer, now, rewrite) do
-      with {:ok, record} <- decode(id, blob),
+      with {:ok, %{owner: ^old_owner} = record} <- decode(id, blob),
            {:ok, %{id: ^id, owner: ^claimer} = claimed} <- rewrite.(record),
            new_blob = :erlang.term_to_binary(claimed),
            true <- byte_size(new_blob) <= @max_record_bytes,
