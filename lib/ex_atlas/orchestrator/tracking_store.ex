@@ -330,6 +330,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   end
 
   @doc """
+  `record` with its `:env` values left out, as `scrub_opts/1` leaves them.
+
+  A record written before env values were left out still holds them; every
+  rewrite of it goes through here, so no write lays them down again.
+  """
+  @spec scrub_env(record()) :: record()
+  def scrub_env(%{opts: opts} = record) do
+    %{record | opts: put_env(opts, Keyword.get(opts, :env), :env in configured_scrub_keys())}
+  end
+
+  @doc """
   The opts to re-observe an adopted record with.
 
   The provider comes back from the record — `:api_key` was scrubbed, so it is

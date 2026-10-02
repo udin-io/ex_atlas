@@ -630,6 +630,69 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       refute log =~ "hf-adopt-probe-5b70"
     end
 
+    # What a node on 0a22ec4 wrote: the values themselves.
+    defp put_plain_env!(id) do
+      {:ok, record} = Memory.get(id)
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, @env)})
+    end
+
+    defp assert_names_only(id) do
+      assert {:ok, %{opts: opts}} = Memory.get(id)
+      assert opts[:env] == %{"HF_TOKEN" => :not_stored, "WANDB_PROJECT" => :not_stored}
+    end
+
+    test "a respawn from an old record stores the replacement's env as names only" do
+      compute = orphaned_env_task("trainer-adopted-env-v3-carry:latest")
+      id = compute.id
+      put_plain_env!(id)
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert_names_only(new_id)
+    end
+
+    test "a record update after adopting an old record stores env names only" do
+      compute = orphaned_env_task("trainer-adopted-env-v3-update:latest")
+      id = compute.id
+      put_plain_env!(id)
+      cap_record!(id, 10, 0.0, 1.0, @hour)
+      :ok = Mock.set_cost_per_hour(id, 2.0)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      # The adopted pod's new price rewrote the record.
+      assert {:ok, %{cost_rate: 2.0}} = Memory.get(id)
+      assert_names_only(id)
+    end
+
+    test "claiming an unowned old record stores env names only, and still respawns" do
+      compute =
+        orphaned_task_of(nil,
+          image: "trainer-adopted-env-claim:latest",
+          env: @env,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 30
+        )
+
+      id = compute.id
+      {:ok, record} = Memory.get(id)
+      :ok = Memory.put(%{record | owner: nil, opts: Keyword.put(record.opts, :env, @env)})
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      boot_as("b")
+
+      assert {:ok, %{owner: "b"}} = Memory.get(id)
+      assert_names_only(id)
+
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert {:ok, %{compute: replacement}} = Orchestrator.info(new_id)
+      assert ExAtlas.Spec.ComputeRequest.container_env(replacement.raw.request) == @env
+    end
+
     test "control: an empty env: respawns after adoption" do
       compute = orphaned_env_task("trainer-adopted-env-empty:latest", %{})
       id = compute.id

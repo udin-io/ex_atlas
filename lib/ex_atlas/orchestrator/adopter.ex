@@ -199,7 +199,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # tracker's own record updates keep it.
   defp adopt_by_owner(record, nil, owner, store) do
     claimed = Map.put(record, :owner, owner)
-    store.put(claimed)
+    # The tracker gets the values an older record holds; the store does not.
+    store.put(TrackingStore.scrub_env(claimed))
     reconcile(claimed, store)
   end
 

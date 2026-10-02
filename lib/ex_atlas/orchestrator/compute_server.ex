@@ -1099,7 +1099,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp update_record(%{store: store} = state, fun) do
     case store.get(state.compute.id) do
-      {:ok, record} -> store.put(fun.(record))
+      {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_env())
       :error -> :ok
     end
   end
@@ -1116,7 +1116,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp carry_record(%{store: store} = state, old_id, new_id) do
     case store.get(old_id) do
       {:ok, record} ->
-        store.put(%{record | id: new_id, respawns: state.respawns + 1})
+        store.put(TrackingStore.scrub_env(%{record | id: new_id, respawns: state.respawns + 1}))
         store.delete(old_id)
 
       :error ->
