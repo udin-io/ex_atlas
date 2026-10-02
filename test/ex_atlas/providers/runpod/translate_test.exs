@@ -105,8 +105,12 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
     defp run_start_cmd(["sh", "-c", script], tmp, extra_env) do
       shim = Path.join(tmp, "curl")
       log = Path.join(tmp, "curl.log")
-      File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\n")
-      File.chmod!(shim, 0o755)
+
+      # A test that wrote its own shim (`failing_curl/1`) keeps it.
+      unless File.exists?(shim) do
+        File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\n")
+        File.chmod!(shim, 0o755)
+      end
 
       {_out, status} =
         System.cmd("sh", ["-c", script],
