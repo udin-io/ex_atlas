@@ -23,6 +23,9 @@ compute.raw["env"]
 
 - Every other `raw` key stays. Code that read `compute.raw["env"]` gets `nil`:
   read the value you passed to `spawn_compute/1` instead.
+- An error for a success status the caller did not expect (a spawn answered
+  `200` instead of `201`) keeps no `raw`, and `get_compute/2` keeps none for a
+  200 body that is not a pod object: either body can hold pods and their `env`.
 - `Spec.Endpoint.raw` and `Spec.Template.raw` keep `env`; no tracker holds
   them and `inspect/1` hides it.
 
