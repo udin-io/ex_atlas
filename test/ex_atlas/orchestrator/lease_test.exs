@@ -106,6 +106,13 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     )
   end
 
+  defp report_finish!(id) do
+    Phoenix.PubSub.subscribe(ExAtlas.PubSub, ExAtlas.Orchestrator.Events.topic(id))
+    {:ok, %{callback_task_id: task_id}} = Store.get(id)
+    :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+    assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+  end
+
   defp pod_status(id) do
     {:ok, %{status: status}} = ExAtlas.get_compute(id, provider: :mock)
     status
@@ -246,19 +253,26 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
   describe "a node whose lease lapsed" do
     # m2 tracks its own task. Its lease lapses (the clock jumps past it), m3
     # claims the record meanwhile, then m2 renews.
-    defp lapse(claimed_by_m3?) do
+    defp lapse(claimed_by_m3?, opts \\ []) do
       as_owner("m2")
 
       {:ok, tracker, %{id: id}} =
         Orchestrator.spawn(
-          provider: :mock,
-          gpu: :h100,
-          image: "trainer:latest",
-          name: "atlas-lease",
-          mode: :task,
-          max_runtime_ms: 90 * 60 * 1_000,
-          persist: true
+          Keyword.merge(
+            [
+              provider: :mock,
+              gpu: :h100,
+              image: "trainer:latest",
+              name: "atlas-lease",
+              mode: :task,
+              max_runtime_ms: 90 * 60 * 1_000,
+              persist: true
+            ],
+            opts
+          )
         )
+
+      if opts[:callback], do: report_finish!(id)
 
       {:ok, clock} = Agent.start_link(&now/0)
       lease = start_lease!("m2", clock: fn -> Agent.get(clock, & &1) end)
@@ -282,6 +296,17 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       refute Process.alive?(tracker)
       assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m3"}} = Store.get(id)
+      assert pod_status(id) == :running
+    end
+
+    # A tracker holding a finish report deletes its pod on a plain stop. The
+    # pod and the record are the new owner's now.
+    test "stops a tracker that already holds a finish report, and keeps the pod" do
+      {tracker, id} =
+        lapse(true, callback: "https://app.example.com/atlas/cb", finish_grace_ms: 60_000)
+
+      refute Process.alive?(tracker)
       assert {:ok, %{owner: "m3"}} = Store.get(id)
       assert pod_status(id) == :running
     end
