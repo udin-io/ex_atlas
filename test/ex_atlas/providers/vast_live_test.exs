@@ -8,8 +8,9 @@ defmodule ExAtlas.Providers.VastLiveTest do
   # the search takes; whether a rent takes `env` as a JSON object; the shape
   # of an instance's `ports` and `extra_env`; what a missing instance and a
   # refused rent answer, and whether the refusal's `msg` echoes the request.
-  # Only the instance test spends money: it rents the cheapest on-demand
-  # RTX 4090 for one nginx container, for a few minutes.
+  # Two tests spend money, each renting the cheapest on-demand RTX 4090 for a
+  # few minutes: one nginx container, and one `command:` container that
+  # deletes its own instance (issue 105).
   use ExUnit.Case, async: false
 
   @moduletag :vast_live
@@ -121,6 +122,35 @@ defmodule ExAtlas.Providers.VastLiveTest do
 
     assert :ok = ExAtlas.terminate(compute.id, opts)
     assert {:dead, :vanished, nil} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))
+  end
+
+  # What only the real API shows: that Vast puts CONTAINER_ID and
+  # CONTAINER_API_KEY into a `runtype: "args"` container, that the instance
+  # key may DELETE its own instance, that `args` reach the image's
+  # ENTRYPOINT (curlimages/curl's runs `exec "$@"`), and that a fresh rent
+  # lists a `start_date`, which keeps the Reaper off a spawn in flight.
+  test "a command: container deletes its own instance when the command ends", %{
+    opts: opts,
+    name: name
+  } do
+    {:ok, compute} =
+      ExAtlas.spawn_compute(
+        [
+          gpu: :rtx_4090,
+          name: name,
+          image: "curlimages/curl:latest",
+          command: ["sh", "-c", "echo atlas-live-command; sleep 30"]
+        ] ++ opts
+      )
+
+    IO.puts("\nrented #{compute.id} for a command at $#{compute.cost_per_hour}/h")
+
+    {:alive, first} = wait_until(compute.id, opts, &match?({:alive, _}, &1))
+    assert %DateTime{} = first.created_at, "a fresh rent lists no start_date"
+
+    assert {:dead, :vanished, nil} =
+             wait_until(compute.id, opts, &match?({:dead, _, _}, &1)),
+           "the instance did not delete itself; is CONTAINER_API_KEY set in args mode?"
   end
 
   defp search_count(ctx, name) do
