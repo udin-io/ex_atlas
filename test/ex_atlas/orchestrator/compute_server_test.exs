@@ -1700,6 +1700,23 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_received {:atlas_compute, ^id, {:terminating, _}}
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
     end
+
+    # `command: []` runs the image's own command, which nothing asked to end.
+    test "control: an interactive session with command: [] stays up after a report",
+         %{base: base} do
+      {pid, compute, task_id} =
+        start_reporting_task(base, command: [], mode: :interactive, finish_grace_ms: 50)
+
+      id = compute.id
+      ref = Process.monitor(pid)
+
+      :ok = Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 0}}}, 2_000
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+      refute_received {:atlas_compute, ^id, {:terminating, _}}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
   end
 
   describe "callbacks and spot capacity" do
