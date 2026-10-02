@@ -1,7 +1,25 @@
 defmodule ExAtlas.Spec.ComputeRequestTest do
   use ExUnit.Case, async: true
 
-  alias ExAtlas.Spec.ComputeRequest
+  alias ExAtlas.Spec.{ComputeRequest, Staging}
+
+  @key_id "tid-test-4b1e"
+  @secret "tsec-test-9f2c"
+  @token "tses-test-0d7a"
+
+  @s3 %{
+    endpoint: "https://t3.storage.dev",
+    region: "auto",
+    access_key_id: @key_id,
+    secret_access_key: @secret,
+    session_token: @token,
+    dataset_uri: "s3://bucket/datasets/abc/",
+    artifact_uri: "s3://bucket/artifacts/run-123/"
+  }
+
+  defp refute_secrets(text) do
+    for secret <- [@key_id, @secret, @token], do: refute(text =~ secret)
+  end
 
   test "new!/1 builds with defaults" do
     req = ComputeRequest.new!(gpu: :h100)
@@ -81,6 +99,121 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
     test "a map of strings is accepted as before (control)" do
       assert {:ok, %ComputeRequest{env: %{"K" => "v-secret-71a4"}}} =
                ComputeRequest.new(gpu: :h100, env: %{"K" => "v-secret-71a4"})
+    end
+  end
+
+  describe "s3:" do
+    test "defaults to nil" do
+      assert ComputeRequest.new!(gpu: :h100).s3 == nil
+    end
+
+    test "a map or a keyword list becomes a Staging" do
+      assert %Staging{dataset_uri: "s3://bucket/datasets/abc/"} =
+               ComputeRequest.new!(gpu: :h100, s3: @s3).s3
+
+      assert ComputeRequest.new!(gpu: :h100, s3: Map.to_list(@s3)).s3 ==
+               ComputeRequest.new!(gpu: :h100, s3: @s3).s3
+    end
+
+    test "a key id without its secret is refused on :s3, with no key value in the error" do
+      assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
+               ComputeRequest.new(gpu: :h100, s3: Map.delete(@s3, :secret_access_key))
+
+      assert Exception.message(error) =~ ":access_key_id and :secret_access_key go together"
+      refute_secrets(inspect(error))
+    end
+
+    for {name, s3, expected} <- [
+          {"session token without keys",
+           %{session_token: "tses-test-0d7a", dataset_uri: "s3://b/d"}, ":session_token needs"},
+          {"an https dataset URI", %{dataset_uri: "https://bucket/d/"},
+           ":dataset_uri must start with s3://"},
+          {"an s3 URI with no bucket", %{dataset_uri: "s3:///d/"},
+           ":dataset_uri must start with s3://"},
+          {"an unknown key", %{dataset_uri: "s3://b/d", bucket: "b"}, "unknown key :bucket"},
+          {"neither URI", %{region: "auto"}, "needs :dataset_uri or :artifact_uri"}
+        ] do
+      @s3_input s3
+      @expected expected
+
+      test "#{name} is refused on :s3" do
+        assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
+                 ComputeRequest.new(gpu: :h100, s3: @s3_input)
+
+        assert Exception.message(error) =~ @expected
+      end
+    end
+
+    test "new!/1 raises the :s3 error" do
+      error =
+        assert_raise NimbleOptions.ValidationError, fn ->
+          ComputeRequest.new!(gpu: :h100, s3: Map.delete(@s3, :access_key_id))
+        end
+
+      assert error.key == :s3
+      refute_secrets(inspect(error))
+    end
+
+    test "inspect shows the URIs and endpoint and none of the secrets" do
+      text = inspect(ComputeRequest.new!(gpu: :h100, s3: @s3))
+
+      assert text =~ "s3://bucket/datasets/abc/"
+      assert text =~ "https://t3.storage.dev"
+      refute_secrets(text)
+    end
+
+    test "an env: variable that s3: also sets is refused, naming it and no value" do
+      error =
+        assert_raise NimbleOptions.ValidationError, fn ->
+          ComputeRequest.new!(
+            gpu: :h100,
+            env: %{"AWS_ACCESS_KEY_ID" => "tid-env-77c3"},
+            s3: @s3
+          )
+        end
+
+      assert error.key == :s3
+      assert Exception.message(error) =~ "AWS_ACCESS_KEY_ID"
+      refute Exception.message(error) =~ "tid-env-77c3"
+      refute_secrets(inspect(error))
+    end
+
+    test "an env: variable that s3: does not set is kept (control)" do
+      req =
+        ComputeRequest.new!(
+          gpu: :h100,
+          env: %{"WANDB_PROJECT" => "x", "AWS_SESSION_TOKEN" => "env-token"},
+          s3: Map.delete(@s3, :session_token)
+        )
+
+      assert req.env == %{"WANDB_PROJECT" => "x", "AWS_SESSION_TOKEN" => "env-token"}
+    end
+  end
+
+  describe "container_env/1" do
+    test "is env plus the staging variables" do
+      req =
+        ComputeRequest.new!(
+          gpu: :h100,
+          env: %{"WANDB_PROJECT" => "x"},
+          s3: %{dataset_uri: "s3://bucket/d/"}
+        )
+
+      assert ComputeRequest.container_env(req) == %{
+               "WANDB_PROJECT" => "x",
+               "ATLAS_DATASET_URI" => "s3://bucket/d/"
+             }
+    end
+
+    test "with no s3: is env alone" do
+      req = ComputeRequest.new!(gpu: :h100, env: %{"WANDB_PROJECT" => "x"})
+      assert ComputeRequest.container_env(req) == %{"WANDB_PROJECT" => "x"}
+    end
+
+    test "refuses a hand-built request whose s3 is a raw map, without printing it" do
+      req = Map.put(ComputeRequest.new!(gpu: :h100), :s3, @s3)
+      error = assert_raise ArgumentError, fn -> ComputeRequest.container_env(req) end
+      refute_secrets(Exception.message(error))
     end
   end
 end

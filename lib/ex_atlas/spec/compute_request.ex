@@ -37,7 +37,23 @@ defmodule ExAtlas.Spec.ComputeRequest do
   carries the `task_id` the pod's credential is bound to. A provider translator
   expands it into `ATLAS_CALLBACK_URL`, `ATLAS_CALLBACK_TOKEN` and
   `ATLAS_TASK_ID` in the container environment.
+
+  ## Data staging
+
+  `:s3` puts storage credentials and the dataset and artifact addresses into the
+  container environment as `AWS_*` and `ATLAS_*` variables. See
+  `ExAtlas.Spec.Staging` for the keys and the variables they set. An `:env`
+  entry that `:s3` would also set is an error naming that variable.
+
+  ## Building the container environment
+
+  A provider translator calls `container_env/1`. It returns `:env`, the
+  callback variables and the staging variables in one map, so no provider can
+  forget one of them.
   """
+
+  alias ExAtlas.Callback
+  alias ExAtlas.Spec.Staging
 
   @enforce_keys [:gpu]
   defstruct gpu: nil,
@@ -58,6 +74,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
             command: nil,
             self_terminate: true,
             callback: nil,
+            s3: nil,
             provider_opts: %{}
 
   @type port_spec :: {pos_integer(), :http | :tcp}
@@ -83,6 +100,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
           command: [String.t()] | nil,
           self_terminate: boolean(),
           callback: ExAtlas.Callback.config() | nil,
+          s3: Staging.t() | nil,
           provider_opts: map()
         }
 
@@ -106,6 +124,8 @@ defmodule ExAtlas.Spec.ComputeRequest do
     command: [type: {:or, [{:list, :string}, nil]}, default: nil],
     self_terminate: [type: :boolean, default: true],
     callback: [type: {:or, [:map, nil]}, default: nil],
+    # Checked by `Staging.new/1`: NimbleOptions puts the input in its error.
+    s3: [type: :any, default: nil],
     provider_opts: [type: :map, default: %{}]
   ]
 
@@ -121,13 +141,50 @@ defmodule ExAtlas.Spec.ComputeRequest do
   @doc """
   Build a validated `ComputeRequest` from keyword opts.
 
-  An error about `:env` names the variable at fault and never holds a value.
+  An error about `:env` or `:s3` names the key at fault and never holds a value.
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, NimbleOptions.ValidationError.t()}
   def new(opts) do
     with {:ok, opts} <- opts |> normalize() |> NimbleOptions.validate(@schema),
-         :ok <- validate_env(opts[:env]) do
-      {:ok, struct!(__MODULE__, opts)}
+         :ok <- validate_env(opts[:env]),
+         {:ok, staging} <- Staging.new(opts[:s3]),
+         :ok <- check_env_overlap(opts[:env], staging) do
+      {:ok, struct!(__MODULE__, Keyword.put(opts, :s3, staging))}
+    end
+  end
+
+  @doc """
+  The container environment for `request`: `:env`, then the callback
+  variables, then the staging variables, as strings.
+
+  A callback variable replaces an `:env` entry of the same name. `new/1` refuses
+  an `:env` entry that the staging also sets.
+  """
+  @spec container_env(t()) :: %{String.t() => String.t()}
+  def container_env(%__MODULE__{} = request) do
+    request.env
+    |> Map.merge(callback_env(request.callback))
+    |> Map.merge(Staging.env(request.s3))
+    |> Map.new(fn {name, value} -> {to_string(name), to_string(value)} end)
+  end
+
+  defp callback_env(nil), do: %{}
+  defp callback_env(%{} = callback), do: Callback.env(callback)
+
+  defp check_env_overlap(env, staging) do
+    case staging |> Staging.env() |> Map.keys() |> Enum.filter(&Map.has_key?(env, &1)) do
+      [] ->
+        :ok
+
+      names ->
+        {:error,
+         %NimbleOptions.ValidationError{
+           key: :s3,
+           value: nil,
+           message:
+             "invalid value for :s3 option: :env already sets #{Enum.join(Enum.sort(names), ", ")}, " <>
+               "which :s3 also sets; set each variable in one place"
+         }}
     end
   end
 
