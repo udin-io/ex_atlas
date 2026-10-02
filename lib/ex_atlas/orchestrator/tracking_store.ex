@@ -487,6 +487,10 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     end
   end
 
+  @doc "Whether this node signs the records it writes: it has a callback secret."
+  @spec signs?() :: boolean()
+  def signs?, do: seal_key() != nil
+
   @doc """
   Whether `record`'s `:mac` is this node's signature over it.
 

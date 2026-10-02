@@ -46,6 +46,41 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert TrackingStore.sealed?(record)
     end
 
+    # Issue 131: an adopted task respawns only from a record this node signed,
+    # and the key comes from the callback secret.
+    test "with no callback secret, warns that a respawnable task cannot respawn after a restart" do
+      Application.put_env(:ex_atlas, :callback, [])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _pid, compute} =
+            Orchestrator.spawn(task_opts(name: "atlas-unsigned", on_failure: {:respawn, 1}))
+
+          send(self(), {:spawned, compute.id})
+        end)
+
+      assert_received {:spawned, id}
+      assert log =~ ~s("atlas-unsigned" cannot respawn after a restart)
+      assert log =~ "config :ex_atlas, :callback, secret:"
+      assert {:ok, record} = Memory.get(id)
+      refute Map.has_key?(record, :mac)
+    end
+
+    test "control: with a callback secret, or with no respawn budget, it does not warn" do
+      signed =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _, _} = Orchestrator.spawn(task_opts(on_failure: {:respawn, 1}))
+        end)
+
+      Application.put_env(:ex_atlas, :callback, [])
+
+      no_budget =
+        ExUnit.CaptureLog.capture_log(fn -> {:ok, _, _} = Orchestrator.spawn(task_opts()) end)
+
+      refute signed =~ "cannot respawn after a restart"
+      refute no_budget =~ "cannot respawn after a restart"
+    end
+
     test "writes a record holding what it takes to rebuild the tracker" do
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 
