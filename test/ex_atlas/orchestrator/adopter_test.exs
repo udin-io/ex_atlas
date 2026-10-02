@@ -602,6 +602,34 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       refute "trainer-adopted-env-bare:latest" in env_images()
     end
 
+    test "a record written before env: names-only keeps its values sealed and respawns" do
+      compute = orphaned_env_task("trainer-adopted-env-v3:latest")
+      id = compute.id
+
+      # What a node on 0a22ec4 wrote: the values themselves.
+      {:ok, record} = Memory.get(id)
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, @env)})
+
+      pid = adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert {:ok, %{compute: replacement}} = Orchestrator.info(new_id)
+      assert ExAtlas.Spec.ComputeRequest.container_env(replacement.raw.request) == @env
+
+      ref = Process.monitor(pid)
+
+      log =
+        capture_log(fn ->
+          catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+        end)
+
+      # The stacktrace printed the adopted opts, so the refute is not vacuous.
+      assert log =~ "handle_call"
+      assert log =~ "HF_TOKEN"
+      refute log =~ "hf-adopt-probe-5b70"
+    end
+
     test "control: an empty env: respawns after adoption" do
       compute = orphaned_env_task("trainer-adopted-env-empty:latest", %{})
       id = compute.id

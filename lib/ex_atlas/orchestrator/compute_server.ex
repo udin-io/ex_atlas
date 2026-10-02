@@ -338,8 +338,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   # `Orchestrator.spawn/1` has sealed these already; a tracker started
-  # directly gets the same, so its state never holds a raw key.
-  defp sealed({:adopted, _record} = arg), do: arg
+  # directly gets the same, so its state never holds a raw key. A record holds
+  # no credential, but one written before env values were left out holds them.
+  defp sealed({:adopted, %{opts: opts} = record}) do
+    case Keyword.fetch(opts, :env) do
+      {:ok, env} -> {:adopted, %{record | opts: Keyword.put(opts, :env, seal_stored_env(env))}}
+      :error -> {:adopted, record}
+    end
+  end
 
   defp sealed({compute, opts}) do
     case ExAtlas.Config.seal_credentials(opts) do
@@ -347,6 +353,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:error, error} -> raise error
     end
   end
+
+  defp seal_stored_env(env) when is_map(env),
+    do: Map.new(env, fn {name, value} -> {name, seal_stored_value(value)} end)
+
+  defp seal_stored_env(env), do: env
+
+  defp seal_stored_value(:not_stored), do: :not_stored
+  defp seal_stored_value(value), do: ExAtlas.Secret.wrap(value)
 
   defp tracked_id({:adopted, record}), do: record.id
   defp tracked_id({compute, _opts}), do: compute.id
