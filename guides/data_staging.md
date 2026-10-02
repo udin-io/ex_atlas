@@ -211,16 +211,25 @@ ExAtlas.Orchestrator.run_task(
 # container env: ATLAS_DATASET_URL and ATLAS_ARTIFACT_URL, no AWS_* key
 ```
 
-Each URL must be `http://` or `https://` with a host, and carry no user info.
-A URL is a bearer credential until it expires, so ExAtlas treats it like a
-key: `inspect/1`, errors, crash reports and tracking records never show it.
+Each URL must be `http://` or `https://` with a host and a path to the
+object, carry no user info, and hold only RFC 3986 characters after the host,
+with no braces or brackets. `ExAws.S3.presigned_url/5` output passes. A URL is
+a bearer credential until it expires, so ExAtlas treats it like a key:
+`inspect/1`, errors, crash reports and tracking records never show it. Plain
+`http://` sends that credential in clear text; use it only for a store on a
+network you trust, such as a local MinIO.
 
 The reference entrypoint:
 
 | Step | Command |
 |---|---|
-| Pull | `curl -fsSL -o <file> "$ATLAS_DATASET_URL"`, then `tar -xf <file> -C "$ATLAS_DATASET_DIR"`. The archive may be a plain tar or compressed with gzip, bzip2 or xz. The file sits in `ATLAS_DATASET_DIR` until it is unpacked, so that disk needs room for both. A failure exits with curl's or tar's code and runs no trainer. |
-| Push | Copies the log to `$ATLAS_ARTIFACT_DIR/atlas.log`, packs the directory with `tar -czf` into a file under `$TMPDIR`, then `curl -fsS -T <file> "$ATLAS_ARTIFACT_URL"`. One object holds the artifacts and the log. |
+| Pull | `curl -fsS -o <file> "$ATLAS_DATASET_URL"`, then `tar -xf <file> -C "$ATLAS_DATASET_DIR"`. The archive may be a plain tar or compressed with gzip, bzip2 or xz. The file sits in `ATLAS_DATASET_DIR` until it is unpacked, so that disk needs room for both. A failure exits with curl's or tar's code and runs no trainer. |
+| Push | Copies the log to `$ATLAS_ARTIFACT_DIR/atlas.log`, replacing a trainer file of that name, packs the directory with `tar -czf` into a file under `$TMPDIR`, then `curl -fsS -T <file> "$ATLAS_ARTIFACT_URL"`. One object holds the artifacts and the log. Keep `TMPDIR` outside `ATLAS_ARTIFACT_DIR`, or tar tries to pack its own output. |
+
+Every `curl` call also gets `-q` (ignore a `.curlrc` in the image), `-g` (no
+URL globbing), `--connect-timeout 30` and `--speed-limit 1024 --speed-time
+120`, which end a transfer that stalls for two minutes instead of holding the
+pod until `max_runtime_ms`. Redirects are not followed.
 
 - **A URI and a URL for the same side:** the URI wins, and the script prints
   `ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set` (or the artifact
@@ -237,5 +246,10 @@ The reference entrypoint:
 - **What prints.** The script never prints a URL. `curl -f` prints no
   response body on an HTTP error, and S3's error body for a bad signature
   echoes the signature. curl's own error lines name the host at most, such as
-  `Could not resolve host`. The URL is in the pod's environment and on curl's
-  command line, so any process in the container can read it.
+  `Could not resolve host`.
+- **What the trainer sees.** The script moves both URLs out of the
+  environment before the trainer starts, so a trainer or library that dumps
+  its environment prints neither. They are still on curl's command line while
+  it runs, and in the script's own `/proc/<pid>/environ`, which a process
+  running as the same user can read. The pod's environment in the RunPod
+  console and API holds them too.
