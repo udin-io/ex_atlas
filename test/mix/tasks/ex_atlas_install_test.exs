@@ -171,15 +171,22 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
 
     # A host with `start_orchestrator: true` would lose its orchestrator if
     # the installer turned the flag off and added no child.
-    test "warns and adds no child when the repo is not in the children" do
-      igniter = install_ecto(host(["TestWeb.Endpoint"]))
+    test "stops before writing anything when the repo is not in the children" do
+      files =
+        Map.put(host(["TestWeb.Endpoint"]), "config/config.exs", """
+        import Config
+        config :ex_atlas, start_orchestrator: true
+        """)
 
-      assert_has_warning(
-        igniter,
-        &(&1 =~ "ExAtlas.Orchestrator.Supervisor" and &1 =~ "Test.Repo")
-      )
+      igniter = install_ecto(files)
 
-      assert_unchanged(igniter, "lib/test/application.ex")
+      assert_has_issue(igniter, &(&1 =~ "ExAtlas.Orchestrator.Supervisor" and &1 =~ "Test.Repo"))
+    end
+
+    test "stops when the project has no application module" do
+      files = Map.delete(host(), "mix.exs")
+
+      assert_has_issue(install_ecto(files), &(&1 =~ "ExAtlas.Orchestrator.Supervisor"))
     end
 
     test "turns a config.exs start_orchestrator: true off, since the supervisor refuses it" do

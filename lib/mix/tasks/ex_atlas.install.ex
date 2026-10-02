@@ -247,7 +247,7 @@ if Code.ensure_loaded?(Igniter) do
              Igniter.Project.Module.find_and_update_module(igniter, app, &insert_child(&1, repo)) do
         igniter
       else
-        _ -> Igniter.add_warning(igniter, add_child_by_hand(repo))
+        _ -> Igniter.add_issue(igniter, add_child_by_hand(repo))
       end
     end
 
@@ -266,10 +266,10 @@ if Code.ensure_loaded?(Igniter) do
             {:ok, Zipper.insert_right(item, @supervisor)}
 
           true ->
-            {:warning, add_child_by_hand(repo)}
+            {:error, add_child_by_hand(repo)}
         end
       else
-        _ -> {:warning, add_child_by_hand(repo)}
+        _ -> {:error, add_child_by_hand(repo)}
       end
     end
 
@@ -297,10 +297,13 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
+    # An issue, so Igniter writes nothing: `start_orchestrator: false` with no
+    # supervisor child would leave the host with no orchestrator.
     defp add_child_by_hand(repo) do
-      "Add ExAtlas.Orchestrator.Supervisor to your application's children, right " <>
-        "after #{inspect(repo)}. The installer found no `children = [...]` list " <>
-        "holding #{inspect(repo)} in your application's start/2."
+      "The installer found no `children = [...]` list holding #{inspect(repo)} in " <>
+        "your application's start/2, so it changed nothing. Set up the Ecto store by " <>
+        "hand (README, \"In your own database\"): put ExAtlas.Orchestrator.Supervisor " <>
+        "in your children right after #{inspect(repo)}."
     end
 
     # A host that followed the README by hand named its migration itself.
