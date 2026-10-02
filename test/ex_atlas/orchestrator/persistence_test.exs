@@ -528,6 +528,23 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       end
     end
 
+    test "an Erlang module that spells it -behavior(...) is accepted" do
+      forms = [
+        {:attribute, 1, :module, :ea87_erlang_resolver},
+        {:attribute, 1, :behavior, ExAtlas.Orchestrator.RespawnCredentials},
+        {:attribute, 1, :export, [resolve: 2]},
+        {:function, 1, :resolve, 2,
+         [{:clause, 1, [{:var, 1, :_S}, {:var, 1, :_I}], [], [{:atom, 1, :ok}]}]},
+        {:eof, 1}
+      ]
+
+      {:ok, module, binary, _warnings} = :compile.forms(forms, [:binary, :return])
+      {:module, ^module} = :code.load_binary(module, ~c"ea87_erlang_resolver.erl", binary)
+
+      assert {:ok, _pid, _compute} =
+               Orchestrator.run_task(task_opts(respawn_credentials: {module, :resolve, [:x]}))
+    end
+
     test "a function the module does not export is refused, naming it" do
       assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
                Orchestrator.run_task(
