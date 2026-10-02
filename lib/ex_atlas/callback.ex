@@ -173,6 +173,9 @@ defmodule ExAtlas.Callback do
   worst outcome available: the task looks healthy and the operator learns
   nothing until the deadline fires an hour later. For local development, point
   `:callback` at a tunnel (cloudflared, ngrok, a Tailscale funnel).
+
+  A URL with userinfo, a query or a fragment is refused in every mode: the
+  pod appends `/finish`, and userinfo would show in `ps` where curl runs.
   """
   @spec prepare(keyword()) :: {:ok, keyword()} | {:error, term()}
   def prepare(opts) do
@@ -267,6 +270,17 @@ defmodule ExAtlas.Callback do
 
   defp validate_url(url, allow_insecure?) do
     case URI.new(url) do
+      {:ok, %URI{userinfo: userinfo}} when userinfo != nil ->
+        {:error, {:invalid_callback_url, :has_userinfo}}
+
+      # The pod appends `/finish` to the URL, which a query or a fragment
+      # would swallow.
+      {:ok, %URI{query: query}} when query != nil ->
+        {:error, {:invalid_callback_url, :has_query}}
+
+      {:ok, %URI{fragment: fragment}} when fragment != nil ->
+        {:error, {:invalid_callback_url, :has_fragment}}
+
       {:ok, %URI{scheme: scheme, host: host} = uri} when is_binary(host) and host != "" ->
         check_reachability(uri, scheme, host, allow_insecure?)
 
