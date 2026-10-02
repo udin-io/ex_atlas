@@ -325,6 +325,12 @@ end
 The usual `{:terminating, _}` / `{:status, :terminated}` pair still follows,
 so a handler that only cares about "is it over?" needs no changes.
 
+### Datasets in, artifacts out
+
+A task's disk goes with the pod. Pass `s3:` and use the reference entrypoint
+to pull a dataset before the trainer starts and upload its results when it
+ends. See the [data staging guide](data_staging.md).
+
 ### The pod must end itself
 
 This is the part that surprises people. Runpod's REST v2 API reports no exit

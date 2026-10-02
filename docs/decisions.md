@@ -17,6 +17,9 @@ names the PR or issue that holds the reasoning.
 | An `env:` entry that `s3:` would also set is an error naming it | Either side wins silently | #26, #75 |
 | `s3:` and `env:` are validated after NimbleOptions, with messages that name keys, never values | NimbleOptions types: its `ValidationError` holds the input | #26, #75 |
 | `inspect(%Spec.Compute{})` hides `raw` | Leave it: RunPod echoes env in `raw` | #26, #75 |
+| The reference entrypoint runs the trainer behind a fifo and `wait`, so the exit code is the trainer's | `trainer \| tee`: reports tee's status, and POSIX `sh` has no `pipefail` | #72 |
+| A failed pull still uploads the log; an upload failure is printed and the trainer's exit code stands | Skip the upload after a failed pull; fail the task on an upload error | #26, #72 |
+| The guide states no Tigris checksum claim; it gives the generic `when_required` fix with AWS's page as source | State that Tigris accepts the default, with no source | #26, #72 |
 | The tracker holds `s3:` as a `Spec.Staging`, validated at the top of `Orchestrator.spawn/1`; `Config.build_ctx/2` drops `:s3` | Rely on `format_status/1`: OTP prints a crashing callback's arguments in the stacktrace, outside it | #75 review |
 | `persist: true` with `s3:` is refused until #74 | Store `s3:` like `env:`: a credential on disk | #26, #75 |
 | URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
