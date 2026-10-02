@@ -53,6 +53,10 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
   # Routes for the firewall calls a spawn with `ports:` makes. A test that
   # asserts on them registers its own expects instead.
   defp stub_firewall(bypass) do
+    Bypass.stub(bypass, "GET", "/firewall-rulesets", fn conn ->
+      json(conn, 200, %{"data" => []})
+    end)
+
     Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
       json(conn, 200, %{"data" => ruleset(%{"id" => "rs-stub"})})
     end)
@@ -480,7 +484,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       body
     end
 
-    setup do
+    # Each spawn lists the rulesets first, to sweep (see the next describe).
+    setup %{bypass: bypass} do
+      Bypass.stub(bypass, "GET", "/firewall-rulesets", fn conn ->
+        json(conn, 200, %{"data" => []})
+      end)
+
       {:ok, log: start_supervised!({Agent, fn -> [] end})}
     end
 
@@ -748,6 +757,144 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
                ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
 
       assert message =~ "source_network"
+    end
+  end
+
+  describe "spawn_compute/1 sweeps unused rulesets" do
+    @old "2026-01-01T00:00:00Z"
+
+    # Lambda refuses to delete a ruleset an instance uses, so every spawn
+    # first deletes the `atlas-` rulesets none uses.
+    defp expect_list(bypass, rulesets) do
+      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+        json(conn, 200, %{"data" => rulesets})
+      end)
+    end
+
+    defp expect_create(bypass) do
+      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+        json(conn, 200, %{"data" => ruleset(%{"id" => "rs-new"})})
+      end)
+    end
+
+    # Reports each DELETE to the test; answers with `status`.
+    defp track_deletes(bypass, status \\ 200) do
+      test_pid = self()
+
+      Bypass.stub(bypass, "DELETE", "/firewall-rulesets/:id", fn conn ->
+        send(test_pid, {:deleted, List.last(conn.path_info)})
+        json(conn, status, %{"data" => %{}})
+      end)
+    end
+
+    defp deleted do
+      for {:deleted, id} <- Process.info(self(), :messages) |> elem(1), do: id
+    end
+
+    test "deletes old atlas- rulesets with no instance; keeps one in use, a young one and a foreign one",
+         %{bypass: bypass, opts: opts} do
+      young = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      expect_types(bypass)
+      expect_create(bypass)
+      expect_launch(bypass)
+      track_deletes(bypass)
+
+      expect_list(bypass, [
+        ruleset(%{"id" => "rs-unused", "name" => "atlas-old-a", "created" => @old}),
+        ruleset(%{"id" => "rs-unused-2", "name" => "atlas-old-b", "created" => @old}),
+        ruleset(%{
+          "id" => "rs-busy",
+          "name" => "atlas-busy",
+          "created" => @old,
+          "instance_ids" => ["inst-1"]
+        }),
+        ruleset(%{"id" => "rs-young", "name" => "atlas-young", "created" => young}),
+        ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "created" => @old})
+      ])
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert Enum.sort(deleted()) == ["rs-unused", "rs-unused-2"]
+    end
+
+    test "a ruleset that lists no instance_ids or no created time is kept", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+      expect_create(bypass)
+      expect_launch(bypass)
+      track_deletes(bypass)
+
+      expect_list(bypass, [
+        Map.delete(
+          ruleset(%{"id" => "rs-a", "name" => "atlas-a", "created" => @old}),
+          "instance_ids"
+        ),
+        Map.delete(
+          ruleset(%{"id" => "rs-b", "name" => "atlas-b", "instance_ids" => []}),
+          "created"
+        ),
+        ruleset(%{"id" => "rs-c", "name" => "atlas-c", "created" => "not a time"})
+      ])
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert deleted() == []
+    end
+
+    test "deletes at most ten per spawn", %{bypass: bypass, opts: opts} do
+      expect_types(bypass)
+      expect_create(bypass)
+      expect_launch(bypass)
+      track_deletes(bypass)
+
+      expect_list(
+        bypass,
+        for(
+          n <- 1..12,
+          do: ruleset(%{"id" => "rs-#{n}", "name" => "atlas-#{n}", "created" => @old})
+        )
+      )
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert length(deleted()) == 10
+    end
+
+    test "a refused delete does not fail the spawn or stop the next delete", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+      expect_create(bypass)
+      expect_launch(bypass)
+      track_deletes(bypass, 400)
+
+      expect_list(bypass, [
+        ruleset(%{"id" => "rs-1", "name" => "atlas-1", "created" => @old}),
+        ruleset(%{"id" => "rs-2", "name" => "atlas-2", "created" => @old})
+      ])
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert Enum.sort(deleted()) == ["rs-1", "rs-2"]
+    end
+
+    test "a failed list does not fail the spawn", %{bypass: bypass, opts: opts} do
+      expect_types(bypass)
+      expect_create(bypass)
+      expect_launch(bypass)
+
+      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+        json(conn, 403, %{"error" => %{"code" => "global/account-inactive"}})
+      end)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+    end
+
+    test "a spawn with no ports sweeps nothing", %{bypass: bypass, opts: opts} do
+      # No GET route: a list request fails the test.
+      expect_types(bypass)
+      expect_launch(bypass)
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: []])
     end
   end
 
