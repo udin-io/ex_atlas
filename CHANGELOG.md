@@ -7,6 +7,25 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed: `Compute.raw` no longer holds a RunPod pod's `env` (#126)
+
+RunPod echoes a pod's `env` (its bearer token, the callback token and the
+`s3:` secret) in the pod body. A tracker holds the `Compute` in its state and
+poll replies, so a crash report's last message or `inspect(.., structs: false)`
+printed them.
+
+```elixir
+{:ok, compute} = ExAtlas.get_compute(id, provider: :runpod)
+compute.raw["env"]
+# before: %{"HF_TOKEN" => "...", "ATLAS_CALLBACK_TOKEN" => "..."}
+# after:  nil
+```
+
+- Every other `raw` key stays. Code that read `compute.raw["env"]` gets `nil`:
+  read the value you passed to `spawn_compute/1` instead.
+- `Spec.Endpoint.raw` and `Spec.Template.raw` keep `env`; no tracker holds
+  them and `inspect/1` hides it.
+
 ### Fixed: a Reaper that restarts reaps again (#122)
 
 With a tracking store, a Reaper that crashed and restarted waited for the
