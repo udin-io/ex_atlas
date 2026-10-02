@@ -361,6 +361,30 @@ Your image needs a shell and `curl`. If it has neither, pass
 and report `:timed_out`, which is honest but wasteful, so size the deadline
 accordingly.
 
+#### On Lambda Labs, the host reports instead
+
+A Lambda instance holds no key that can delete it, so nothing in the
+container can end the bill. Pass a `:callback`: the instance's cloud-init
+script starts a `systemd-run` unit that runs `docker wait atlas` and POSTs
+the container's exit code to `$ATLAS_CALLBACK_URL/finish` with the host's
+own `curl`. The tracker finishes on that report after `:finish_grace_ms` and
+terminates the instance. Your image needs no shell and no `curl`.
+
+```elixir
+ExAtlas.Orchestrator.run_task(
+  provider: :lambda_labs,
+  gpu: :a10,
+  image: "ghcr.io/acme/trainer:latest",
+  command: ["python", "train.py"],
+  callback: "https://app.example.com/atlas/cb",
+  max_cost: 5.0
+)
+```
+
+Without a callback, `command:` with the default `self_terminate: true` is
+`{:error, %ExAtlas.Error{kind: :validation}}` before anything is rented. Pass
+`self_terminate: false` to accept `:max_runtime_ms` as the only end.
+
 ### Why `:max_runtime_ms` is not optional
 
 Self-termination cannot run when there is nothing left in the container to run

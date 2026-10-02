@@ -121,8 +121,9 @@ The container gets three environment variables:
 ## The container side
 
 `/finish` is already handled for you: the self-termination wrapper ExAtlas
-generates POSTs the exit code from its `trap`, before deleting the pod. You
-only write code for progress and logs.
+generates POSTs the exit code from its `trap`, before deleting the pod. On
+Lambda Labs the instance's host POSTs it once `docker wait` returns, and the
+tracker deletes the instance. You only write code for progress and logs.
 
 ```sh
 #!/bin/sh

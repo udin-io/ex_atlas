@@ -14,8 +14,8 @@ feature #26). It feeds the choice of the next feature. Dates are merge dates.
 
 | Feature | Slice | State |
 |---|---|---|
-| Lambda Labs provider (#83) | 1, #84: spawn a container through cloud-init, get, list, terminate, GPU types | PR #89 |
-| Lambda Labs provider (#83) | 2, #85: `command:`, `run_task/1`, the Reaper on Lambda | Filed |
+| Lambda Labs provider (#83) | 1, #84: spawn a container through cloud-init, get, list, terminate, GPU types | Merged in #89, 2026-10-02 |
+| Lambda Labs provider (#83) | 2, #85: `command:`, `run_task/1` ended by the host's report, the Reaper on Lambda | PR #90 |
 | Lambda Labs provider (#83) | 3, #86: open `ports:` in Lambda's firewall | Filed |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;

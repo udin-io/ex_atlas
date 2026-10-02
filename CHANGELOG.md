@@ -24,14 +24,32 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
 - Instance tags `atlas-ports`, `atlas-created-at` and `atlas-image` let
   `get_compute/2` and `list_compute/1` rebuild `ports`, URLs and
   `created_at` on any node.
-- `stop/2`, `start/2`, `spot: true`, `template_id:`, `network_volume_id:`
-  and `command:` return `:unsupported`. Open `ports:` in Lambda's firewall
-  yourself for now.
+- `stop/2`, `start/2`, `spot: true`, `template_id:` and
+  `network_volume_id:` return `:unsupported`. Open `ports:` in Lambda's
+  firewall yourself for now.
 - `raw` leaves out `jupyter_token` and `jupyter_url`. A refused launch keeps
   its status and Lambda's error code, and withholds Lambda's message, which
   can echo `user_data`.
 - An env name starting `DOCKER_` or `LD_`, a value or image that is not
   UTF-8, and an image starting with `-` are `:validation`.
+
+### Added: Lambda Labs `command:` and `run_task/1` (#85)
+
+- `command:` runs in the container, after the image, each argument
+  shell-quoted. `command: []` runs the image's own command.
+- With a `callback:`, the instance's host reports the container's exit code:
+  a `systemd-run` unit runs `docker wait atlas` and POSTs
+  `{"exit_code": n}` to `$ATLAS_CALLBACK_URL/finish`. `run_task/1` ends on
+  that report and terminates the instance. The image needs no `curl`.
+- `command:` with `self_terminate: true` (the default) and no callback is
+  `:validation` before any request: Lambda gives an instance no key to
+  delete itself, so nothing would end it.
+- `command:` without `image:`, and a command argument holding a NUL byte or
+  not UTF-8, are `:validation`.
+- `config :ex_atlas, :lambda_labs, base_url:` sets the API URL for calls that
+  pass none, such as the Reaper's list.
+- An `atlas-created-at` tag more than ten minutes ahead of the clock reads
+  as no `created_at`, so the Reaper gives that instance no grace window.
 
 ### Changed: spawn POSTs retry on a 429 only (#84)
 
