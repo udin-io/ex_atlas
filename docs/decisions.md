@@ -224,6 +224,11 @@ names the PR or issue that holds the reasoning.
 | Owner leases live in the store's database, in `atlas_owner_leases` | Erlang clustering: Fly machines on one account often run unclustered | #132 |
 | Each record is claimed by its own conditional `UPDATE` that writes owner and signed blob together and re-checks the old owner and its expired lease | One bulk `UPDATE` of the owner column: the blob and its signature would still name the dead owner | #132 |
 | `claim_expired/3` takes a rewrite function; ExAtlas signs, the store writes | The store signs: signing stays in one module | #132 |
+| An unsigned record adopts only when `Reaper.refusal/3` passes on what the provider reports: provider covered, billing status, owner or no connected peers, prefix and owner in the name | Compare the record's `:name` (the writer writes it); a config switch that stops adopting unsigned records (open on every node that never flips it); document only | #138 |
+| An unsigned record whose pod the provider cannot report at boot is kept, not adopted | Adopt on the placeholder and check at the tracker's first poll: two places decide, and the deadline may fire first | #138 |
+| The Adopter observes the pod before it claims an unowned record | Claim first: a refused record would gain this node's owner | #138 |
+| An ownerless node refuses unsigned records only while connected to peers, as the Reaper does | Refuse every unsigned record on an ownerless node: no single-node host with no callback secret would adopt any task | #138 |
+| `spawn/1` warns, and spawns, when an unsigned record will not adopt (`Reaper.refusal/3` on a running pod of that name) | Refuse the spawn: a node with no secret and an unprefixed name ran before | #138 |
 | A takeover claims only records this node's key verifies | Claim any record: an unsigned record can name any pod of the account, and the deadline would delete it (#138) | #132 |
 | `lease_ttl_ms` defaults to 90 s, renewed every third, bounded 1 s to one hour | A shorter TTL: a GC pause or slow database must not hand a live node's tasks away. No upper bound: a dead node's tasks would wait out any TTL | #132 |
 | A node that cannot renew its own lease claims nothing | Claim anyway: the node that cannot renew may be the one cut off | #132 |

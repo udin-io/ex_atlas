@@ -154,6 +154,12 @@ defmodule ExAtlas.Orchestrator do
   Reaper reclaim it as an orphan. See `ExAtlas.Orchestrator.TrackingStore` for
   what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
 
+  The node signs the record with a key from its callback secret. With no
+  secret the record is unsigned, and the next boot adopts it only for a pod
+  this node's Reaper would delete: a provider in `:reap_providers`, and a
+  name that starts with `:reap_name_prefix` (and carries the `:reap_owner`,
+  which `spawn/1` writes in). `spawn/1` warns when it will not.
+
   With `s3:` the record keeps the endpoint, region and URIs, never the keys or
   presigned URLs, and with `env:` the names alone. An adopted task runs on.
   A respawn after adoption asks the host for the left-out values through
@@ -188,6 +194,7 @@ defmodule ExAtlas.Orchestrator do
          {:ok, opts} <- Ownership.stamp(opts),
          :ok <- warn_unreaped_respawn(opts, tracking),
          :ok <- warn_unsigned_respawn(opts, tracking),
+         :ok <- warn_unsigned_adoption(opts, tracking),
          {:ok, compute} <- ExAtlas.spawn_compute(opts),
          :ok <- require_price(compute, opts, tracking) do
       persist(compute, opts, tracking)
@@ -223,6 +230,29 @@ defmodule ExAtlas.Orchestrator do
         "[ExAtlas.Orchestrator] #{inspect(Keyword.get(opts, :name))} cannot respawn after a " <>
           "restart: its tracking record is unsigned, and an adopted task respawns only from a " <>
           "record this node signed. Set config :ex_atlas, :callback, secret: (32 bytes or more)."
+      )
+    end
+
+    :ok
+  end
+
+  # An unsigned record adopts only a pod this node's Reaper would delete
+  # (issue 138), judged as at a boot that finds the pod running.
+  # `Ownership.stamp/1` has run, so a prefixed name carries the owner already.
+  defp warn_unsigned_adoption(opts, tracking) do
+    name = Keyword.get(opts, :name)
+    {provider, _opts} = Config.pop_provider!(opts)
+    pod = %ExAtlas.Spec.Compute{id: "", provider: provider, name: name, status: :running}
+
+    with true <- tracking[:persist],
+         false <- TrackingStore.signs?(),
+         {:ok, owner} <- Ownership.owner(),
+         why when is_binary(why) <- Reaper.refusal(provider, pod, owner) do
+      Logger.warning(
+        "[ExAtlas.Orchestrator] #{inspect(name)} will not be adopted after a restart: its " <>
+          "tracking record is unsigned, and an unsigned record adopts only a pod this node's " <>
+          "Reaper would delete; #{why}. Set config :ex_atlas, :callback, secret: " <>
+          "(32 bytes or more), or change what the Reaper covers."
       )
     end
 

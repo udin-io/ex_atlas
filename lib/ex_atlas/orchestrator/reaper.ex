@@ -257,9 +257,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp ownership_gate({:error, error}), do: {{:closed, {:invalid_owner, error}}, []}
 
   defp ownership_gate({:ok, nil}) do
-    if Node.list() == [],
-      do: {{:ok, nil}, []},
-      else: {{:closed, :clustered_without_owner}, []}
+    if clustered_without_owner?(nil),
+      do: {{:closed, :clustered_without_owner}, []},
+      else: {{:ok, nil}, []}
   end
 
   defp ownership_gate({:ok, owner}) do
@@ -387,6 +387,39 @@ defmodule ExAtlas.Orchestrator.Reaper do
     }
   end
 
+  @doc false
+  # Why this node's Reaper would never delete `compute` of `provider` once
+  # nothing tracks it, or nil: the provider, the status, the cluster and the
+  # name, as a tick decides them. The Adopter adopts a record this node did not
+  # sign only when this is nil (issue 138), since an adopted task deletes its
+  # pod. A connected peer that shares `owner` is not checked here.
+  @spec refusal(atom() | module(), ExAtlas.Spec.Compute.t(), String.t() | nil) ::
+          String.t() | nil
+  def refusal(provider, compute, owner) do
+    prefix = Ownership.prefix()
+
+    cond do
+      not covers?(provider) ->
+        "#{inspect(provider)} is not in :reap_providers"
+
+      compute.status not in @billing_statuses ->
+        "the provider reports it #{inspect(compute.status)}, and the Reaper deletes only " <>
+          "a pod that bills (#{Enum.map_join(@billing_statuses, ", ", &inspect/1)})"
+
+      clustered_without_owner?(owner) ->
+        "this node has no :reap_owner and is connected to other nodes"
+
+      not Ownership.ours?(compute.name, prefix, owner) ->
+        "the provider names the pod #{inspect(compute.name)}, which the Reaper does not " <>
+          "delete (:reap_name_prefix #{inspect(prefix)}, :reap_owner #{inspect(owner)})"
+
+      true ->
+        nil
+    end
+  end
+
+  defp clustered_without_owner?(owner), do: owner == nil and Node.list() != []
+
   @doc """
   Whether a periodic Reaper reclaims `provider`'s orphans: whether it is in
   `:reap_providers`, by atom or by module.
@@ -419,7 +452,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
         {ours, others} =
           computes
           |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
-          |> Enum.split_with(&owned?(&1, prefix, owner))
+          |> Enum.split_with(&Ownership.ours?(&1.name, prefix, owner))
 
         Enum.each(ours, fn compute ->
           _ = ExAtlas.terminate(compute.id, provider: provider)
@@ -461,13 +494,6 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   defp error_kind(%ExAtlas.Error{kind: kind}), do: " (#{inspect(kind)})"
   defp error_kind(_error), do: ""
-
-  # With no owner the gate has already checked this node is alone, and every
-  # untracked prefixed pod is its own, as before owners existed.
-  defp owned?(_compute, _prefix, nil), do: true
-
-  defp owned?(compute, prefix, owner),
-    do: Ownership.classify(compute.name, prefix, owner) == :ours
 
   defp leave_alone(compute, prefix, owner, seen) do
     if MapSet.member?(seen, compute.id) do

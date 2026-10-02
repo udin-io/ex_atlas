@@ -21,6 +21,10 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
 
   @node_key "node-key-5c1f"
   @pod_id "pod-forged"
+  # The records here are unsigned, so they adopt only a pod named as this
+  # node's Reaper would delete it (issue 138): with the prefix, and with the
+  # owner "m1" that some tests set.
+  @pod_name "atlas-m1-forged"
 
   # Exports `capabilities/0`, which `ExAtlas.Config.provider_module/1` takes,
   # and declares no `ExAtlas.Provider`.
@@ -68,7 +72,10 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
 
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
-        |> Plug.Conn.resp(200, ~s({"id": "#{@pod_id}", "desiredStatus": "RUNNING"}))
+        |> Plug.Conn.resp(
+          200,
+          ~s({"id": "#{@pod_id}", "name": "#{@pod_name}", "desiredStatus": "RUNNING"})
+        )
       end)
     end
   end
@@ -329,7 +336,11 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
       tmp_dir: dir
     } do
       store = start_ecto!(dir)
-      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      # The record is unsigned, so its provider must be one the Reaper covers.
+      TestOrchestrator.put_env(reap_providers: [:mock])
+
+      {:ok, compute} =
+        ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x", name: @pod_name)
 
       :ok =
         store.put(

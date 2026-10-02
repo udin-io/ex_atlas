@@ -16,7 +16,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
     * **404 / the provider does not know it** — delete the record. There is
       nothing to adopt and nothing to bill, and starting a tracker would only
       broadcast a death nobody is listening for.
-    * **anything else** — start a `ExAtlas.Orchestrator.ComputeServer` with
+    * **anything else**, for a record this node signed (an unsigned one, see
+      below) — start a `ExAtlas.Orchestrator.ComputeServer` with
       `{:adopted, record}`, which recomputes the deadline from the record's
       wall-clock anchor and polls immediately. A resource that died during the
       downtime is then classified by the tracker's own first poll, through the
@@ -28,8 +29,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
   death-classification logic — which is the thing `UpstreamStatus` was
   extracted to prevent.
 
-  A provider that cannot be reached at all is *not* a reason to skip adoption.
-  The record gets its tracker anyway, on a placeholder observation the
+  A provider that cannot be reached at all is *not* a reason to skip adopting
+  a signed record. It gets its tracker anyway, on a placeholder observation the
   immediate first poll corrects, because the carried deadline is the one thing
   that must be re-armed even when the provider is having a bad day.
 
@@ -70,6 +71,23 @@ defmodule ExAtlas.Orchestrator.Adopter do
       record.
     * **An invalid `:reap_owner`** adopts nothing and keeps every record, as the
       Reaper reaps nothing while the owner is invalid.
+
+  ## Records this node did not sign
+
+  An adopted task deletes its pod at its deadline with this node's key, and
+  whoever wrote the record chose the pod id. A record whose signature does not
+  check (`ExAtlas.Orchestrator.TrackingStore.sealed?/1`) is adopted only when
+  the provider reports, for the record's provider, what this node's Reaper
+  would delete once untracked: a provider in `:reap_providers`, a pod that
+  bills (`:provisioning` or `:running`), a node that has a `:reap_owner` or
+  is not connected to others, and a name that starts with
+  `:reap_name_prefix` and carries that owner. Any other unsigned record, and one whose pod the
+  provider could not report, is skipped, kept, logged and not claimed. The
+  next boot checks it again.
+
+  The cluster test reads `Node.list/0` at boot, which may run before the
+  cluster connects, and no peer is asked for a duplicate owner, as the
+  Reaper's tick does.
 
   ## Records this build does not understand
 
@@ -274,18 +292,12 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   # Same owner, or no owner on either side: ours, as before.
-  defp adopt_by_owner(record, owner, owner, store), do: reconcile(record, store)
+  defp adopt_by_owner(record, owner, owner, store), do: reconcile(record, owner, store, false)
 
   # An unowned record: the first node to adopt it claims it, so later boots on
-  # other nodes skip it. The claim lands before the tracker starts, so the
-  # tracker's own record updates keep it.
-  defp adopt_by_owner(record, nil, owner, store) do
-    claimed = Map.put(record, :owner, owner)
-    {sealed?, stored} = Map.pop(claimed, :sealed)
-    # The tracker gets the values an older record holds; the store does not.
-    store.put(TrackingStore.rewrite(stored, sealed?))
-    reconcile(claimed, store)
-  end
+  # other nodes skip it.
+  defp adopt_by_owner(record, nil, owner, store),
+    do: reconcile(Map.put(record, :owner, owner), owner, store, true)
 
   # Another node's task: no provider call, no delete, no tracker.
   defp adopt_by_owner(record, other, _owner, _store), do: {:other_owner, other, record.id}
@@ -301,7 +313,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
     )
   end
 
-  defp reconcile(record, store) do
+  defp reconcile(record, owner, store, claim?) do
     case observe(record) do
       # The provider has forgotten the id entirely: `{:dead, _, nil}` is
       # `UpstreamStatus`'s way of saying there is nothing left to terminate,
@@ -310,7 +322,46 @@ defmodule ExAtlas.Orchestrator.Adopter do
         store.delete(record.id)
 
       observation ->
+        track(record, observation, owner, store, claim?)
+    end
+  end
+
+  defp track(record, observation, owner, store, claim?) do
+    case unsigned_refusal(record, observation, owner) do
+      nil ->
+        if claim?, do: claim(record, store)
         start_tracker(record, compute(observation, record))
+
+      why ->
+        skip(record, why)
+    end
+  end
+
+  # The claim lands before the tracker starts, so the tracker's own record
+  # updates keep it, and after the check, so a refused record stays unowned.
+  defp claim(record, store) do
+    {sealed?, stored} = Map.pop(record, :sealed)
+    # The tracker gets the values an older record holds; the store does not.
+    store.put(TrackingStore.rewrite(stored, sealed?))
+  end
+
+  # Whoever wrote an unsigned record chose its id, and an adopted task deletes
+  # that id with this node's key. So it adopts only a pod this node's Reaper
+  # would delete too, judged on what the provider reports: a record field
+  # proves nothing (issue 138).
+  defp unsigned_refusal(%{sealed: true}, _observation, _owner), do: nil
+
+  defp unsigned_refusal(_record, {:poll_failed, _error}, _owner),
+    do:
+      "its record is not signed by this node, and its pod could not be checked " <>
+        "(the provider did not answer); the next boot checks again"
+
+  defp unsigned_refusal(record, observation, owner) do
+    provider = Keyword.fetch!(TrackingStore.observe_opts(record), :provider)
+
+    case Reaper.refusal(provider, compute(observation, record), owner) do
+      nil -> nil
+      why -> "its record is not signed by this node, and #{why}"
     end
   end
 

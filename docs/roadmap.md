@@ -27,7 +27,7 @@ serverless, and SSH and Jupyter modes stay out of scope.
 
 | Feature | Ticket | State |
 |---|---|---|
-| Database tracking store, slice 3: owner leases, so a live node adopts a dead node's records | #132 | PR #139 open |
+| An unsigned tracking record adopts only a pod this node's Reaper would delete (milestone 9) | #138 | PR #140 open |
 | Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. Published to Hex on 2026-10-02, from tag `v0.8.0` on `939cf2e` |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
@@ -37,6 +37,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Database tracking store, slice 3 (milestone 9) | #139 (#132): owner leases on the Ecto store, so a live node adopts a dead node's signed records | 2026-10-02 |
 | Database tracking store, slice 2 (milestone 9) | #129 (#128): `mix ex_atlas.install --tracking-store ecto`, and the conformance suites in `lib` | 2026-10-02 |
 | Database tracking store, slice 1 (milestone 9) | #123 (#120): `TrackingStore.Ecto`, its migration module and `ExAtlas.Orchestrator.Supervisor`, which the host starts after its repo | 2026-10-02 |
 | A respawning task warns when no Reaper covers its provider, and an adopted task's revived pod reports again (risk 51) | #119 (#118) | 2026-10-02 |

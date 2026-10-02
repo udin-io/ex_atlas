@@ -14,10 +14,16 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
   alias ExAtlas.Orchestrator
   alias ExAtlas.Orchestrator.{Adopter, Events, TrackingStore}
   alias ExAtlas.Providers.Mock
-  alias ExAtlas.Test.{CredentialResolver, Repo}
+  alias ExAtlas.Test.{CredentialResolver, FaultyProvider, Repo}
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
   @moduletag :tmp_dir
+
+  # An unsigned record adopts only on a provider the Reaper covers (issue
+  # 138), and these tests rent on the Mock.
+  setup do
+    TestOrchestrator.put_env(reap_providers: [:mock])
+  end
 
   defp start_dets!(dir) do
     TestOrchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
@@ -274,11 +280,225 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
     end
   end
 
+  # Issue 138: a writer of the store, without the node's secret, files an
+  # unsigned record under the id of a pod it wants deleted, with its deadline
+  # spent. The pod's name is the provider's, so the writer cannot pick it.
+  describe "an unsigned record naming a pod this node's Reaper would not delete" do
+    # The Reaper covers the providers these tests rent on, so each refusal
+    # below fires on the one clause it names.
+    setup do
+      TestOrchestrator.put_env(reap_providers: [:mock, FaultyProvider])
+    end
+
+    defp rent!(name, provider \\ :mock) do
+      {:ok, compute} =
+        ExAtlas.spawn_compute(provider: provider, gpu: :h100, image: "postgres:16", name: name)
+
+      compute
+    end
+
+    # A record as this node's own code writes it, unsigned, its 90 minutes spent.
+    defp forge!(%{id: id}, provider \\ :mock) do
+      opts = [provider: provider, gpu: :h100, image: "postgres:16", name: "atlas-forged"]
+      compute = %ExAtlas.Spec.Compute{id: id, provider: provider, status: :running}
+      tracking = [mode: :task, max_runtime_ms: 90 * 60 * 1_000, persist: true]
+
+      record =
+        compute
+        |> TrackingStore.new(opts, tracking)
+        |> Map.delete(:mac)
+        |> Map.update!(:spawned_at_ms, &(&1 - 2 * 60 * 60 * 1_000))
+
+      put_row!(record)
+      record
+    end
+
+    defp adopt(id) do
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = Adopter.run(notify: self())
+        assert_receive :adoption_complete, 2_000
+      end)
+    end
+
+    defp assert_left_alone(id, log, status \\ :running) do
+      refute_receive {:atlas_compute, ^id, {:status, :terminated}}, 200
+      assert {:error, :not_tracked} = Orchestrator.info(id)
+      assert {:ok, %{status: ^status}} = ExAtlas.get_compute(id, provider: :mock)
+      assert {:ok, _kept} = TrackingStore.Ecto.get(id)
+      assert log =~ "not adopting #{id}"
+      assert log =~ "not signed by this node"
+    end
+
+    defp assert_deleted(id) do
+      assert_receive {:atlas_compute, ^id, {:status, :terminated}}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "outside :reap_name_prefix: the pod runs on, untracked, its record kept",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("billing-db")
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ ~s(names the pod "billing-db")
+    end
+
+    test "on a provider outside :reap_providers: left alone", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_providers: [:runpod])
+      pod = rent!("atlas-train")
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ ":reap_providers"
+    end
+
+    # `observe_opts/1` reads `opts[:provider]` before `record.provider`, so the
+    # check reads the provider the calls go to.
+    test "naming a covered provider beside the opts' uncovered one: left alone",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_providers: [:runpod])
+      pod = rent!("atlas-train")
+      record = forge!(pod)
+      put_row!(%{record | provider: :runpod})
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ ":mock is not in :reap_providers"
+    end
+
+    test "of a stopped pod: left alone, not deleted", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("atlas-train")
+      :ok = Mock.stop(pod.id, %{})
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log, :stopped)
+      assert log =~ "reports it :stopped"
+    end
+
+    test "on a node with no owner that is connected to another: left alone", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      _peer = ExAtlas.Test.Cluster.start_peer!()
+      pod = rent!("atlas-train")
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ "connected to other nodes"
+    end
+
+    test "named with another node's owner: left alone", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_owner: "m1")
+      pod = rent!("atlas-m2-train")
+      forge!(pod)
+
+      assert_left_alone(pod.id, adopt(pod.id))
+    end
+
+    test "named with the prefix and no owner, on a node with one: left alone",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_owner: "m1")
+      pod = rent!("atlas-train")
+      forge!(pod)
+
+      assert_left_alone(pod.id, adopt(pod.id))
+    end
+
+    test "with no owner, and the record unowned: it is not claimed", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("billing-db")
+      forge!(pod)
+      TestOrchestrator.put_env(reap_owner: "m1")
+
+      assert_left_alone(pod.id, adopt(pod.id))
+      assert {:ok, %{owner: nil}} = TrackingStore.Ecto.get(pod.id)
+    end
+
+    test "whose provider does not answer: left alone, its record kept", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("atlas-train", FaultyProvider)
+      forge!(pod, FaultyProvider)
+      FaultyProvider.arm(:get_compute, :raise)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ "could not be checked"
+    end
+
+    test "control: a pod this node's Reaper would delete is adopted, and its deadline deletes it",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_owner: "m1")
+      pod = rent!("atlas-m1-train")
+      forge!(pod)
+
+      adopt(pod.id)
+
+      assert_deleted(pod.id)
+    end
+
+    test "control: with no owner, an unowned record of a prefixed pod is claimed and adopted",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("atlas-train")
+      forge!(pod)
+      TestOrchestrator.put_env(reap_owner: "m1")
+      # The pod predates the owner, so its name carries none; claim it as the
+      # owner-less node that wrote it would.
+      TestOrchestrator.put_env(reap_owner: nil)
+
+      adopt(pod.id)
+
+      assert_deleted(pod.id)
+    end
+
+    test "control: a signed record of the same pod is adopted", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("billing-db")
+      record = forge!(pod)
+      put_row!(TrackingStore.seal(record))
+
+      adopt(pod.id)
+
+      assert_deleted(pod.id)
+    end
+
+    test "control: a signed record whose provider does not answer is adopted, and its deadline deletes the pod",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("billing-db", FaultyProvider)
+      put_row!(TrackingStore.seal(forge!(pod, FaultyProvider)))
+      FaultyProvider.arm(:get_compute, :raise)
+
+      adopt(pod.id)
+
+      assert_deleted(pod.id)
+    end
+  end
+
   describe "a rewrite of a record that is not signed" do
+    # The pod carries m2 in its name, so the unsigned record passes the name
+    # check (issue 138) and reaches the claim.
     test "a claim does not sign it", %{tmp_dir: dir} do
       store = start_ecto!(dir)
-      %{id: id} = orphaned_task()
       TestOrchestrator.put_env(reap_owner: "m2")
+      %{id: id} = orphaned_task()
       {:ok, record} = store.get(id)
       put_row!(record |> Map.delete(:mac) |> Map.put(:owner, nil))
 
