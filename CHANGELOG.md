@@ -156,7 +156,7 @@ A tracker or provider crash printed the per-call `api_key:` in its
 stacktrace: OTP prints a crashed function's arguments outside
 `format_status/1`. The new `ExAtlas.Secret` prints as
 `#ExAtlas.Secret<redacted>`. `Orchestrator.spawn/1` and
-`Config.build_ctx/2` wrap `api_key:` and the `:auth`, `:headers` and
+the provider context builder in `ExAtlas.Config` wrap `api_key:` and the `:auth`, `:headers` and
 `:aws_sigv4` entries of `req_options:` in it before anything else reads them.
 An `api_key:` that is not a string, or a `req_options:` that is not a keyword
 list, raises (or, from `spawn/1`, returns) a `NimbleOptions.ValidationError`
@@ -190,7 +190,7 @@ its `inspect/1` shows no credential. Validation errors carry `key: :s3`,
 `value: nil` and no value in the message. An `env:` entry that `s3:` also sets
 is an error. `Orchestrator.spawn/1` returns an invalid `s3:` as an error and
 keeps a valid one as a `Spec.Staging`, so no tracker stacktrace prints a
-credential; `Config.build_ctx/2` drops `:s3`, so no provider ctx carries it.
+credential; the provider context builder in `ExAtlas.Config` drops `:s3`, so no provider ctx carries it.
 Request opts that are not a keyword list are refused without printing them.
 Tracking records and tracker crash reports drop `s3:`, and
 `persist: true` with `s3:` is refused until slice 4 (#74). A provider builds its
@@ -288,7 +288,7 @@ provider without the new optional callbacks returns
 `{:error, %ExAtlas.Error{kind: :unsupported}}`. RunPod declares the new
 capability `:manage_endpoints`. There is no `create_endpoint`.
 
-### Removed: `ExAtlas.Providers.RunPod.endpoints_module/0` (#59)
+### Removed: the `endpoints_module` function of `ExAtlas.Providers.RunPod` (#59)
 
 A `@doc false` accessor with no caller.
 
@@ -780,7 +780,7 @@ the audit recommendations.
 ### Fixed
 
 - **A malformed pod body no longer raises** (#24) —
-  `ExAtlas.Providers.RunPod.get_compute/2` piped the response body straight
+  RunPod's `get_compute` piped the response body straight
   into a translator guarded on `is_map/1`, so a 200 carrying `null` raised a
   `FunctionClauseError` at the call site. It now returns an
   `%ExAtlas.Error{kind: :provider}`, which matters because the status poller
@@ -893,7 +893,7 @@ the audit recommendations.
   `File.mkdir_p!/1`. Previously only the default path had the fallback.
 - **`unless` → `if` throughout `deploy.ex`** (L1).
 - **`deploy/2` and `stream_deploy/3` error shape typed explicitly**
-  (L2) — new `ExAtlas.Fly.Deploy.deploy_error/0` type spec documents
+  (L2) — new `deploy_error` type in `ExAtlas.Fly.Deploy` documents
   the three `:fly_error` reason variants (`:not_found`, `:timeout`,
   `non_neg_integer()`).
 
