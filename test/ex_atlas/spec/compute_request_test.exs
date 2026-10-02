@@ -86,6 +86,13 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
       refute inspect(error) =~ "v-secret-71a4"
     end
 
+    test "a struct as env is refused without printing it" do
+      assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+               ComputeRequest.new(gpu: :h100, env: %URI{host: "v-secret-71a4"})
+
+      refute inspect(error) =~ "v-secret-71a4"
+    end
+
     test "new!/1 raises the same value-free error" do
       error =
         assert_raise NimbleOptions.ValidationError, fn ->
