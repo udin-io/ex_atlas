@@ -563,7 +563,7 @@ config :ex_atlas, :orchestrator,
 | `:runpod`     | `ExAtlas.Providers.RunPod`         | v0.1            | `:serverless, :network_volumes, :http_proxy, :raw_tcp, :symmetric_ports, :webhooks, :global_networking` |
 | `:fly`        | `ExAtlas.Providers.Fly`            | stub            | `:http_proxy, :raw_tcp, :global_networking`                                         |
 | `:lambda_labs`| `ExAtlas.Providers.LambdaLabs`     | v0.8 (compute)  | `:raw_tcp`                                                                          |
-| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:raw_tcp, :self_terminate, :spot`                                             |
+| `:vast`       | `ExAtlas.Providers.Vast`           | unreleased (compute) | `:billing, :raw_tcp, :self_terminate, :spot`                                   |
 | `:mock`       | `ExAtlas.Providers.Mock`           | v0.1 (tests)    | `:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks`            |
 
 The `:fly` stub returns `{:error, %ExAtlas.Error{kind: :unsupported}}` from
@@ -676,8 +676,14 @@ compute.ports
   `callback:` to a spot task you respawn, or a finished task (which deletes
   its instance) reads as outbid and runs again. `provider_opts: %{offer_id: id}`
   with `spot: true` is `:validation`.
-- `template_id:`, `network_volume_id:`, `stop/2` and `start/2` return
-  `:unsupported` for now.
+- `ExAtlas.stop/2` pauses an instance and `ExAtlas.start/2` resumes it; the
+  instance reads `:stopped` or `:running` on the next `get_compute/2`. A
+  stopped instance still bills its disk. `start/2` fails when the host rented
+  the GPU to someone else, with Vast's `error` code and none of its message.
+- `ExAtlas.compute_spend/2` reads Vast's charges: `total_usd`, `gpu_usd` and
+  `disk_usd` for the UTC days from `:from` (default: the instance's start) to
+  `:to`. `max_cost` reconciles against it.
+- `template_id:` and `network_volume_id:` return `:unsupported` for now.
 
 ### Canonical GPU atoms
 
@@ -1608,7 +1614,7 @@ mandate Req — it's an implementation choice of the bundled providers.
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.
 - **Unreleased** — Vast.ai compute: spawn, get, list, terminate and GPU types
   for on-demand offers (#99); `command:`, `run_task/1` and the Reaper (#105).
-  `spot: true` (#112). Next on Vast: `stop/2`, `start/2` and the bill (#98).
+  `spot: true` (#112); `stop/2`, `start/2` and `compute_spend/3` (#116).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.

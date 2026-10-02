@@ -31,6 +31,12 @@ names the PR or issue that holds the reasoning.
 | `list_gpu_types/1` makes a second, `type: "bid"` search per GPU for `spot_price_per_hour`, four searches at a time; a failed bid search leaves it `nil` | Read `min_bid` off the on-demand offers: their `dph_total` is not what a bid bills. Fail the call on a bid error: it would lose the on-demand prices | #112 |
 | A spot pick sorts by `dph_total`, and `cost_per_hour` is that `dph_total` | Sort by `min_bid`: Vast's free search lists a bid offer's `dph_total` as `min_bid` plus storage and sorts by it, so a dearer disk would win on `min_bid` and bill more | #112 |
 | A spot `command:` with no `callback:` is allowed, and the docs say to pass one | `:validation` as on Lambda: a spot task with `self_terminate: false` or its own checkpoints runs fine without one | #112 |
+| `stop/2` and `start/2` return `:ok` on Vast's acceptance | Poll until the instance reads `exited`: the tracker already polls | #116 |
+| A refused stop or start keeps Vast's `error` code and withholds `msg`; a 404 stays `:not_found` | Pass the message through, as for a refused rent | #116 |
+| `compute_spend/3` snaps `from` down to the UTC day and reports the snapped window | Pass `from` as is: Vast's charges take a day range | #116 |
+| With no `from`, `compute_spend/3` reads the instance's `start_date` | A fixed 30-day window, as RunPod's default | #116 |
+| The bill's total is the rows' `amount`; bandwidth counts in the total only | Sum the items: it would drop a charge type the items omit | #116 |
+| `Spend.raw` keeps an allow-list of row and item fields | Keep Vast's body: a row's `description` and `metadata` hold the instance label | #116 |
 
 ## Docs build (#92)
 

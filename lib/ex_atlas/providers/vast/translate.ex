@@ -171,6 +171,11 @@ defmodule ExAtlas.Providers.Vast.Translate do
 
   def priced(body, _request, _offer), do: body
 
+  @doc "The `PUT /api/v0/instances/{id}/` body that pauses or resumes an instance."
+  @spec state_body(:stopped | :running) :: map()
+  def state_body(state) when state in [:stopped, :running],
+    do: %{"state" => Atom.to_string(state)}
+
   @doc """
   The `PUT /api/v0/asks/{id}/` body. `env` values stay `ExAtlas.Secret`s
   until `Vast.Client.put/4` encodes them.
@@ -339,6 +344,68 @@ defmodule ExAtlas.Providers.Vast.Translate do
   defp ram_fits?(mb, {"gte", min}) when is_number(mb), do: mb >= min
   defp ram_fits?(mb, {"lt", max}) when is_number(mb), do: mb < max
   defp ram_fits?(_mb, _bound), do: false
+
+  @doc """
+  The `ExAtlas.Spec.Spend` of an instance from its `rows` in
+  `GET /api/v0/charges/`, over the days `[from, to)`.
+
+  `total_usd` sums the rows' `amount`; `gpu_usd` and `disk_usd` sum their
+  `gpu` and `disk` items. Bandwidth counts in the total only. No rows is a
+  bill of zero. A row with no numeric `amount` and no numeric item returns
+  `:error`: a bill that skips it would read as a smaller one.
+
+  `raw` keeps `start`, `end`, `type`, `source` and `amount` of each row and
+  `start`, `end`, `type` and `amount` of its items. The row's `description`
+  and `metadata` (the instance's label) stay out.
+  """
+  @spec charges_to_spend([map()], String.t(), DateTime.t(), DateTime.t()) ::
+          {:ok, Spec.Spend.t()} | :error
+  def charges_to_spend(rows, id, from, to) do
+    with {:ok, totals} <- row_totals(rows) do
+      {:ok,
+       %Spec.Spend{
+         compute_id: id,
+         provider: :vast,
+         total_usd: sum(Enum.map(totals, & &1.total)),
+         gpu_usd: sum(Enum.flat_map(totals, & &1.gpu)),
+         disk_usd: sum(Enum.flat_map(totals, & &1.disk)),
+         from: from,
+         to: to,
+         raw: %{"rows" => Enum.map(rows, &charge_raw/1)}
+       }}
+    end
+  end
+
+  defp row_totals(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      items = for %{} = item <- List.wrap(row["items"]), is_number(item["amount"]), do: item
+
+      case row["amount"] do
+        amount when is_number(amount) -> {:cont, {:ok, [row_total(amount, items) | acc]}}
+        _ when items != [] -> {:cont, {:ok, [row_total(sum(amounts(items)), items) | acc]}}
+        _ -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp row_total(total, items) do
+    %{total: total, gpu: amounts(items, "gpu"), disk: amounts(items, "disk")}
+  end
+
+  defp amounts(items), do: Enum.map(items, & &1["amount"])
+  defp amounts(items, type), do: for(%{"type" => ^type, "amount" => a} <- items, do: a)
+
+  # Rounded so a float sum prints as the dollars it adds up to.
+  defp sum(amounts), do: amounts |> Enum.sum() |> Kernel.*(1.0) |> Float.round(6)
+
+  defp charge_raw(row) do
+    row
+    |> Map.take(~w(start end type source amount))
+    |> Map.put(
+      "items",
+      for(%{} = item <- List.wrap(row["items"]), do: Map.take(item, ~w(start end type amount)))
+    )
+  end
 
   # --- request checks ---
 

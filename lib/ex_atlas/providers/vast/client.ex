@@ -18,6 +18,13 @@ defmodule ExAtlas.Providers.Vast.Client do
   @page_size 25
   @max_pages 100
 
+  @instances "/api/v1/instances/"
+  @instances_params [limit: @page_size, order_by: ~s([{"col":"id","dir":"asc"}])]
+
+  # Vast's server maximum for a charges page.
+  @charges "/api/v0/charges/"
+  @charges_page_size 500
+
   @doc "Base URL of the API."
   def base_url, do: @base_url
 
@@ -102,28 +109,53 @@ defmodule ExAtlas.Providers.Vast.Client do
   show a live instance as missing.
   """
   @spec list_instances(ExAtlas.Provider.ctx()) :: {:ok, [map()]} | {:error, ExAtlas.Error.t()}
-  def list_instances(ctx), do: list_pages(ctx, nil, [], 0)
+  def list_instances(ctx) do
+    list_pages(ctx, @instances, "instances", @instances_params, nil, [], 0)
+  end
 
-  @instances "/api/v1/instances/"
+  @doc """
+  The rows of `GET /api/v0/charges/` for `source` (`"instance-123"`), for the
+  UTC days from `from_unix` to `to_unix`, following `next_token`.
 
-  defp list_pages(_ctx, _token, _acc, @max_pages),
-    do: error("GET #{@instances} returned more than #{@max_pages} pages")
+  The call lists the whole account's contract rows, since Vast takes no
+  instance filter, and keeps those whose `source` is `source`. A failed page,
+  a page whose `results` is not a list of objects, or a token that does not
+  advance fails the whole call: a partial bill would read as a smaller one.
+  """
+  @spec instance_charges(ExAtlas.Provider.ctx(), String.t(), integer(), integer()) ::
+          {:ok, [map()]} | {:error, ExAtlas.Error.t()}
+  def instance_charges(ctx, source, from_unix, to_unix) do
+    filters = %{
+      "day" => %{"gte" => from_unix, "lte" => to_unix},
+      "type" => %{"in" => ["instance"]}
+    }
 
-  defp list_pages(ctx, token, acc, page) do
-    params =
-      [limit: @page_size, order_by: ~s([{"col":"id","dir":"asc"}])] ++
-        if(token, do: [after_token: token], else: [])
+    params = [
+      select_filters: Jason.encode!(filters),
+      format: "table",
+      limit: @charges_page_size
+    ]
 
-    result = ctx |> api() |> Req.get(url: @instances, params: params) |> handle()
+    with {:ok, rows} <- list_pages(ctx, @charges, "results", params, nil, [], 0) do
+      {:ok, Enum.filter(rows, &(&1["source"] == source))}
+    end
+  end
+
+  defp list_pages(_ctx, path, _key, _params, _token, _acc, @max_pages),
+    do: error("GET #{path} returned more than #{@max_pages} pages")
+
+  defp list_pages(ctx, path, key, params, token, acc, page) do
+    query = if token, do: params ++ [after_token: token], else: params
+    result = ctx |> api() |> Req.get(url: path, params: query) |> handle()
 
     with {:ok, body} <- result,
-         {:ok, entries} <- page_entries(body) do
+         {:ok, entries} <- page_entries(body, path, key) do
       case Map.get(body, "next_token") do
         next when is_binary(next) and next != "" and next != token ->
-          list_pages(ctx, next, [entries | acc], page + 1)
+          list_pages(ctx, path, key, params, next, [entries | acc], page + 1)
 
         next when is_binary(next) and next != "" ->
-          error("GET #{@instances} pagination did not advance")
+          error("GET #{path} pagination did not advance")
 
         _ ->
           {:ok, [entries | acc] |> Enum.reverse() |> Enum.concat()}
@@ -132,13 +164,19 @@ defmodule ExAtlas.Providers.Vast.Client do
   end
 
   # `raw` never carries entry bodies: an instance holds its env values.
-  defp page_entries(%{"instances" => entries}) when is_list(entries) do
-    if Enum.all?(entries, &is_map/1),
-      do: {:ok, entries},
-      else: error("GET #{@instances} listed an entry that is not an object")
+  defp page_entries(%{} = body, path, key) do
+    case body do
+      %{^key => entries} when is_list(entries) ->
+        if Enum.all?(entries, &is_map/1),
+          do: {:ok, entries},
+          else: error("GET #{path} listed an entry that is not an object")
+
+      _ ->
+        error("unexpected body for GET #{path}")
+    end
   end
 
-  defp page_entries(_body), do: error("unexpected body for GET #{@instances}")
+  defp page_entries(_body, path, _key), do: error("unexpected body for GET #{path}")
 
   defp handle(result), do: HTTP.handle_response(result, 200..299, :vast)
 
