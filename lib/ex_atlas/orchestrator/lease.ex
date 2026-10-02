@@ -80,7 +80,7 @@ defmodule ExAtlas.Orchestrator.Lease do
       ttl_ms: ttl!(Keyword.get_lazy(opts, :ttl_ms, &configured_ttl/0)),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
       renewed_at: nil,
-      unsigned: MapSet.new()
+      skipped: MapSet.new()
     }
 
     send(self(), :tick)
@@ -95,17 +95,17 @@ defmodule ExAtlas.Orchestrator.Lease do
     {:noreply, state}
   end
 
-  def handle_info({:unsigned, id, owner}, state) do
-    if MapSet.member?(state.unsigned, id) do
+  def handle_info({:skipped, id, owner, why}, state) do
+    if MapSet.member?(state.skipped, id) do
       {:noreply, state}
     else
       Logger.warning(
         "[ExAtlas.Orchestrator.Lease] not taking over #{inspect(id)} of owner #{inspect(owner)}, " <>
-          "whose lease expired: its record is not signed by this node's key. The pod runs " <>
-          "untracked until its owner returns or you delete it."
+          "whose lease expired: #{why}. The pod runs untracked until its owner returns or " <>
+          "you delete it."
       )
 
-      {:noreply, %{state | unsigned: MapSet.put(state.unsigned, id)}}
+      {:noreply, %{state | skipped: MapSet.put(state.skipped, id)}}
     end
   end
 
@@ -156,12 +156,20 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   # Runs inside the store's claim, once per candidate record.
   defp rewrite(record, owner, lease) do
-    if TrackingStore.sealed?(record) do
-      {:ok, TrackingStore.rewrite(Map.put(record, :owner, owner), true)}
-    else
-      send(lease, {:unsigned, Map.get(record, :id), Map.get(record, :owner)})
-      :skip
+    case skip_reason(record) do
+      nil ->
+        {:ok, TrackingStore.rewrite(Map.put(record, :owner, owner), true)}
+
+      why ->
+        send(lease, {:skipped, Map.get(record, :id), Map.get(record, :owner), why})
+        :skip
     end
+  end
+
+  defp skip_reason(record) do
+    if TrackingStore.sealed?(record),
+      do: Adopter.refusal(record),
+      else: "its record is not signed by this node's key"
   end
 
   defp stop_lost_trackers(state) do

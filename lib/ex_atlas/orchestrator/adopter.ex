@@ -204,26 +204,37 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   defp adopt(record, owner, store) do
-    cond do
-      not TrackingStore.readable?(record.v) ->
-        skip(
-          record,
-          "unknown schema version #{record.v} " <>
-            "(this build understands versions 1 to #{TrackingStore.version()})"
-        )
-
-      record.mode != :task ->
-        skip(record, "mode #{inspect(record.mode)} is not adoptable")
-
-      not declared_provider?(record) ->
-        skip(record, "its provider is neither built in nor a module declaring ExAtlas.Provider")
-
-      true ->
+    case refusal(record) do
+      nil ->
         warn_stored_endpoint(record)
         # Checked on the record as stored, before anything changes it. A
         # tracker respawns only from a record this node signed.
         record = Map.put(TrackingStore.upgrade(record), :sealed, TrackingStore.sealed?(record))
         adopt_by_owner(record, record[:owner], owner, store)
+
+      why ->
+        skip(record, why)
+    end
+  end
+
+  @doc false
+  # Why this build would not adopt `record`, or nil. `ExAtlas.Orchestrator.Lease`
+  # asks before it claims a record, so it never owns one it cannot track.
+  @spec refusal(map()) :: String.t() | nil
+  def refusal(record) do
+    cond do
+      not TrackingStore.readable?(Map.get(record, :v)) ->
+        "unknown schema version #{inspect(Map.get(record, :v))} " <>
+          "(this build understands versions 1 to #{TrackingStore.version()})"
+
+      Map.get(record, :mode) != :task ->
+        "mode #{inspect(Map.get(record, :mode))} is not adoptable"
+
+      not declared_provider?(record) ->
+        "its provider is neither built in nor a module declaring ExAtlas.Provider"
+
+      true ->
+        nil
     end
   end
 

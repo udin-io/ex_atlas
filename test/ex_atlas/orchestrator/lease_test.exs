@@ -221,6 +221,28 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     end
   end
 
+  describe "records this build would not adopt" do
+    # A signed record of a newer release, say, in a rolling deploy: claimed,
+    # it would belong to a node that cannot track it.
+    test "leaves a signed record of an unknown version with its owner, and logs it once" do
+      %{id: id} = orphaned_task("m1")
+      {:ok, record} = Store.get(id)
+      put_row!(TrackingStore.seal(Map.put(record, :v, 99)))
+      expire!("m1")
+
+      log =
+        capture_log(fn ->
+          pid = start_lease!("m2")
+          tick!(pid)
+        end)
+
+      assert [_once] = String.split(log, "not taking over #{inspect(id)}") |> tl()
+      assert log =~ "unknown schema version 99"
+      assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m1", v: 99}} = Store.get(id)
+    end
+  end
+
   describe "a node whose lease lapsed" do
     # m2 tracks its own task. Its lease lapses (the clock jumps past it), m3
     # claims the record meanwhile, then m2 renews.
