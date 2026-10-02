@@ -308,15 +308,18 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert {:ok, _} = rent_spawn(opts, env: %{"_My_Var2" => "x"})
     end
 
+    # `inspect/1` escapes a NUL byte and prints bad UTF-8 as a binary, so the
+    # refutes read the message itself, where the bytes would appear as given.
     test "a value with a NUL byte or not UTF-8 is :validation naming the variable", %{
       opts: opts
     } do
-      for value <- ["a\0b", <<0xFF, 0xFE>>] do
+      for value <- ["#{@hf_token}\0x", @hf_token <> <<0xFF, 0xFE>>] do
         assert {:error, %ExAtlas.Error{kind: :validation} = error} =
                  rent_spawn(opts, env: %{"DB_PASS" => value})
 
         assert error.message =~ "DB_PASS"
-        refute inspect(error) =~ value
+        refute error.message =~ @hf_token
+        refute Exception.message(error) =~ @hf_token
       end
     end
 

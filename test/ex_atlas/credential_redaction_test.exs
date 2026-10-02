@@ -408,18 +408,26 @@ defmodule ExAtlas.CredentialRedactionTest do
     end
 
     test "a rent that times out prints no env value or key", %{opts: opts} do
+      test_pid = self()
+
       plug = fn conn ->
         case conn.method do
           "POST" ->
             ExAtlas.Test.FakeVast.json(conn, 200, %{"offers" => [ExAtlas.Test.FakeVast.offer()]})
 
           "PUT" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:rent_body, raw})
             Req.Test.transport_error(conn, :timeout)
         end
       end
 
       assert {:error, %ExAtlas.Error{kind: :transport} = error} =
                ExAtlas.spawn_compute(Keyword.put(opts, :req_options, plug: plug))
+
+      # Control: the value went out in the rent, so the refutes are not vacuous.
+      assert_received {:rent_body, raw}
+      assert raw =~ @env_value
 
       for text <- [inspect(error), Exception.message(error), inspect(error, structs: false)] do
         refute text =~ @env_value
