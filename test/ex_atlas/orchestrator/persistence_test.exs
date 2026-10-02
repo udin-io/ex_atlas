@@ -60,6 +60,24 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert_in_delta record.spawned_at_ms, System.system_time(:millisecond), 5_000
     end
 
+    # Whoever writes the store would choose where an adopted task sends the
+    # node's key (issue 125). An adopted task reads both from app config.
+    test "records no base_url and no req_options" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            base_url: "https://per-call.example",
+            req_options: [receive_timeout: 7_000, connect_options: [timeout: 900]]
+          )
+        )
+
+      assert {:ok, record} = Memory.get(compute.id)
+      refute Keyword.has_key?(record.opts, :base_url)
+      refute Keyword.has_key?(record.opts, :req_options)
+      # Control: the record holds the spawn's other opts.
+      assert record.opts[:image] == "trainer:latest"
+    end
+
     test "an uncapped task records no cost cap and no meter" do
       {:ok, _pid, compute} = Orchestrator.spawn(task_opts())
 

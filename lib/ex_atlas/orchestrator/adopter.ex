@@ -71,8 +71,10 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   ## Records this build does not understand
 
-  A record with a `:v` other than 1, 2 or 3, or a `:mode` other than `:task`, is
-  skipped with a warning and **left in the store**. Deleting it would be worse than
+  A record with a `:v` other than 1, 2 or 3, a `:mode` other than `:task`, or a
+  provider that is neither built in nor a module declaring
+  `@behaviour ExAtlas.Provider`, is skipped with a warning and **left in the
+  store**. Deleting it would be worse than
   useless: the store entry is the only thing telling the Reaper that a live,
   prefix-matching pod belongs to this app.
   """
@@ -82,6 +84,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
   require Logger
 
   alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Ownership, Reaper, TrackingStore}
+  alias ExAtlas.Config
   alias ExAtlas.Orchestrator.UpstreamStatus
   alias ExAtlas.Spec
 
@@ -189,9 +192,57 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   defp adopt(record, owner, store) do
     cond do
-      not TrackingStore.readable?(record.v) -> skip(record, "unknown schema version #{record.v}")
-      record.mode != :task -> skip(record, "mode #{inspect(record.mode)} is not adoptable")
-      true -> adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
+      not TrackingStore.readable?(record.v) ->
+        skip(
+          record,
+          "unknown schema version #{record.v} " <>
+            "(this build understands versions 1 to #{TrackingStore.version()})"
+        )
+
+      record.mode != :task ->
+        skip(record, "mode #{inspect(record.mode)} is not adoptable")
+
+      not declared_provider?(record) ->
+        skip(record, "its provider is neither built in nor a module declaring ExAtlas.Provider")
+
+      true ->
+        warn_stored_endpoint(record)
+        adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
+    end
+  end
+
+  # The provider is code this node runs, named by whoever wrote the store. Only
+  # a module that opted in by declaring the behaviour qualifies, never one that
+  # merely exports `capabilities/0`.
+  defp declared_provider?(record) do
+    case Keyword.get(TrackingStore.observe_opts(record), :provider) do
+      provider when is_atom(provider) ->
+        Map.has_key?(Config.builtin_providers(), provider) or declares_provider?(provider)
+
+      _not_an_atom ->
+        false
+    end
+  end
+
+  defp declares_provider?(module) do
+    Code.ensure_loaded?(module) and
+      ExAtlas.Provider in (module.module_info(:attributes)
+                           |> Keyword.get_values(:behaviour)
+                           |> List.flatten())
+  end
+
+  # Names the keys alone: their values came from the store's writer.
+  defp warn_stored_endpoint(record) do
+    case TrackingStore.ignored_opts(record) do
+      [] ->
+        :ok
+
+      keys ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Adopter] adopting #{inspect(record.id)} without its stored " <>
+            "#{Enum.map_join(keys, ", ", &inspect/1)}: an adopted task calls its provider " <>
+            "where config :ex_atlas, #{inspect(record.provider)} points."
+        )
     end
   end
 
@@ -204,7 +255,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
   defp adopt_by_owner(record, nil, owner, store) do
     claimed = Map.put(record, :owner, owner)
     # The tracker gets the values an older record holds; the store does not.
-    store.put(TrackingStore.scrub_env(claimed))
+    store.put(TrackingStore.scrub_record(claimed))
     reconcile(claimed, store)
   end
 
@@ -217,9 +268,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # same app than to be junk.
   defp skip(record, why) do
     Logger.warning(
-      "[ExAtlas.Orchestrator.Adopter] not adopting #{Map.get(record, :id, "?")}: #{why} " <>
-        "(this build understands versions 1 to #{TrackingStore.version()}). The record is kept " <>
-        "so the Reaper still treats the resource as ours."
+      "[ExAtlas.Orchestrator.Adopter] not adopting #{Map.get(record, :id, "?")}: #{why}. " <>
+        "The record is kept so the Reaper still treats the resource as ours."
     )
   end
 
