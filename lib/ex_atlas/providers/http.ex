@@ -43,6 +43,35 @@ defmodule ExAtlas.Providers.HTTP do
 
   defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
 
+  @env_carriers ["template", "workers"]
+
+  @doc """
+  Drop the `env` a provider echoes from a resource body: the body's own, the
+  one of an embedded `template`, and the one of each pod in `workers` (a
+  RunPod endpoint carries both).
+
+  `env` holds the credentials the caller set. A struct that keeps the body in
+  `raw` prints them in a crash report or under `inspect(.., structs: false)`,
+  which skip the struct's own `Inspect`. A list drops it from each entry; any
+  other term passes through. String keys only: that is what Req's JSON decoder
+  returns.
+  """
+  @spec drop_env(term()) :: term()
+  def drop_env(%{} = body) do
+    Enum.reduce(@env_carriers, Map.delete(body, "env"), fn key, acc ->
+      case acc do
+        %{^key => nested} when is_map(nested) or is_list(nested) ->
+          %{acc | key => drop_env(nested)}
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  def drop_env(list) when is_list(list), do: Enum.map(list, &drop_env/1)
+  def drop_env(other), do: other
+
   @doc "Merge the caller's `ctx.req_options` in last, so they win."
   @spec merge_user_options(Req.Request.t(), ExAtlas.Provider.ctx()) :: Req.Request.t()
   def merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
@@ -63,7 +92,7 @@ defmodule ExAtlas.Providers.HTTP do
     if status_in?(status, expected) do
       {:ok, body}
     else
-      {:error, ExAtlas.Error.from_response(status, body, provider)}
+      {:error, ExAtlas.Error.from_response(status, drop_env(body), provider)}
     end
   end
 

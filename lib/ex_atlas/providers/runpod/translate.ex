@@ -8,6 +8,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   `ExAtlas.Spec.*` structs.
   """
 
+  alias ExAtlas.Providers.HTTP
   alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Providers.Shell
   alias ExAtlas.Spec
@@ -83,7 +84,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       name: Map.get(pod, "name"),
       auth: auth,
       created_at: parse_created_at(pod),
-      raw: Map.delete(pod, "env")
+      raw: HTTP.drop_env(pod)
     }
   end
 
@@ -470,7 +471,10 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   defp parse_datetime(_), do: nil
 
-  @doc "Normalize a RunPod template body."
+  @doc """
+  Normalize a RunPod template body. `raw` is the body without `"env"`: the
+  configured env is in `env`, and `raw` is where a crash report would print it.
+  """
   @spec template_to_spec(map()) :: Spec.Template.t()
   def template_to_spec(%{} = raw) do
     %Spec.Template{
@@ -486,7 +490,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       serverless: raw["serverless"] == true,
       ssh: if(is_boolean(raw["startSsh"]), do: raw["startSsh"]),
       jupyter: if(is_boolean(raw["startJupyter"]), do: raw["startJupyter"]),
-      raw: raw
+      raw: HTTP.drop_env(raw)
     }
   end
 
@@ -510,7 +514,10 @@ defmodule ExAtlas.Providers.RunPod.Translate do
 
   defp template_command(_), do: nil
 
-  @doc "Normalize a RunPod serverless endpoint body."
+  @doc """
+  Normalize a RunPod serverless endpoint body. `raw` is the body without
+  `"env"` and without the `"env"` of its embedded `"template"` and `"workers"`.
+  """
   @spec endpoint_to_spec(map()) :: Spec.Endpoint.t()
   def endpoint_to_spec(%{} = raw) do
     workers = if is_map(raw["workers"]), do: raw["workers"], else: %{}
@@ -527,7 +534,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       region_hints: string_list(raw["dataCenterIds"]),
       network_volume_ids: string_list(raw["networkVolumes"]),
       created_at: parse_datetime(raw["createdAt"]),
-      raw: raw
+      raw: HTTP.drop_env(raw)
     }
   end
 

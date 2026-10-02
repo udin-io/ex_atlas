@@ -787,7 +787,8 @@ ExAtlas.delete_template(template.id, provider: :runpod)
 
 RunPod starts SSH and Jupyter in a template's pods by default. Pass
 `ssh: false` or `jupyter: false` to `create_template/1` to turn one off.
-`inspect/1` of a `%ExAtlas.Spec.Template{}` leaves out `env` and `raw`.
+`inspect/1` of a `%ExAtlas.Spec.Template{}` leaves out `env` and `raw`, and
+`raw` is RunPod's body without `env`: read the configured values from `env`.
 
 ### Spend
 
@@ -832,8 +833,8 @@ ExAtlas.delete_endpoint(endpoint.id, provider: :runpod)
 `gpu_pools` holds RunPod's pool ids (`"ADA_24"`), not card names. `type` is
 `:queue`, `:load_balancer`, `:unknown` for a type this library does not know,
 or `nil`. ExAtlas does not create endpoints: create one in RunPod's console.
-`inspect/1` of a `%ExAtlas.Spec.Endpoint{}` leaves out `raw`, which holds the
-endpoint's env.
+`inspect/1` of a `%ExAtlas.Spec.Endpoint{}` leaves out `raw`, and `raw` is
+RunPod's body without `env` and without the `env` of its embedded `template` and `workers`.
 
 ### Capability atoms
 

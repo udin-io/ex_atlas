@@ -5,8 +5,9 @@ defmodule ExAtlas.Spec.Endpoint do
 
   `gpu_pools` holds the provider's GPU pool ids (RunPod: `"ADA_24"`), not card
   names. `type` is `:unknown` for a type this library does not know and `nil`
-  when the provider sent none. `raw` holds the provider's own body;
-  `inspect/1` leaves it out because an endpoint's env holds secrets.
+  when the provider sent none. `raw` holds the provider's own body
+  without `env` and without the `env` of its embedded `template` and
+  `workers`: they hold secrets. `inspect/1` leaves `raw` out as well.
   """
 
   @derive {Inspect, except: [:raw]}
