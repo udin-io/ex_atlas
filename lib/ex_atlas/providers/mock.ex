@@ -81,6 +81,33 @@ defmodule ExAtlas.Providers.Mock do
   def set_cost_per_hour(id, rate), do: update_compute(id, &%{&1 | cost_per_hour: rate})
 
   @doc """
+  Set the billed total `compute_spend/3` reports for `id`, in US dollars.
+
+  Works for any id, including a resource already forgotten: a provider still
+  bills a pod after it is gone. Until it is set, a pod has billed `0.0`.
+  """
+  @spec set_spend(String.t(), float()) :: :ok
+  def set_spend(id, total_usd) do
+    ensure_started()
+    :ets.insert(@table, {{:spend, id}, total_usd})
+    :ok
+  end
+
+  @doc """
+  The window of every `compute_spend/3` call for `id`, oldest first, as
+  `%{from: from, to: to}`.
+  """
+  @spec spend_requests(String.t()) :: [%{from: DateTime.t() | nil, to: DateTime.t() | nil}]
+  def spend_requests(id) do
+    ensure_started()
+
+    case :ets.lookup(@table, {:spend_requests, id}) do
+      [{_, requests}] -> Enum.reverse(requests)
+      [] -> []
+    end
+  end
+
+  @doc """
   Drop a resource from the store entirely, so it 404s like a pod that was
   deleted upstream or a spot instance that was preempted out from under you.
 
@@ -95,7 +122,7 @@ defmodule ExAtlas.Providers.Mock do
 
   @impl true
   def capabilities,
-    do: [:spot, :serverless, :network_volumes, :http_proxy, :raw_tcp, :webhooks]
+    do: [:spot, :serverless, :network_volumes, :billing, :http_proxy, :raw_tcp, :webhooks]
 
   @impl true
   def spawn_compute(%Spec.ComputeRequest{} = req, _ctx) do
@@ -165,6 +192,31 @@ defmodule ExAtlas.Providers.Mock do
       [] ->
         {:error, ExAtlas.Error.new(:not_found, provider: :mock)}
     end
+  end
+
+  @impl true
+  def compute_spend(id, opts, _ctx) do
+    ensure_started()
+
+    :ets.insert(
+      @table,
+      {{:spend_requests, id}, [Map.new(window(opts)) | spend_requests_desc(id)]}
+    )
+
+    total =
+      case :ets.lookup(@table, {:spend, id}) do
+        [{_, total_usd}] -> total_usd
+        [] -> 0.0
+      end
+
+    {:ok,
+     %Spec.Spend{
+       compute_id: id,
+       provider: :mock,
+       total_usd: total,
+       from: opts[:from],
+       to: opts[:to]
+     }}
   end
 
   @impl true
@@ -245,6 +297,15 @@ defmodule ExAtlas.Providers.Mock do
   end
 
   # --- helpers ---
+
+  defp window(opts), do: [from: opts[:from], to: opts[:to]]
+
+  defp spend_requests_desc(id) do
+    case :ets.lookup(@table, {:spend_requests, id}) do
+      [{_, requests}] -> requests
+      [] -> []
+    end
+  end
 
   defp update_compute(id, fun) do
     ensure_started()

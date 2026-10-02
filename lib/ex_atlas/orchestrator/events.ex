@@ -49,6 +49,13 @@ defmodule ExAtlas.Orchestrator.Events do
       it is proven: the container said `exit_code: 0`. A non-zero exit arrives
       as `{:task, {:failed, {:exit_code, n}}}`. See
       `ExAtlas.Orchestrator.run_task/1`.
+    * `{:spend_reconciled, %{estimated_usd: e, billed_usd: b, spent_usd: s}}`
+      — a capped session read the current pod's bill. `e` is that pod's
+      estimate, `b` the bill, `s` the session's spend after: the bill raised
+      it when `b > e`, and nothing changed otherwise.
+    * `{:spend_reconcile_failed, error}` — reading the bill failed, timed out
+      or crashed. Nothing changed; it is read again at the next interval. A
+      provider with no billing API sends neither event.
     * `{:terminating, reason}` — server is shutting down. `reason` is
       `{:shutdown, :stopped}` after `ExAtlas.Orchestrator.stop_tracked/1`,
       `:shutdown` when its supervisor stops it (a node stop), `:normal` when

@@ -129,6 +129,28 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert remaining > 55 * 60 * 1_000
       assert remaining < 65 * 60 * 1_000
     end
+
+    test "a record from before the timer bound still adopts, at the bound" do
+      # The previous release accepted any positive integer: 60 days here.
+      sixty_days = 60 * 24 * 60 * 60 * 1_000
+      compute = orphaned_task()
+      {:ok, record} = Memory.get(compute.id)
+
+      opts =
+        record.opts
+        |> Keyword.put(:max_runtime_ms, sixty_days)
+        |> Keyword.put(:heartbeat_ms, sixty_days)
+        |> Keyword.put(:status_poll_ms, sixty_days)
+
+      :ok = Memory.put(%{record | opts: opts, max_runtime_ms: sixty_days})
+
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+      refute log =~ "could not start a tracker"
+
+      assert {:ok, %{max_runtime_remaining_ms: remaining}} = Orchestrator.info(compute.id)
+      assert remaining <= 4_294_967_295
+      assert remaining > 4_294_967_295 - 60_000
+    end
   end
 
   @hour 60 * 60 * 1_000
@@ -260,6 +282,74 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       assert {:ok, %{spent_usd: spent}} = Orchestrator.info(compute.id)
       assert_in_delta spent, 0.5, 0.01
+    end
+
+    test "an adopted task raises its spend to the bill, asked from the first spawn" do
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0}, reconcile_spend_ms: 20)
+      # $0.50 stored plus an hour of downtime at $1: $1.50 by the estimate.
+      cap_record!(compute.id, 10, 0.5, 1.0, @hour)
+      # Spawned 30 minutes earlier by the record than by the Mock's timestamp,
+      # and inside the task's 90-minute deadline.
+      %{spawned_at_ms: spawned_at_ms} = backdate!(compute.id, div(@hour, 2))
+      spawned_at_ms = spawned_at_ms - div(@hour, 2)
+      :ok = Mock.set_spend(compute.id, 4.0)
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconciled, %{billed_usd: 4.0, spent_usd: spent}}},
+                     2_000
+
+      assert_in_delta spent, 4.0, 0.01
+      # The record keeps the open hour at $1 outside `spent_usd`: $0.50 stored
+      # plus the $2.50 the bill added.
+      assert %{spent_usd: recorded} = Memory.await(id, &(&1.spent_usd > 0.5))
+      assert_in_delta recorded, 3.0, 0.01
+
+      assert [%{from: from} | _] = Mock.spend_requests(id)
+      assert DateTime.to_unix(from, :millisecond) == spawned_at_ms
+    end
+
+    test "a capped record from a store without the cost columns adopts and never bills" do
+      compute =
+        orphaned_task(
+          provider_opts: %{cost_per_hour: 1.0},
+          max_cost: 10,
+          reconcile_spend_ms: 20
+        )
+
+      {:ok, record} = Memory.get(compute.id)
+
+      :ok =
+        Memory.put(%{record | max_cost: nil, spent_usd: nil, cost_rate: nil, cost_since_ms: nil})
+
+      :ok = Adopter.run(notify: self())
+      [{pid, _}] = Registry.lookup(ExAtlas.Orchestrator.ComputeRegistry, {:compute, compute.id})
+      ref = Process.monitor(pid)
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
+      assert Mock.spend_requests(compute.id) == []
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "an adopted bill below the session's stored spend changes nothing" do
+      # The record does not say which pod spent its $3, so the bill for this
+      # pod is compared with all of it: a lower bill never adds spend twice.
+      compute = orphaned_task(provider_opts: %{cost_per_hour: 1.0}, reconcile_spend_ms: 20)
+      cap_record!(compute.id, 10, 3.0, 1.0, 0)
+      :ok = Mock.set_spend(compute.id, 2.0)
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconciled, %{billed_usd: 2.0, spent_usd: spent}}},
+                     2_000
+
+      assert_in_delta spent, 3.0, 0.01
     end
   end
 

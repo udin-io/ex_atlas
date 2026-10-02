@@ -169,5 +169,13 @@ defmodule ExAtlas.Orchestrator.UpstreamStatusTest do
     test "never returns a non-positive interval" do
       assert UpstreamStatus.next_interval_ms(1, 0) > 0
     end
+
+    test "never returns more than the longest portable timer" do
+      # Eight times the largest base, and the base jittered upwards.
+      assert UpstreamStatus.next_interval_ms(4_294_967_295, 3, jitter: 0.0) == 4_294_967_295
+
+      for _ <- 1..50,
+          do: assert(UpstreamStatus.next_interval_ms(4_294_967_295, 0) <= 4_294_967_295)
+    end
   end
 end

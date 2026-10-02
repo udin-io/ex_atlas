@@ -241,6 +241,29 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, %{spent_usd: spent_after, cost_rate: 3600.0}} = Memory.get(new_id)
       assert spent_after > spent_before
     end
+
+    test "a bill above the estimate rewrites the record's spend" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            max_cost: 100,
+            reconcile_spend_ms: 20,
+            provider_opts: %{cost_per_hour: 0.36}
+          )
+        )
+
+      {:ok, %{cost_since_ms: since}} = Memory.get(compute.id)
+      :ok = Mock.set_spend(compute.id, 40.0)
+
+      # The open segment keeps its start, so a restart counts from the same
+      # moment on top of the billed spend.
+      assert %{spent_usd: spent, cost_since_ms: raised_since, cost_rate: 0.36} =
+               Memory.await(compute.id, &(&1.spent_usd >= 39.0))
+
+      assert spent <= 40.0
+      # The tracker restates the start from its monotonic clock, within a few ms.
+      assert_in_delta raised_since, since, 1_000
+    end
   end
 
   # `DynamicSupervisor.terminate_child/2` delivers `:shutdown`, the reason a

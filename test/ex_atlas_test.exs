@@ -637,7 +637,7 @@ defmodule AtlasTest do
     end
 
     test "a provider without the callback returns :unsupported" do
-      for provider <- [:mock, :lambda_labs, :fly, BareProvider] do
+      for provider <- [:lambda_labs, :fly, BareProvider] do
         assert {:error, %ExAtlas.Error{kind: :unsupported, message: message}} =
                  ExAtlas.compute_spend("pod_9", provider: provider, api_key: "k")
 
@@ -645,9 +645,9 @@ defmodule AtlasTest do
       end
     end
 
-    test "capabilities: runpod reports billing, mock does not" do
+    test "capabilities: runpod reports billing, lambda_labs does not" do
       assert :billing in ExAtlas.capabilities(:runpod)
-      refute :billing in ExAtlas.capabilities(:mock)
+      refute :billing in ExAtlas.capabilities(:lambda_labs)
     end
   end
 end

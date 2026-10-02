@@ -8,6 +8,39 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
   setup do: ExAtlas.Test.Orchestrator.start!()
 
+  # The Mock without `compute_spend/3`, so `ExAtlas.compute_spend/2` answers
+  # `:unsupported` the way it does for a provider with no billing API.
+  defmodule NoBillingProvider do
+    @behaviour ExAtlas.Provider
+
+    alias ExAtlas.Providers.Mock
+
+    @impl true
+    defdelegate spawn_compute(req, ctx), to: Mock
+    @impl true
+    defdelegate get_compute(id, ctx), to: Mock
+    @impl true
+    defdelegate list_compute(filters, ctx), to: Mock
+    @impl true
+    defdelegate stop(id, ctx), to: Mock
+    @impl true
+    defdelegate start(id, ctx), to: Mock
+    @impl true
+    defdelegate terminate(id, ctx), to: Mock
+    @impl true
+    defdelegate run_job(req, ctx), to: Mock
+    @impl true
+    defdelegate get_job(id, ctx), to: Mock
+    @impl true
+    defdelegate cancel_job(id, ctx), to: Mock
+    @impl true
+    defdelegate stream_job(id, ctx), to: Mock
+    @impl true
+    defdelegate list_gpu_types(ctx), to: Mock
+    @impl true
+    def capabilities, do: Mock.capabilities() -- [:billing]
+  end
+
   test "spawn → touch → terminate teardown calls provider terminate" do
     {:ok, pid, compute} =
       ExAtlas.Orchestrator.spawn(
@@ -488,6 +521,41 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
                )
 
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    # A delay over 4,294,967,295 ms raises in `Process.send_after/3` on older
+    # OTP releases (and over about 2^57 on OTP 27), after the pod is rented.
+    @timer_opts [
+      :heartbeat_ms,
+      :status_poll_ms,
+      :max_runtime_ms,
+      :ready_timeout_ms,
+      :finish_grace_ms
+    ]
+
+    test "a timer option past the longest portable timer is refused before renting" do
+      for key <- @timer_opts do
+        assert {:error, %NimbleOptions.ValidationError{key: ^key}} =
+                 ExAtlas.Orchestrator.spawn(
+                   [provider: :mock, gpu: :h100, image: "x", mode: :task] ++
+                     [{key, 4_294_967_296}]
+                 ),
+               "#{key} accepted 4_294_967_296"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a timer option at the longest portable timer starts a tracker" do
+      for key <- @timer_opts do
+        assert {:ok, pid, _compute} =
+                 ExAtlas.Orchestrator.spawn(
+                   [provider: :mock, gpu: :h100, image: "x", mode: :task] ++
+                     [{key, 4_294_967_295}]
+                 )
+
+        assert Process.alive?(pid)
+      end
     end
 
     test "`on_failure: :respawn` — the plausible typo — is refused" do
@@ -1110,6 +1178,36 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  describe "reconcile_spend_ms option validation" do
+    test "an interval that is not a positive integer is refused before renting" do
+      for bad <- [0, -1, "15", 1.5, 4_294_967_296] do
+        assert {:error, %NimbleOptions.ValidationError{key: :reconcile_spend_ms}} =
+                 ExAtlas.Orchestrator.spawn(
+                   provider: :mock,
+                   gpu: :h100,
+                   image: "x",
+                   max_cost: 1,
+                   reconcile_spend_ms: bad
+                 ),
+               "reconcile_spend_ms accepted #{inspect(bad)}"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "false, the longest portable timer, and the 15-minute default are accepted" do
+      for good <- [false, 1, 4_294_967_295] do
+        assert {:ok, tracking} =
+                 ComputeServer.validate_opts(max_cost: 1, reconcile_spend_ms: good)
+
+        assert tracking[:reconcile_spend_ms] == good
+      end
+
+      assert {:ok, tracking} = ComputeServer.validate_opts(max_cost: 1)
+      assert tracking[:reconcile_spend_ms] == :timer.minutes(15)
+    end
+  end
+
   describe "max_cost option validation" do
     test "a cap that is not a positive number is refused before anything is rented" do
       for bad <- [0, -1, "2.5"] do
@@ -1410,6 +1508,256 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 200
       refute_received {:DOWN, ^ref, :process, ^pid, _}
       assert {:ok, %{max_cost: false, spent_usd: +0.0}} = ExAtlas.Orchestrator.info(id)
+    end
+  end
+
+  describe "billing reconciliation" do
+    # $0.0001 a second: the estimate alone needs hours to reach $1.
+    @slow 0.36
+    @per_second 3600.0
+
+    setup do
+      base = [
+        provider: :mock,
+        gpu: :h100,
+        image: "x",
+        idle_ttl_ms: 60_000,
+        heartbeat_ms: 60_000,
+        status_poll_ms: false,
+        reconcile_spend_ms: 20,
+        provider_opts: %{cost_per_hour: @slow}
+      ]
+
+      {:ok, base: base}
+    end
+
+    defp spawn_reconciled(base, overrides) do
+      {:ok, pid, compute} = ExAtlas.Orchestrator.spawn(Keyword.merge(base, overrides))
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {pid, compute.id}
+    end
+
+    test "a bill above the estimate ends the session at the cap", %{base: base} do
+      {pid, id} = spawn_reconciled(base, max_cost: 1)
+      ref = Process.monitor(pid)
+      :ok = Mock.set_spend(id, 5.0)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconciled, %{billed_usd: 5.0, spent_usd: spent}}},
+                     2_000
+
+      assert spent >= 5.0
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a bill over the cap ends a session whose pod reads $0 an hour", %{base: base} do
+      {pid, id} = spawn_reconciled(base, max_cost: 1, provider_opts: %{cost_per_hour: 0.0})
+      ref = Process.monitor(pid)
+      :ok = Mock.set_spend(id, 1.2)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "a bill below the estimate leaves the spend at the estimate", %{base: base} do
+      {pid, id} =
+        spawn_reconciled(base, max_cost: 100, provider_opts: %{cost_per_hour: @per_second})
+
+      # Spawned at $1 a second, so the estimate passes $0.001 within 2 ms.
+      :ok = Mock.set_spend(id, 0.001)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconciled,
+                       %{estimated_usd: estimated, billed_usd: 0.001, spent_usd: spent}}},
+                     2_000
+
+      assert estimated > 0.001
+      assert spent == estimated
+      assert Process.alive?(pid)
+    end
+
+    test "a raised spend shows in info/1", %{base: base} do
+      {_pid, id} = spawn_reconciled(base, max_cost: 100)
+      :ok = Mock.set_spend(id, 40.0)
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconciled, %{billed_usd: 40.0}}}, 2_000
+      assert {:ok, %{spent_usd: spent}} = ExAtlas.Orchestrator.info(id)
+      assert spent >= 40.0
+    end
+
+    test "a failing bill is reported, changes nothing, and is asked again", %{base: base} do
+      {pid, id} = spawn_reconciled(base, provider: FaultyProvider, max_cost: 1)
+      error = ExAtlas.Error.new(:transport, provider: :mock, message: "socket closed")
+      FaultyProvider.arm(:compute_spend, {:error, error})
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, ^error}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, ^error}}, 2_000
+      assert Process.alive?(pid)
+      assert {:ok, %{spent_usd: spent}} = ExAtlas.Orchestrator.info(id)
+      assert spent < 1
+    end
+
+    test "a billing call that raises is reported and the session stays", %{base: base} do
+      {pid, id} = spawn_reconciled(base, provider: FaultyProvider, max_cost: 1)
+      ref = Process.monitor(pid)
+      FaultyProvider.arm(:compute_spend, :raise)
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _reason}}, 2_000
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a provider with no billing API runs the session on the estimate, silently",
+         %{base: base} do
+      {pid, id} = spawn_reconciled(base, provider: NoBillingProvider, max_cost: 1)
+      ref = Process.monitor(pid)
+
+      # Ten intervals: no failure event each 20 ms, and no stop.
+      refute_receive {:atlas_compute, ^id, {:spend_reconcile_failed, _}}, 200
+      refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{max_cost: 1}} = ExAtlas.Orchestrator.info(id)
+    end
+
+    test "an :unsupported answer is asked for once", %{base: base} do
+      unsupported = ExAtlas.Error.new(:unsupported, provider: :mock, message: "no billing")
+      FaultyProvider.arm(:compute_spend, {:notify, self(), {:error, unsupported}})
+      {_pid, id} = spawn_reconciled(base, provider: FaultyProvider, max_cost: 1)
+
+      assert_receive {:called, :compute_spend, _task}, 2_000
+      refute_receive {:called, :compute_spend, _task}, 200
+      refute_received {:atlas_compute, ^id, {:spend_reconcile_failed, _}}
+    end
+
+    test "after a respawn the bill is compared with the replacement's spend alone",
+         %{base: base} do
+      {_pid, id} =
+        spawn_reconciled(base,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 10
+        )
+
+      :ok = Mock.set_spend(id, 3.0)
+      assert_receive {:atlas_compute, ^id, {:spend_reconciled, %{billed_usd: 3.0}}}, 2_000
+
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      :ok = Mock.set_spend(new_id, 2.0)
+
+      # $3 billed for the first pod, then $2 for the replacement.
+      assert_receive {:atlas_compute, ^new_id,
+                      {:spend_reconciled,
+                       %{estimated_usd: estimated, billed_usd: 2.0, spent_usd: spent}}},
+                     2_000
+
+      assert estimated < 1.0
+      assert spent >= 5.0
+    end
+
+    test "a bill for the pod a respawn replaced is ignored", %{base: base} do
+      {_pid, id} =
+        spawn_reconciled(base,
+          provider: FaultyProvider,
+          spot: true,
+          on_failure: {:respawn, 1},
+          status_poll_ms: 10,
+          max_cost: 1
+        )
+
+      FaultyProvider.arm(:compute_spend, {:block, self()})
+      assert_receive {:blocked, :compute_spend, held}, 2_000
+
+      # The old pod's bill is over the cap, but it lands after the respawn.
+      :ok = Mock.set_spend(id, 5.0)
+      :ok = Mock.forget(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      send(held, :release)
+
+      refute_receive {:atlas_compute, ^new_id, {:terminating, :cost_cap}}, 200
+      refute_received {:atlas_compute, ^new_id, {:spend_reconciled, _}}
+      assert {:ok, %{spent_usd: spent}} = ExAtlas.Orchestrator.info(new_id)
+      assert spent < 1
+    end
+
+    test "a bill with no total is reported and changes nothing", %{base: base} do
+      {pid, id} = spawn_reconciled(base, max_cost: 1)
+      :ok = Mock.set_spend(id, nil)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconcile_failed, %ExAtlas.Error{kind: :provider, raw: nil}}},
+                     2_000
+
+      refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
+      assert Process.alive?(pid)
+    end
+
+    test "teardown kills a billing call still in flight", %{base: base} do
+      {pid, id} = spawn_reconciled(base, provider: FaultyProvider, max_cost: 1)
+      FaultyProvider.arm(:compute_spend, {:block, self()})
+      assert_receive {:blocked, :compute_spend, held}, 2_000
+      held_ref = Process.monitor(held)
+      ref = Process.monitor(pid)
+
+      :ok = ExAtlas.Orchestrator.stop_tracked(id)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      assert_receive {:DOWN, ^held_ref, :process, ^held, :killed}, 2_000
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a stray reconcile message cannot end an uncapped session", %{base: base} do
+      {pid, id} = spawn_reconciled(base, [])
+      ref = Process.monitor(pid)
+
+      send(pid, :reconcile_spend)
+
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
+      assert Mock.spend_requests(id) == []
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a bill too large for a float is reported, and the session stays", %{base: base} do
+      {pid, id} = spawn_reconciled(base, max_cost: 1)
+      ref = Process.monitor(pid)
+      :ok = Mock.set_spend(id, Integer.pow(10, 400))
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconcile_failed, %ExAtlas.Error{}}}, 2_000
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    test "a session without max_cost never asks for its bill", %{base: base} do
+      {_pid, uncapped} = spawn_reconciled(base, [])
+      {_pid, switched_off} = spawn_reconciled(base, max_cost: 1, reconcile_spend_ms: false)
+      {_pid, capped} = spawn_reconciled(base, max_cost: 1)
+
+      # The control: a capped session asks within a few intervals.
+      assert_receive {:atlas_compute, ^capped, {:spend_reconciled, _}}, 2_000
+      assert_receive {:atlas_compute, ^capped, {:spend_reconciled, _}}, 2_000
+
+      assert length(Mock.spend_requests(capped)) >= 2
+      assert Mock.spend_requests(uncapped) == []
+      assert Mock.spend_requests(switched_off) == []
+      refute_received {:atlas_compute, ^uncapped, {:spend_reconciled, _}}
+    end
+
+    test "asks for the bill from the pod's spawn", %{base: base} do
+      before = DateTime.utc_now()
+      {_pid, id} = spawn_reconciled(base, max_cost: 1)
+
+      assert_receive {:atlas_compute, ^id, {:spend_reconciled, _}}, 2_000
+      assert [%{from: %DateTime{} = from, to: nil} | _] = Mock.spend_requests(id)
+      assert {:ok, %{created_at: created_at}} = ExAtlas.get_compute(id, provider: :mock)
+
+      # No later than the pod's own spawn, and not hours before this test.
+      assert DateTime.compare(from, created_at) != :gt
+      assert DateTime.diff(before, from, :second) < 5
     end
   end
 end

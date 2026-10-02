@@ -8,13 +8,11 @@ the follow-up to #67, because the repo had no root `CLAUDE.md`.
 
 ## Project source of truth
 
-The repo has no `docs/` directory yet. The next session that changes
-behaviour creates `docs/PROJECT.md` and its pages (roadmap, architecture,
-risks, decisions) from the code and the merged PRs, and links it from the top
-of `README.md`. From then on, every PR that changes behaviour, structure, a
-risk or a decision updates those pages in the same PR. A merge is not finished
-until they describe `main` as it is. Until then, `README.md`, `guides/` and
-`CHANGELOG.md` are the docs every PR updates.
+`docs/PROJECT.md` is the source of truth, with its pages: roadmap,
+architecture, risks and decisions. #70 created them. Every PR that changes
+behaviour, structure, a risk or a decision updates those pages in the same PR,
+next to `README.md`, `guides/` and `CHANGELOG.md`. A merge is not finished
+until they describe `main` as it is.
 
 ## Commands
 
@@ -62,8 +60,9 @@ not export the function.
 
 - A new optional callback adds its name to `@optional_callbacks` and its
   public function calls `dispatch_optional/3`, never the module directly.
-  The Fly, Vast and Lambda Labs stubs and the Mock define none of them, so a
-  direct call raises `UndefinedFunctionError` there.
+  The Fly, Vast and Lambda Labs stubs define none of them, and the Mock
+  defines only `compute_spend/3`, so a direct call raises
+  `UndefinedFunctionError` there.
 - Test the `:unsupported` path with a provider that lacks the callback.
 
 ### The Mock's price drives every cost test
@@ -78,3 +77,8 @@ status poll sees it.
 - To prove a path that a later status poll would also cover, arm
   `ExAtlas.Test.FaultyProvider` with `{:block, self()}` on `:get_compute`.
   It holds every later poll open. #67's respawn re-pricing test does this.
+- `Mock.set_spend/2` sets a pod's bill, and `Mock.spend_requests/1` lists the
+  window of each billing read. `FaultyProvider` faults `:compute_spend` like
+  any other call; `{:notify, self(), fault}` counts calls. A provider with no
+  `compute_spend/3` at all is `NoBillingProvider` in
+  `compute_server_test.exs` (#66).

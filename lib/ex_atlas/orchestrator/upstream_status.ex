@@ -53,6 +53,7 @@ defmodule ExAtlas.Orchestrator.UpstreamStatus do
       true
   """
 
+  alias ExAtlas.Orchestrator.Timer
   alias ExAtlas.Spec
 
   @default_jitter 0.1
@@ -107,7 +108,8 @@ defmodule ExAtlas.Orchestrator.UpstreamStatus do
 
   Returns `base_ms` jittered by ±`:jitter` (a fraction, default `0.1`) while
   `consecutive_failures` is zero, and doubles per failure after that, capped at
-  `:max_ms` (default eight times the base).
+  `:max_ms` (default eight times the base). Never more than
+  4,294,967,295, the longest timer every OTP release accepts.
 
       next_interval_ms(30_000, 0)                  # ≈ 30s
       next_interval_ms(30_000, 3, jitter: 0.0)     # 240s
@@ -122,6 +124,7 @@ defmodule ExAtlas.Orchestrator.UpstreamStatus do
     |> backoff(consecutive_failures, max_ms)
     |> jitter(jitter)
     |> max(1)
+    |> min(Timer.max_ms())
   end
 
   # `consecutive_failures` is unbounded in principle; shifting by it directly
