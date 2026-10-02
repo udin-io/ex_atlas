@@ -146,6 +146,34 @@ defmodule ExAtlas.Providers.RunPodTest do
              }
     end
 
+    test "an invalid s3: raises before any request reaches RunPod", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      test_pid = self()
+
+      Bypass.stub(bypass, "POST", "/pods", fn conn ->
+        send(test_pid, :posted)
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      error =
+        assert_raise NimbleOptions.ValidationError, fn ->
+          ExAtlas.spawn_compute(
+            [
+              gpu: :h100,
+              image: "x",
+              s3: %{access_key_id: "tid-test-4b1e", dataset_uri: "s3://bucket/d/"}
+            ] ++ opts
+          )
+        end
+
+      assert error.key == :s3
+      refute inspect(error) =~ "tid-test-4b1e"
+      # The valid-s3: test above is the control: the same stub path does POST.
+      refute_received :posted
+    end
+
     test "inspect of the compute omits the env RunPod echoes back", %{
       bypass: bypass,
       ctx_opts: opts
