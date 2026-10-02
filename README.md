@@ -1237,7 +1237,9 @@ With an owner set:
   keep that name.
 - The Reaper deletes only untracked pods named with its own owner. It leaves
   every other prefixed pod alone and logs each once per boot, with its id and
-  the owner it carries. Pods of a machine that is gone are yours to delete.
+  the owner it carries. With the Ecto store, another machine takes over a
+  gone machine's persisted tasks once its lease expires (see "In your own
+  database"); other pods of a machine that is gone are yours to delete.
 - The Adopter adopts only the tracking records that carry its own owner, so
   machines can share one database-backed store (see "Surviving a deploy").
 
@@ -1331,6 +1333,13 @@ cannot send your key to another host. If you pass either per call to a
 `persist: true` spawn, set it in config too before you deploy; otherwise the
 adopted task calls the provider's public URL.
 
+**An adopted task respawns only from a record this node signed.** The node
+signs each record with a key derived from `config :ex_atlas, :callback,
+secret:`, so a store writer without that secret cannot choose what a respawn
+rents. Without a callback secret, or for a record 0.8.0 wrote, an adopted
+task keeps its deadline and cost cap but ends where it would respawn, and a
+`persist: true` spawn that can respawn logs a warning.
+
 Seven things to know before you rely on it:
 
 - **Tasks only.** `persist: true` requires `mode: :task` and is refused
@@ -1351,9 +1360,10 @@ Seven things to know before you rely on it:
 - **A shared store needs a `:reap_owner` on every node.** Each record carries
   its spawning node's owner, and a node adopts only its own records. A record
   of another owner stays untouched and the boot logs its id. The first node to
-  adopt an unowned record (one written before v0.8.0) claims it. A dead
-  owner's pods and records stay until you delete them: "node A died, node B
-  takes over" needs leases and is out of scope. A store that maps fields to
+  adopt an unowned record (one written before v0.8.0) claims it. With the
+  Ecto store, a live node takes over a dead owner's signed records once its
+  lease expires; with DETS or a store of your own, a dead owner's pods and
+  records stay until you delete them. A store that maps fields to
   columns needs a nullable `owner` column, and from v0.8.0 the four cost
   columns `max_cost`, `spent_usd`, `cost_rate` and `cost_since_ms` (the last
   two nullable). It needs a nullable integer `respawning` column too: without
@@ -1371,9 +1381,12 @@ Seven things to know before you rely on it:
   trackers finish their DELETE.
 - **A machine removed for good keeps its persisted pods too.** `fly scale
   count` down and `fly machine destroy` send the same SIGTERM as a deploy, and
-  the app cannot tell them apart. The pod runs with no tracker and no
-  `:max_runtime_ms` cap until its container exits or you delete it. The Reaper
-  on the remaining machines leaves it alone and logs it as another owner's.
+  the app cannot tell them apart. With the Ecto store and `:reap_owner` set,
+  a remaining machine takes the task over once the removed machine's lease
+  expires (90 s by default). With any other store the pod runs with no
+  tracker and no `:max_runtime_ms` cap until its container exits or you
+  delete it; the Reaper on the remaining machines leaves it alone and logs it
+  as another owner's.
 - **`stop_tracked/1` is how you end one.** It deletes the pod and the record,
   persisted or not. `DynamicSupervisor.terminate_child/2` on
   `ExAtlas.Orchestrator.ComputeSupervisor` counts as a node stop and keeps a
@@ -1438,6 +1451,42 @@ children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
   only a provider that is built in or declares `ExAtlas.Provider`. The row
   still chooses what a respawn after adoption rents, so let only your app
   write `atlas_tracking_records`.
+
+##### When a machine is gone for good
+
+With `:reap_owner` set, each machine renews its row in `atlas_owner_leases`
+every third of `lease_ttl_ms`. When a machine stops renewing, another machine
+claims its records once the lease expires and adopts them as a boot does: it
+tracks the pod, enforces its deadline and cost cap, and deletes the record of
+a pod that is gone.
+
+```elixir
+config :ex_atlas, :orchestrator,
+  tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto,
+  repo: MyApp.Repo,
+  reap_owner: System.get_env("FLY_MACHINE_ID"),
+  lease_ttl_ms: 90_000   # default; 1 s to one hour
+
+# machine m1 is destroyed while its task pod-abc runs
+# within 90 s, on m2:
+ExAtlas.Orchestrator.list_ids()
+# => ["pod-abc"]
+```
+
+- A machine takes over only records its own key verifies: every machine needs
+  the same `config :ex_atlas, :callback, secret:`, and a machine with none
+  runs no lease. An unsigned record (written by 0.8.0 or by a machine with no
+  secret) is logged once and left, as is a record of a newer release.
+- A machine that cannot renew its own lease claims nothing. A machine that
+  just booted, or whose own lease lapsed, waits one `lease_ttl_ms` before it
+  claims, so after a database outage no machine takes the others' tasks.
+- On every renewal a machine stops its trackers of records another machine
+  now owns, and leaves the pods to it. Until then both track the pod: up to
+  `lease_ttl_ms / 3` while the losing machine can renew.
+- Expiry uses each machine's wall clock: keep clock skew well under
+  `lease_ttl_ms`.
+- A database that ran step 1 of the migration before this release needs a new
+  migration calling `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 2)`.
 
 ## Phoenix LiveDashboard integration
 

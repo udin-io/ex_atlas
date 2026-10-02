@@ -20,11 +20,17 @@ if Code.ensure_loaded?(Ecto.Migration) do
     ## Versions
 
     `up/1` and `down/1` take `version:`, which names the last step to run,
-    1 by default and the only step today. A later release that changes the
-    table adds step 2, and the host writes a new migration that calls
+    2 by default:
+
+      * Step 1 creates `atlas_tracking_records`.
+      * Step 2 creates `atlas_owner_leases`: one row per `:reap_owner`, with
+        the time its lease expires, so a live node can take over the records
+        of a dead one.
+
+    A host that ran step 1 writes a new migration that calls
     `up(version: 2)`. Every step creates only what is missing, so running
     step 1 again is harmless. `down(version: n)` reverses the steps from the
-    newest down to `n`; `down/0` drops the table.
+    newest down to `n`; `down/0` drops both tables.
 
     Both run only inside a migration: outside `Ecto.Migrator`'s runner,
     `Ecto.Migration`'s commands raise, so a `down/0` typed into a release
@@ -34,7 +40,8 @@ if Code.ensure_loaded?(Ecto.Migration) do
     import Ecto.Migration
 
     @table :atlas_tracking_records
-    @current 1
+    @leases :atlas_owner_leases
+    @current 2
 
     @doc "Run the steps up to `version:` (default #{@current})."
     @spec up(keyword()) :: :ok
@@ -73,5 +80,15 @@ if Code.ensure_loaded?(Ecto.Migration) do
     end
 
     defp step(1, :down), do: drop_if_exists(table(@table))
+
+    defp step(2, :up) do
+      create_if_not_exists table(@leases, primary_key: false) do
+        add(:owner, :string, primary_key: true)
+        add(:expires_at, :utc_datetime_usec, null: false)
+        timestamps(type: :utc_datetime_usec)
+      end
+    end
+
+    defp step(2, :down), do: drop_if_exists(table(@leases))
   end
 end

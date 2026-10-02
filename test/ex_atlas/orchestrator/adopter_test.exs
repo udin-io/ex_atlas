@@ -68,6 +68,11 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     |> ExAtlas.Callback.Plug.call([])
   end
 
+  # An edited record, signed as this node signs what it writes. A record the
+  # node did not sign adopts but never respawns (issue 131), so a test of what
+  # a respawn does with a record's shape signs the shape it built.
+  defp put_signed(record), do: Memory.put(TrackingStore.seal(record))
+
   defp backdate!(id, ago_ms) do
     {:ok, record} = Memory.get(id)
     :ok = Memory.put(%{record | spawned_at_ms: record.spawned_at_ms - ago_ms})
@@ -166,7 +171,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       {:ok, record} = Memory.get(compute.id)
       callback = Map.delete(Keyword.fetch!(record.opts, :callback), :attempt)
       opts = Keyword.put(record.opts, :callback, callback)
-      :ok = Memory.put(%{record | opts: opts, respawns: respawns})
+      :ok = put_signed(%{record | opts: opts, respawns: respawns})
 
       {compute, ExAtlas.Callback.Token.mint(callback.task_id, callback.kinds)}
     end
@@ -853,7 +858,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       # What a node on 0a22ec4 wrote: the values themselves.
       {:ok, record} = Memory.get(id)
-      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, @env)})
+      :ok = put_signed(%{record | opts: Keyword.put(record.opts, :env, @env)})
 
       pid = adopt_and_preempt(id)
 
@@ -878,7 +883,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     # What a node on 0a22ec4 wrote: the values themselves.
     defp put_plain_env!(id) do
       {:ok, record} = Memory.get(id)
-      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :env, @env)})
+      :ok = put_signed(%{record | opts: Keyword.put(record.opts, :env, @env)})
     end
 
     defp assert_names_only(id) do
@@ -924,7 +929,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       id = compute.id
       {:ok, record} = Memory.get(id)
-      :ok = Memory.put(%{record | owner: nil, opts: Keyword.put(record.opts, :env, @env)})
+      :ok = put_signed(%{record | owner: nil, opts: Keyword.put(record.opts, :env, @env)})
 
       Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
       boot_as("b")
@@ -1477,7 +1482,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       id = compute.id
       {:ok, record} = Memory.get(id)
       opts = Keyword.put(record.opts, :respawn_credentials, undeclared)
-      :ok = Memory.put(%{record | opts: opts})
+      :ok = put_signed(%{record | opts: opts})
 
       log = capture_log(fn -> send(self(), {:tracker, adopt_and_preempt(id)}) end)
       assert_received {:tracker, pid}
@@ -2093,7 +2098,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
             value -> Map.put(record, :respawning, value)
           end
 
-        :ok = Memory.put(record)
+        :ok = put_signed(record)
         old_id = compute.id
         Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
 

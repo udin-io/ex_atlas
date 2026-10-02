@@ -522,6 +522,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     :exit, _ -> :ok
   end
 
+  @doc false
+  # Stop tracking a resource another node now owns (`ExAtlas.Orchestrator.Lease`):
+  # the pod keeps running and the record is left as that node wrote it.
+  def release(pid) do
+    GenServer.stop(pid, {:shutdown, :released}, @shutdown_timeout_ms)
+  catch
+    :exit, _ -> :ok
+  end
+
   # --- callbacks ---
 
   @impl true
@@ -561,6 +570,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         new_state(compute, opts, tracking)
         | respawns: spent_respawns(record),
           interrupted_respawn?: is_integer(interrupted_attempt(record)),
+          sealed?: Map.get(record, :sealed) == true,
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
@@ -614,6 +624,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
       interrupted_respawn?: false,
+      # Whether a respawn may rent from these opts. A fresh spawn's came from
+      # the caller; an adopted task's from a record, trusted only when this
+      # node signed it.
+      sealed?: true,
       last_activity_ms: now_ms(),
       mode: tracking[:mode],
       deadline_at_ms: deadline_at(tracking[:max_runtime_ms]),
@@ -962,6 +976,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Events.broadcast(state.compute.id, {:terminating, reason})
 
     cond do
+      # Another node took the resource over: its pod and record are theirs.
+      reason == {:shutdown, :released} ->
+        :ok
+
       # A node stop (SIGTERM, `System.stop/0`, `Application.stop(:ex_atlas)`)
       # reaches every tracker as its supervisor's `:shutdown`. A persisted task
       # with no report yet keeps its pod and its record, so the next boot
@@ -1231,6 +1249,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     needs = unstored(opts)
 
     cond do
+      # Before the resolver and the rent: an unsigned record's image, command
+      # and callback descriptor are whoever wrote the store's choice.
+      not state.sealed? ->
+        respawn_error(
+          opts,
+          "the tracking record is not signed by this node, so its image, command and " <>
+            "callback are not trusted. A record from 0.8.0, from a node with no " <>
+            "config :ex_atlas, :callback, secret:, or signed under a rotated secret reads " <>
+            "the same"
+        )
+
       needs == %{s3: false, env: nil} ->
         spawn_compute(opts, state)
 
@@ -1535,8 +1564,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp update_record(%{store: store} = state, fun) do
     contain_store(state.compute.id, :ok, fn ->
       case store.get(state.compute.id) do
-        {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_record())
-        :error -> :ok
+        {:ok, record} ->
+          store.put(TrackingStore.rewrite(fun.(record), signed_as?(record, state.compute.id)))
+
+        :error ->
+          :ok
       end
     end)
   end
@@ -1548,6 +1580,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     update_record(state, &Map.merge(&1, TrackingStore.cost_fields(meter, since_ms)))
   end
 
+  # A store can file one task's signed record under another task's id (a DETS
+  # entry's key is not the record's `:id`). Re-signing it would splice two
+  # tasks into a record this node never wrote.
+  defp signed_as?(%{id: id} = record, id), do: TrackingStore.sealed?(record)
+  defp signed_as?(_record, _id), do: false
+
   defp carry_record(%{store: nil}, _old_id, _new_id), do: :ok
 
   defp carry_record(%{store: store} = state, old_id, new_id) do
@@ -1557,13 +1595,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           attempt = state.respawns + 1
 
           store.put(
-            TrackingStore.scrub_record(
+            TrackingStore.rewrite(
               Map.merge(record, %{
                 id: new_id,
                 respawns: attempt,
                 respawning: nil,
                 opts: next_attempt(record.opts, attempt)
-              })
+              }),
+              signed_as?(record, old_id)
             )
           )
 

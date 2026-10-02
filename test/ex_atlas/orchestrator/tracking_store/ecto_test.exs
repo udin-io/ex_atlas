@@ -49,6 +49,30 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     )
   end
 
+  # A host's migration for each step, as the README tells it to write.
+  defmodule StepOne do
+    @moduledoc false
+    use Ecto.Migration
+    def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 1)
+    def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 1)
+  end
+
+  defmodule StepTwo do
+    @moduledoc false
+    use Ecto.Migration
+    def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 2)
+    def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 2)
+  end
+
+  defp tables do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'atlas_%' ORDER BY name"
+      )
+
+    List.flatten(rows)
+  end
+
   describe "all/0" do
     test "answers {:error, _} when the table was never migrated", %{tmp_dir: dir} do
       start!(dir, migrate: false)
@@ -266,6 +290,202 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     end
   end
 
+  describe "renew_lease/2" do
+    test "writes the owner's expiry, and a renewal moves it", %{tmp_dir: dir} do
+      start!(dir)
+
+      assert :ok = Store.renew_lease("m1", 1_000_000)
+      assert lease_expiry("m1") == 1_000_000
+      assert :ok = Store.renew_lease("m1", 2_000_000)
+      assert lease_expiry("m1") == 2_000_000
+    end
+
+    test "answers {:error, _} when the lease table was never migrated", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}], :up, all: true, log: false)
+
+      assert {:error, _reason} = Store.renew_lease("m1", 1_000_000)
+    end
+  end
+
+  describe "claim_expired/3" do
+    # The rewrite ExAtlas passes: the record, owned by the claimer.
+    defp to(owner), do: fn record -> {:ok, Map.put(record, :owner, owner)} end
+
+    defp owned!(id, owner), do: :ok = Store.put(record(id, %{owner: owner}))
+
+    test "claims the records of an owner whose lease expired, column and record alike", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      owned!("pod-a", "m1")
+      owned!("pod-b", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+
+      assert {:ok, claimed} = Store.claim_expired("m2", 2_000, to("m2"))
+
+      assert claimed |> Enum.map(& &1.id) |> Enum.sort() == ["pod-a", "pod-b"]
+      assert {:ok, %{owner: "m2"}} = Store.get("pod-a")
+      assert owner_column("pod-a") == "m2"
+    end
+
+    test "control: claims nothing while the owner's lease is live", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 3_000)
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, to("m2"))
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+    end
+
+    test "claims nothing of an owner that never held a lease", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      owned!("pod-u", nil)
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, to("m2"))
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+    end
+
+    test "never claims the claimer's own records", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m2")
+      :ok = Store.renew_lease("m2", 1_000)
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, to("m2"))
+    end
+
+    test "leaves a record the rewrite skips", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, fn _record -> :skip end)
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+      assert owner_column("pod-a") == "m1"
+    end
+
+    test "writes nothing when the owner renews between the read and the update", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+
+      renews_first = fn record ->
+        :ok = Store.renew_lease("m1", 9_000)
+        {:ok, Map.put(record, :owner, "m2")}
+      end
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, renews_first)
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+    end
+
+    # The claimer writes a blob built from the row it read. A row that moved
+    # to another owner meanwhile, even one whose lease expired too, keeps the
+    # newer copy.
+    test "writes nothing when the row moved to another expired owner since the read", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+      :ok = Store.renew_lease("m9", 1_000)
+
+      moved_first = fn record ->
+        :ok = Store.put(Map.merge(record, %{owner: "m9", user_id: "moved"}))
+        {:ok, Map.put(record, :owner, "m2")}
+      end
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, moved_first)
+      assert {:ok, %{owner: "m9", user_id: "moved"}} = Store.get("pod-a")
+    end
+
+    # A database writer moves a live node's row to an owner it made up, whose
+    # lease it set in the past. The record still names its signed owner.
+    test "leaves a row whose owner column differs from the record's own :owner", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 9_000)
+      Repo.query!("UPDATE atlas_tracking_records SET owner = 'ghost' WHERE id = 'pod-a'")
+      :ok = Store.renew_lease("ghost", 1_000)
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, to("m2"))
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+      assert owner_column("pod-a") == "ghost"
+    end
+
+    # Rows claimed before the raise are committed; the caller must get them
+    # back, or no one adopts them.
+    test "answers the rows it claimed when the rewrite raises on another", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      owned!("pod-b", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+
+      raises_on_b = fn
+        %{id: "pod-b"} -> raise "malformed record"
+        record -> {:ok, Map.put(record, :owner, "m2")}
+      end
+
+      assert {:ok, [%{id: "pod-a", owner: "m2"}]} = Store.claim_expired("m2", 2_000, raises_on_b)
+      assert {:ok, %{owner: "m2"}} = Store.get("pod-a")
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-b")
+    end
+
+    test "two nodes claiming at once leave each record with exactly one owner", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      ids = for n <- 1..20, do: "pod-#{n}"
+      Enum.each(ids, &owned!(&1, "m1"))
+      :ok = Store.renew_lease("m1", 1_000)
+
+      [m2, m3] =
+        ["m2", "m3"]
+        |> Enum.map(&Task.async(fn -> Store.claim_expired(&1, 2_000, to(&1)) end))
+        |> Task.await_many(10_000)
+
+      assert {:ok, by_m2} = m2
+      assert {:ok, by_m3} = m3
+      m2_ids = MapSet.new(by_m2, & &1.id)
+      m3_ids = MapSet.new(by_m3, & &1.id)
+
+      assert MapSet.disjoint?(m2_ids, m3_ids)
+      assert MapSet.union(m2_ids, m3_ids) == MapSet.new(ids)
+
+      for id <- ids do
+        {:ok, %{owner: owner}} = Store.get(id)
+        assert owner_column(id) == owner
+        assert if(id in m2_ids, do: owner == "m2", else: owner == "m3")
+      end
+    end
+
+    test "answers {:error, _} when the lease table was never migrated", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}], :up, all: true, log: false)
+
+      assert {:error, _reason} = Store.claim_expired("m2", 2_000, to("m2"))
+    end
+  end
+
+  defp lease_expiry(owner) do
+    %{rows: [[expires_at]]} =
+      Repo.query!("SELECT expires_at FROM atlas_owner_leases WHERE owner = ?1", [owner])
+
+    {:ok, at, 0} = DateTime.from_iso8601(expires_at)
+    DateTime.to_unix(at, :millisecond)
+  end
+
+  defp owner_column(id) do
+    %{rows: [[owner]]} =
+      Repo.query!("SELECT owner FROM atlas_tracking_records WHERE id = ?1", [id])
+
+    owner
+  end
+
   describe "Migration" do
     test "down/0 outside a migration raises, and the table keeps its rows", %{tmp_dir: dir} do
       start!(dir)
@@ -276,7 +496,30 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     end
 
     test "up/1 refuses a version this build does not have" do
-      assert_raise ArgumentError, ~r/version/, fn -> Store.Migration.up(version: 2) end
+      assert_raise ArgumentError, ~r/version/, fn -> Store.Migration.up(version: 3) end
+    end
+
+    test "step 1 creates the records table alone; step 2 adds the lease table", %{
+      tmp_dir: dir
+    } do
+      start!(dir, migrate: false)
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}], :up, all: true, log: false)
+      assert tables() == ["atlas_tracking_records"]
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+      assert tables() == ["atlas_owner_leases", "atlas_tracking_records"]
+    end
+
+    test "down(version: 2) drops the lease table and keeps the records", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+      :ok = Store.put(record("pod-a"))
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :down, step: 1, log: false)
+
+      assert tables() == ["atlas_tracking_records"]
+      assert {:ok, [%{id: "pod-a"}]} = Store.all()
     end
 
     test "down runs inside a migration and drops the table", %{tmp_dir: dir} do

@@ -187,6 +187,7 @@ defmodule ExAtlas.Orchestrator do
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),
          :ok <- warn_unreaped_respawn(opts, tracking),
+         :ok <- warn_unsigned_respawn(opts, tracking),
          {:ok, compute} <- ExAtlas.spawn_compute(opts),
          :ok <- require_price(compute, opts, tracking) do
       persist(compute, opts, tracking)
@@ -206,6 +207,22 @@ defmodule ExAtlas.Orchestrator do
           "#{inspect(provider)} is not in :reap_providers. If this node dies while a respawn " <>
           "rents, the replacement runs and bills with no tracker, and nothing deletes it. " <>
           "Add #{inspect(provider)} to :reap_providers, or delete such a pod by hand."
+      )
+    end
+
+    :ok
+  end
+
+  # A record this node did not sign never respawns after adoption (issue 131),
+  # and the signing key comes from the callback secret.
+  defp warn_unsigned_respawn(opts, tracking) do
+    with true <- tracking[:persist],
+         {:respawn, max} when max > 0 <- tracking[:on_failure],
+         false <- TrackingStore.signs?() do
+      Logger.warning(
+        "[ExAtlas.Orchestrator] #{inspect(Keyword.get(opts, :name))} cannot respawn after a " <>
+          "restart: its tracking record is unsigned, and an adopted task respawns only from a " <>
+          "record this node signed. Set config :ex_atlas, :callback, secret: (32 bytes or more)."
       )
     end
 

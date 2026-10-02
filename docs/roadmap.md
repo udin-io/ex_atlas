@@ -18,7 +18,7 @@ routine deploy. Three slices, each 4 to 8 hours:
 |---|---|---|
 | 1 | `TrackingStore.Ecto` in the host's repo, its migration module, and `ExAtlas.Orchestrator.Supervisor`, which the host starts after its repo | #120 |
 | 2 | `mix ex_atlas.install --tracking-store ecto` writes the migration, config and child; `TrackingStoreConformance` ships in `lib`; the guides and risk 3 point at the Ecto store | #128 |
-| 3 | Leases on a shared store: a live node adopts the records of an owner whose lease expired. Touches the Adopter and the Reaper, so it waits for #118 | not filed |
+| 3 | Leases on the Ecto store: a live node adopts the signed records of an owner whose lease expired | #132 |
 
 Vast.ai (#98) shipped with slice 4. Its templates, network volumes,
 serverless, and SSH and Jupyter modes stay out of scope.
@@ -27,8 +27,8 @@ serverless, and SSH and Jupyter modes stay out of scope.
 
 | Feature | Ticket | State |
 |---|---|---|
-| Database tracking store, slice 2: `mix ex_atlas.install --tracking-store ecto`, and both conformance suites in `lib` | #128 | PR #129 open |
-| Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag; no `v0.8.0` tag exists yet, and the Vast.ai entries sit under `CHANGELOG.md`'s Unreleased |
+| Database tracking store, slice 3: owner leases, so a live node adopts a dead node's records | #132 | PR #139 open |
+| Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. Published to Hex on 2026-10-02, from tag `v0.8.0` on `939cf2e` |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -37,6 +37,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Database tracking store, slice 2 (milestone 9) | #129 (#128): `mix ex_atlas.install --tracking-store ecto`, and the conformance suites in `lib` | 2026-10-02 |
 | Database tracking store, slice 1 (milestone 9) | #123 (#120): `TrackingStore.Ecto`, its migration module and `ExAtlas.Orchestrator.Supervisor`, which the host starts after its repo | 2026-10-02 |
 | A respawning task warns when no Reaper covers its provider, and an adopted task's revived pod reports again (risk 51) | #119 (#118) | 2026-10-02 |
 | Vast.ai provider (feature #98) | #102 (slice 1, #99): spawn by renting the cheapest on-demand offer, get, list, terminate, GPU types. #108 (slice 2, #105): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper. #113 (slice 3, #112): `spot: true` rents interruptible offers at `min_bid`, and an outbid instance respawns. #117 (slice 4, #116): `stop/2`, `start/2` and `compute_spend/3`, so `max_cost` reconciles against Vast's bill | 2026-10-02 |
