@@ -12,7 +12,13 @@ defmodule ExAtlas.Test.ProviderConformance do
       end
 
   The `:reset` option names a `{mod, fun, args}` tuple the suite calls in its
-  `setup` block. Real providers pass a no-op or a Bypass-based helper.
+  `setup` block. Real providers pass a no-op or a Bypass-based helper. When
+  the call returns a keyword list, the suite adds it to every call, so a
+  Bypass-backed provider can return `base_url:` and `api_key:`:
+
+      use ExAtlas.Test.ProviderConformance,
+        provider: :lambda_labs,
+        reset: {ExAtlas.Test.FakeLambda, :start, []}
   """
 
   @doc false
@@ -44,8 +50,10 @@ defmodule ExAtlas.Test.ProviderConformance do
       @provider unquote(provider)
 
       setup do
-        unquote(reset_call)
-        :ok
+        case unquote(reset_call) do
+          opts when is_list(opts) -> {:ok, call_opts: opts}
+          _ -> {:ok, call_opts: []}
+        end
       end
 
       test "capabilities/0 returns a list of atoms" do
@@ -54,31 +62,30 @@ defmodule ExAtlas.Test.ProviderConformance do
         assert Enum.all?(caps, &is_atom/1)
       end
 
-      test "spawn_compute → get_compute → terminate round-trip" do
+      test "spawn_compute → get_compute → terminate round-trip", %{call_opts: call_opts} do
         {:ok, compute} =
           ExAtlas.spawn_compute(
-            provider: @provider,
-            gpu: :h100,
-            image: "test/image:latest",
-            ports: [{8000, :http}]
+            [
+              provider: @provider,
+              gpu: :h100,
+              image: "test/image:latest",
+              ports: [{8000, :http}]
+            ] ++ call_opts
           )
 
         assert %Spec.Compute{provider: @provider} = compute
         assert is_binary(compute.id)
 
-        {:ok, fetched} = ExAtlas.get_compute(compute.id, provider: @provider)
+        {:ok, fetched} = ExAtlas.get_compute(compute.id, [provider: @provider] ++ call_opts)
         assert fetched.id == compute.id
 
-        :ok = ExAtlas.terminate(compute.id, provider: @provider)
+        :ok = ExAtlas.terminate(compute.id, [provider: @provider] ++ call_opts)
       end
 
-      test "spawn_compute with auth: :bearer returns a token" do
+      test "spawn_compute with auth: :bearer returns a token", %{call_opts: call_opts} do
         {:ok, compute} =
           ExAtlas.spawn_compute(
-            provider: @provider,
-            gpu: :h100,
-            image: "test/image",
-            auth: :bearer
+            [provider: @provider, gpu: :h100, image: "test/image", auth: :bearer] ++ call_opts
           )
 
         assert %{scheme: :bearer, token: token, hash: hash} = compute.auth
@@ -86,9 +93,13 @@ defmodule ExAtlas.Test.ProviderConformance do
         assert is_binary(hash)
       end
 
-      test "list_compute returns a list" do
-        {:ok, _} = ExAtlas.spawn_compute(provider: @provider, gpu: :h100, image: "test/image")
-        {:ok, all} = ExAtlas.list_compute(provider: @provider)
+      test "list_compute returns a list", %{call_opts: call_opts} do
+        {:ok, _} =
+          ExAtlas.spawn_compute(
+            [provider: @provider, gpu: :h100, image: "test/image"] ++ call_opts
+          )
+
+        {:ok, all} = ExAtlas.list_compute([provider: @provider] ++ call_opts)
         assert is_list(all)
       end
     end

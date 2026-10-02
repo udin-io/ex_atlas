@@ -100,7 +100,7 @@ defmodule ExAtlas.Test.FakeLambda do
     end)
 
     Bypass.stub(bypass, "GET", "/instances/:id", fn conn ->
-      case Agent.get(store, &Map.get(&1, conn.path_params["id"])) do
+      case Agent.get(store, &Map.get(&1, List.last(conn.path_info))) do
         nil -> json(conn, 404, not_found())
         found -> json(conn, 200, %{"data" => found})
       end
