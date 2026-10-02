@@ -264,11 +264,13 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     test "in a new tree reaps nothing until that tree's Adopter signals" do
       # The first tree settles; the second is the app started again in the
       # same VM, its Adopter not yet run.
-      boot()
+      # Both registered under one name, as `ExAtlas.Supervisor` is across app
+      # restarts: only the pid tells the two trees apart.
+      boot(name: :atlas_test_tree)
       shutdown()
 
       children = Enum.reject(ExAtlas.Application.orchestrator_children(), &(&1 == Adopter))
-      sup = start_tree(children)
+      sup = start_tree(children, name: :atlas_test_tree)
       {:ok, orphan} = spawn_orphan()
 
       tick()
