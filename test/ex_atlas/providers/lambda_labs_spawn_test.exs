@@ -289,6 +289,35 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       end
     end
 
+    # bash refuses `export` for a readonly name, which stops the script before
+    # `docker run`, and rewrites or drops a special one, so the container
+    # would get another value.
+    test "an env name bash keeps for itself is :validation naming it, and no launch", %{
+      opts: opts
+    } do
+      for name <-
+            ~w(UID EUID PPID SHELLOPTS BASHOPTS BASH_VERSINFO RANDOM SRANDOM SECONDS LINENO) ++
+              ~w(GROUPS FUNCNAME HISTCMD OPTIND DIRSTACK PIPESTATUS BASHPID EPOCHSECONDS) ++
+              ~w(EPOCHREALTIME BASH_ENV BASH_ARGV0 COMP_WORDS) do
+        assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+                 ExAtlas.spawn_compute(opts ++ [env: %{name => "1000"}]),
+               "expected #{name} to be refused"
+
+        assert message =~ inspect(name)
+      end
+    end
+
+    @tag :tmp_dir
+    test "control: a name that only contains one of bash's names launches and reaches docker",
+         %{bypass: bypass, opts: opts, tmp_dir: dir} do
+      expect_types(bypass)
+      expect_launch(bypass)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [env: %{"APP_UID" => "1000"}])
+
+      assert run_with_stubs(launched_body()["user_data"], dir).env["APP_UID"] == "1000"
+    end
+
     test "an env name that is not a shell identifier is :validation naming it, and no launch", %{
       opts: opts
     } do
@@ -321,6 +350,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
       assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
                ExAtlas.spawn_compute(Keyword.put(opts, :image, "img" <> <<0xFF>>))
+
+      assert message =~ ":image"
+
+      # A shell argument cannot carry a NUL byte either.
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+               ExAtlas.spawn_compute(Keyword.put(opts, :image, "img" <> <<0>> <> "x"))
 
       assert message =~ ":image"
     end

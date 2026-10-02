@@ -35,6 +35,14 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   @shell_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
 
+  # Names bash keeps for itself. `export` of a readonly one stops the script
+  # before `docker run`; bash rewrites or drops a special one, so the
+  # container would get another value. `BASH_*` and `COMP_*` are refused as
+  # prefixes, which covers bash 5's `BASH_ARGV0`, `BASH_SUBSHELL` and the rest.
+  @bash_names ~w(UID EUID PPID SHELLOPTS BASHOPTS RANDOM SRANDOM SECONDS LINENO GROUPS
+                 FUNCNAME HISTCMD OPTIND DIRSTACK PIPESTATUS BASHPID EPOCHSECONDS
+                 EPOCHREALTIME)
+
   # How long the script waits for the Docker daemon, which cloud-init can
   # reach before `docker.service` is up: 90 tries, 2 s apart.
   @docker_wait_tries 90
@@ -56,9 +64,10 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   Returns `{:error, %ExAtlas.Error{kind: :validation}}`, naming no value, for:
 
-    * an env name that is not a shell identifier, or starts with `DOCKER_` or
-      `LD_`, which the host's docker client and loader read;
-    * a value holding a NUL byte, or a value or `:image` that is not UTF-8;
+    * an env name that is not a shell identifier, starts with `DOCKER_` or
+      `LD_`, which the host's docker client and loader read, or is one bash
+      keeps for itself (`UID`, `RANDOM`, `BASH_*`, ...);
+    * a value or `:image` holding a NUL byte or not UTF-8;
     * an `:image` that starts with `-`;
     * a port that is not `{1..65535, :http | :tcp}`, or ports too many for a
       #{@max_tag_value}-character tag;
@@ -231,6 +240,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       not String.valid?(image) ->
         validation(":image is not valid UTF-8")
 
+      String.contains?(image, <<0>>) ->
+        validation(":image holds a NUL byte, which a shell cannot carry")
+
       String.starts_with?(image, "-") ->
         validation(":image starts with -, which docker reads as a flag")
 
@@ -297,6 +309,12 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         not Regex.match?(@shell_name, name) ->
           validation(
             "env name #{inspect(name)} is not a shell identifier ([A-Za-z_][A-Za-z0-9_]*)"
+          )
+
+        name in @bash_names or String.starts_with?(name, ["BASH_", "COMP_"]) ->
+          validation(
+            "env name #{inspect(name)} is a bash variable; Lambda's script cannot export it " <>
+              "for docker run"
           )
 
         String.starts_with?(name, ["DOCKER_", "LD_"]) ->
