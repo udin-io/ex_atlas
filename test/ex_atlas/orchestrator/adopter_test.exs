@@ -1672,7 +1672,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
 
     test "a claimed v2 record is written back as a full v3 record" do
-      compute = orphaned_task_of(nil)
+      # The record is unsigned once downgraded, so it adopts only a pod named
+      # with the claiming node's owner (issue 138).
+      compute = orphaned_task_of(nil, name: "atlas-b-adoptable")
       downgrade_to_v2!(compute.id)
 
       boot_as("b")
@@ -1737,7 +1739,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
 
     test "the first node to adopt an unowned v1 record claims it" do
-      compute = orphaned_task_of("a")
+      # The record is unsigned once downgraded, so it adopts only a pod named
+      # with the claiming node's owner (issue 138).
+      compute = orphaned_task_of(nil, name: "atlas-b-adoptable")
       downgrade_to_v1!(compute.id)
 
       boot_as("b")
@@ -1749,7 +1753,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
 
     test "a claimed record is left alone by the next owner to boot" do
-      compute = orphaned_task_of("a")
+      # The record is unsigned once downgraded, so it adopts only a pod named
+      # with the claiming node's owner (issue 138).
+      compute = orphaned_task_of(nil, name: "atlas-b-adoptable")
       downgrade_to_v1!(compute.id)
       boot_as("b")
       {:ok, pid} = Orchestrator.lookup(compute.id)
