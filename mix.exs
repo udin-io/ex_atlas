@@ -165,6 +165,7 @@ defmodule ExAtlas.MixProject do
         "LiveDashboard integration": [ExAtlas.LiveDashboard.ComputePage],
         Orchestrator: [
           ExAtlas.Orchestrator,
+          ExAtlas.Orchestrator.Supervisor,
           ExAtlas.Orchestrator.ComputeServer,
           ExAtlas.Orchestrator.ComputeSupervisor,
           ExAtlas.Orchestrator.ComputeRegistry,

@@ -618,10 +618,13 @@ defmodule ExAtlas.Orchestrator do
     end
   end
 
+  # Checks the tree, not `start_orchestrator`: a host that starts
+  # `ExAtlas.Orchestrator.Supervisor` itself leaves the flag false.
   defp ensure_running! do
-    unless Application.get_env(:ex_atlas, :start_orchestrator, false) do
-      raise "ExAtlas.Orchestrator is not started. Set `config :ex_atlas, start_orchestrator: true` " <>
-              "and ensure :ex_atlas is in your extra_applications."
+    unless Process.whereis(ComputeSupervisor) do
+      raise "ExAtlas.Orchestrator is not started. Set `config :ex_atlas, start_orchestrator: true`, " <>
+              "or add ExAtlas.Orchestrator.Supervisor to your application's children after " <>
+              "your Repo."
     end
   end
 end
