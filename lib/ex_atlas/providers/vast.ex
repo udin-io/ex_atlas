@@ -39,14 +39,25 @@ defmodule ExAtlas.Providers.Vast do
 
   @behaviour ExAtlas.Provider
 
-  alias ExAtlas.Error
+  alias ExAtlas.{Error, Spec}
+  alias ExAtlas.Providers.HTTP
   alias ExAtlas.Providers.Vast.{Client, Translate}
+
+  @bundles "/api/v0/bundles/"
 
   @impl true
   def capabilities, do: [:raw_tcp]
 
   @impl true
-  def spawn_compute(_request, _ctx), do: unsupported("Vast spawn_compute/2 is not built yet")
+  def spawn_compute(%Spec.ComputeRequest{} = request, ctx) do
+    with :ok <- check_supported(request),
+         {:ok, parts} <- Translate.launch_parts(request),
+         body = Translate.launch_body(request, parts),
+         {:ok, offers} <- offers(request, ctx),
+         {:ok, id, offer} <- rent_first(ctx, offers, body) do
+      {:ok, Translate.launched_compute(id, request, parts, offer)}
+    end
+  end
 
   @impl true
   def get_compute(id, ctx) do
@@ -74,7 +85,7 @@ defmodule ExAtlas.Providers.Vast do
   @impl true
   def terminate(id, ctx) do
     case Client.delete(ctx, "/api/v0/instances/#{encode(id)}/") do
-      {:ok, %{"success" => false} = body} -> {:error, refused(body)}
+      {:ok, %{"success" => false} = body} -> {:error, refused(body, nil, "destroy")}
       {:ok, _} -> :ok
       {:error, _} = err -> err
     end
@@ -89,21 +100,148 @@ defmodule ExAtlas.Providers.Vast do
   @impl true
   def list_gpu_types(_ctx), do: unsupported("Vast list_gpu_types/1 is not built yet")
 
-  # --- helpers ---
+  # --- spawn ---
 
-  # Vast's `msg` can echo a request; a refusal keeps only Vast's `error` code.
-  defp refused(body) do
+  defp check_supported(%Spec.ComputeRequest{} = request) do
+    unsupported =
+      [
+        command: request.command not in [nil, []],
+        spot: request.spot,
+        template_id: request.template_id != nil,
+        network_volume_id: request.network_volume_id != nil
+      ]
+      |> Enum.find(fn {_field, set?} -> set? end)
+
+    case unsupported do
+      nil -> :ok
+      {field, _} -> unsupported("Vast does not take #{inspect(field)} in this ExAtlas release")
+    end
+  end
+
+  defp offers(request, ctx) do
+    case offer_id(request) do
+      {:ok, id} ->
+        {:ok, [%{"id" => id}]}
+
+      :search ->
+        searched_offers(request, ctx)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp searched_offers(request, ctx) do
+    with {:ok, query} <- Translate.offer_query(request),
+         {:ok, found} <- search(ctx, query) do
+      case Translate.pick(found, request.region_hints) do
+        [] -> no_offer(request)
+        picked -> {:ok, picked}
+      end
+    end
+  end
+
+  defp offer_id(request) do
+    case Map.get(request.provider_opts, :offer_id) do
+      nil ->
+        :search
+
+      id when is_integer(id) and id > 0 ->
+        {:ok, id}
+
+      _other ->
+        {:error,
+         Error.new(:validation,
+           provider: :vast,
+           message: "provider_opts.offer_id must be a positive integer"
+         )}
+    end
+  end
+
+  # A search rents nothing, so a transient failure is safe to retry.
+  defp search(ctx, query) do
+    case Client.post(ctx, @bundles, query, retry: :transient) do
+      {:ok, %{"offers" => offers}} when is_list(offers) -> {:ok, offers}
+      {:ok, _other} -> unexpected_body("POST #{@bundles}")
+      {:error, _} = err -> err
+    end
+  end
+
+  defp no_offer(request) do
+    {:error,
+     Error.new(:provider,
+       provider: :vast,
+       message:
+         "Vast has no on-demand offer for #{request.gpu_count}x #{inspect(request.gpu)} " <>
+           "with the disk and ports asked for"
+     )}
+  end
+
+  # Tries each offer in turn. Only a refusal (a 4xx other than 401, 403 and
+  # 429) moves on: it means Vast rented nothing, and offers are taken within
+  # seconds. A 5xx or a timeout may have rented, so it stops the spawn.
+  defp rent_first(ctx, [offer | rest], body) do
+    case rent(ctx, offer, body) do
+      {:ok, id} ->
+        {:ok, id, if(Map.has_key?(offer, "dph_total"), do: offer)}
+
+      {:error, error} ->
+        if rest != [] and next_offer?(error),
+          do: rent_first(ctx, rest, body),
+          else: {:error, error}
+    end
+  end
+
+  defp next_offer?(%Error{status: status}),
+    do: is_integer(status) and status in 400..499 and status not in [401, 403, 429]
+
+  # Retried on a 429 only: a rent that answered 5xx or timed out may have
+  # rented an instance already.
+  defp rent(ctx, %{"id" => offer_id}, body) do
+    case Client.put(ctx, "/api/v0/asks/#{offer_id}/", body, retry: &HTTP.retry_rate_limited/2) do
+      {:ok, %{"new_contract" => id}} when is_integer(id) ->
+        {:ok, Integer.to_string(id)}
+
+      {:ok, other} ->
+        {:error, refused(other, 200, "rent")}
+
+      {:error, %Error{status: status} = error} when is_integer(status) ->
+        {:error, withhold(error)}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # Vast's `msg` can echo the request, `env` values included, as Lambda's
+  # error text did (issue 84). An answered error keeps only Vast's `error`
+  # code. A 401, 403 or 429 keeps its kind; a 404 names the offer, not an
+  # instance, so it reads `:provider`.
+  defp withhold(%Error{kind: kind} = error) do
+    refused = refused(error.raw, error.status, "rent")
+
+    if kind in [:unauthorized, :forbidden, :rate_limited],
+      do: %{refused | kind: kind},
+      else: refused
+  end
+
+  defp refused(body, status, action) do
     code = code(body)
 
     Error.new(:provider,
       provider: :vast,
-      message: "Vast refused the destroy (#{code || "no error code"})",
+      status: status,
+      message:
+        "Vast refused the #{action} (#{code || "no error code"}); ExAtlas withholds " <>
+          "Vast's message, which can echo the request",
       raw: code && %{"error" => code}
     )
   end
 
   defp code(%{"error" => code}) when is_binary(code), do: code
   defp code(_body), do: nil
+
+  # --- helpers ---
 
   defp encode(id), do: URI.encode(to_string(id), &URI.char_unreserved?/1)
 

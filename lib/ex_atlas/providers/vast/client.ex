@@ -8,6 +8,7 @@ defmodule ExAtlas.Providers.Vast.Client do
   """
 
   alias ExAtlas.Providers.HTTP
+  alias ExAtlas.Secret
 
   @base_url "https://console.vast.ai"
   @telemetry_prefix [:ex_atlas, :vast]
@@ -46,6 +47,38 @@ defmodule ExAtlas.Providers.Vast.Client do
   @spec get(ExAtlas.Provider.ctx(), String.t()) :: {:ok, term()} | {:error, ExAtlas.Error.t()}
   def get(ctx, path) do
     ctx |> api() |> Req.get(url: path) |> handle()
+  end
+
+  @doc """
+  POST `body` to `path` and return the body. `opts` go to `Req.post/2`
+  (`retry:`).
+  """
+  @spec post(ExAtlas.Provider.ctx(), String.t(), map(), keyword()) ::
+          {:ok, term()} | {:error, ExAtlas.Error.t()}
+  def post(ctx, path, body, opts \\ []) do
+    ctx |> api() |> Req.post([url: path, json: body] ++ opts) |> handle()
+  end
+
+  @doc """
+  PUT `body` to `path` and return the body.
+
+  A value in `body`, or in a map under one of its keys, may be an
+  `ExAtlas.Secret`. It is revealed in the last request step, as Req encodes
+  the body, so no `Req.Request` field holds it before then. `opts` go to
+  `Req.put/2` (`retry:`).
+  """
+  @spec put(ExAtlas.Provider.ctx(), String.t(), map(), keyword()) ::
+          {:ok, term()} | {:error, ExAtlas.Error.t()}
+  def put(ctx, path, body, opts \\ []) do
+    ctx
+    |> api()
+    |> Req.Request.append_request_steps(
+      atlas_sealed_json: fn request ->
+        %{request | body: Jason.encode_to_iodata!(reveal(body))}
+      end
+    )
+    |> Req.put([url: path] ++ opts)
+    |> handle()
   end
 
   @doc """
@@ -108,6 +141,11 @@ defmodule ExAtlas.Providers.Vast.Client do
   defp page_entries(_body), do: error("unexpected body for GET #{@instances}")
 
   defp handle(result), do: HTTP.handle_response(result, 200..299, :vast)
+
+  defp reveal(%{} = map) when not is_struct(map),
+    do: Map.new(map, fn {key, value} -> {key, reveal(value)} end)
+
+  defp reveal(value), do: Secret.reveal(value)
 
   defp error(message),
     do: {:error, ExAtlas.Error.new(:provider, provider: :vast, message: message)}

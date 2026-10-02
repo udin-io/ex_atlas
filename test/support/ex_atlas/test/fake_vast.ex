@@ -9,6 +9,28 @@ defmodule ExAtlas.Test.FakeVast do
   defdelegate json(conn, status, body), to: ExAtlas.Test.FakeLambda
   defdelegate read_json(conn), to: ExAtlas.Test.FakeLambda
 
+  @doc "An on-demand offer from `POST /api/v0/bundles/`, with the fields ExAtlas reads."
+  def offer(attrs \\ %{}) do
+    Map.merge(
+      %{
+        "id" => 50_751_794,
+        "ask_contract_id" => 50_751_794,
+        "machine_id" => 41_234,
+        "gpu_name" => "RTX 4090",
+        "gpu_ram" => 24_564,
+        "num_gpus" => 1,
+        "dph_total" => 0.42,
+        "geolocation" => "Texas, US",
+        "direct_port_count" => 98,
+        "disk_space" => 1842.3,
+        "verified" => true,
+        "rentable" => true,
+        "rented" => false
+      },
+      attrs
+    )
+  end
+
   @doc "A Vast instance as `GET /api/v0/instances/{id}/` returns it."
   def instance(attrs \\ %{}) do
     Map.merge(
