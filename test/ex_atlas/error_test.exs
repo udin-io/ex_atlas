@@ -89,6 +89,21 @@ defmodule ExAtlas.ErrorTest do
     refute inspect(err.raw) =~ "s3cret"
   end
 
+  test "from_response reads an atom-keyed body (decode_json keys: :atoms), never value" do
+    body = %{
+      detail: "Request validation failed.",
+      errors: [%{location: "body.env.K", message: "too long", value: "s3cret"}]
+    }
+
+    err = ExAtlas.Error.from_response(422, body, :runpod)
+
+    assert err.message == "Request validation failed. (body.env.K: too long)"
+    refute inspect(err, structs: false) =~ "s3cret"
+
+    assert ExAtlas.Error.from_response(500, %{error: %{message: "boom"}}, :runpod).message ==
+             "boom"
+  end
+
   test "from_response reads a bare list of string errors" do
     err = ExAtlas.Error.from_response(400, %{"errors" => ["bad cursor"]}, :runpod)
     assert err.message == "bad cursor"

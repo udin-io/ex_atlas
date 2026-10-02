@@ -78,7 +78,7 @@ defmodule ExAtlas.Error do
     new(kind,
       provider: provider,
       status: status,
-      message: extract_message(body),
+      message: body |> string_keys() |> extract_message(),
       raw: error_raw(status, body)
     )
   end
@@ -87,6 +87,17 @@ defmodule ExAtlas.Error do
   # credentials the request set (a RunPod pod body echoes its `env`).
   defp error_raw(status, _body) when status in 200..299, do: nil
   defp error_raw(_status, body), do: drop_error_values(body)
+
+  # A caller's `decode_json: [keys: :atoms]` makes the keys atoms; the message
+  # reads the same fields either way.
+  defp string_keys(%{} = map) when not is_struct(map),
+    do: Map.new(map, fn {key, value} -> {string_key(key), string_keys(value)} end)
+
+  defp string_keys(list) when is_list(list), do: Enum.map(list, &string_keys/1)
+  defp string_keys(other), do: other
+
+  defp string_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp string_key(key), do: key
 
   # RFC 9457 problem details (Runpod REST v2): `detail` says what went wrong,
   # `errors` lists each invalid field.
