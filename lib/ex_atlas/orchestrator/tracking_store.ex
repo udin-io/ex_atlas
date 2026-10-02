@@ -18,10 +18,16 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   The DETS default is a zero-config convenience, not the recommendation. A host
   that runs on ephemeral filesystems (see "Fly and other ephemeral
-  filesystems") should implement this behaviour against whatever it already
-  trusts to survive a deploy:
+  filesystems") keeps its records in its own database with
+  `ExAtlas.Orchestrator.TrackingStore.Ecto`, or implements this behaviour
+  against whatever else it trusts to survive a deploy:
 
       config :ex_atlas, :orchestrator, tracking_store: MyApp.AtlasStore
+
+  A store that needs a process the host starts (a repo, a Redis client) is
+  read at boot by the Adopter, so the orchestrator must start after it: set
+  `start_orchestrator: false` and put `ExAtlas.Orchestrator.Supervisor` in the
+  host's children after that process.
 
   Five callbacks, no lifecycle to get right beyond `child_spec/1`:
 
@@ -177,8 +183,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   deploy**. Both `priv` and `tmp` are ephemeral there, so the DETS default
   comes up empty at boot: adoption silently does nothing and the Reaper — which
   cannot tell an unrecorded pod of ours from someone else's — reaps the pods
-  anyway. Mount a volume and point `:storage_path` at it, or supply a store
-  backed by something already durable.
+  anyway. Mount a volume and point `:storage_path` at it, or keep the records
+  in the host's database with `ExAtlas.Orchestrator.TrackingStore.Ecto`.
 
   ## When the store cannot account for itself
 

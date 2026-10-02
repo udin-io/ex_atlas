@@ -5,6 +5,29 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Database tracking store (milestone 9)
+
+| Decision | Alternative not taken | Where |
+|---|---|---|
+| The host starts `ExAtlas.Orchestrator.Supervisor` after its repo | The Ecto store waits or retries for the repo inside ExAtlas's tree: a retry still answers `all/0` with an error at boot, which shuts the Reaper for that boot | #120 |
+| `start_orchestrator: true` plus the host's child refuses to start, naming both | Start a second tree: it crashes on duplicate names | #120 |
+| The record is one `term_to_binary` column, plus an `owner` column for queries | A column per field: every new record field needs a migration | #120 |
+| Rows decode with `Plug.Crypto.non_executable_binary_to_term/2` and `[:safe]`; a row that is not a map with its own `id` is refused | Plain `binary_to_term/1`: anyone who can write the database could create atoms or plant functions | #120 |
+| One row that will not decode makes `all/0` return `{:error, {:undecodable, ids}}` | Skip the row: its pod would have no record, and the Reaper would delete it | #120 |
+| `get/1` raises on a row that will not decode or a database that is down | Answer `:error`: the Reaper reads it as "not ours" and deletes the pod | #120 |
+| `put/1` and `delete/1` log a database failure and return `:ok` | Raise: the tracker crashes and deletes its pod | #120 |
+| A tracker logs a raise from its store and runs on; on a node stop it keeps the pod | Crash: a crashed tracker deletes a pod the store may still hold | #120 |
+| No `:repo` raises `ArgumentError` at boot; a missing table answers `{:error, _}` | Log and run: a config mistake would surface only at a deploy | #120 |
+| The repo comes from `config :ex_atlas, :orchestrator, repo:` | Child opts: `put/1`, `get/1` and `all/0` take no opts | #120 |
+| Migration steps create only what is missing; `version:` names the last step to run | A version stored in the table, as Oban does: more code for a one-step table | #120 |
+| A row over 1 MiB (bytes) or a compressed row is refused; `put/1` writes nothing over 1 MiB | Trust `[:safe]`: it accepts a compressed term that declares up to 4 GB decoded | #123 review |
+| Writes run in a `Task`, outside any caller transaction | Write in the caller's process: a host rollback erases the record of a running pod | #123 review |
+| The store's `start_link/1` refuses when the repo is not running | Refuse only the duplicate tree: `start_orchestrator: true` with the Ecto store would boot with an unreadable store every time | #123 review |
+| One refused row still fails `all/0`. Since `get/1` raises on that row and the Reaper treats a raise as "ours", skipping it would also keep its pod; we keep the design's rule, which adopts nothing that boot | Skip the row as the Adopter skips a record of an unknown version: the other records get trackers | #120, #123 review |
+| `ensure_running!/0` checks that `ComputeSupervisor` is alive | Check `start_orchestrator`: it is false for a host-started tree | #120 |
+| Tests run on SQLite (`ecto_sqlite3`, test only) | Postgres: every checkout would need a database server | #120 |
+| The table is `atlas_tracking_records` in the repo's default prefix; MySQL is not supported | A configurable name or prefix: no host has asked. MySQL's upsert takes no conflict target | #120 |
+
 ## Vast.ai provider (feature #98)
 
 | Decision | Alternative not taken | Where |

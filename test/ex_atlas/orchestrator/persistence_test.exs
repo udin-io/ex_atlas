@@ -366,6 +366,51 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
   end
 
+  # A host store raises when its database is down or a row will not decode
+  # (`ExAtlas.Orchestrator.TrackingStore.Ecto.get/1` does both). A tracker that
+  # crashed on it would delete a pod the store may still hold.
+  describe "a store whose get/1 raises" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
+    end
+
+    @tag :capture_log
+    test "a landed report keeps the tracker and its pod running" do
+      {:ok, pid, compute} =
+        Orchestrator.spawn(
+          task_opts(callback: "https://app.example.com/atlas/cb", finish_grace_ms: 60_000)
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      {:ok, %{callback_task_id: task_id}} = Memory.get(compute.id)
+      Memory.fail_get(true)
+
+      :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+
+      assert Process.alive?(pid)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+    end
+
+    @tag :capture_log
+    test "a supervisor stop keeps a persisted task's pod and its record" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      Memory.fail_get(true)
+      ref = Process.monitor(pid)
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      # A raise inside `terminate/2` would also skip the DELETE; the clean
+      # `:shutdown` exit shows the tracker decided to keep the pod.
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      Memory.fail_get(false)
+      assert {:ok, %{mode: :task}} = Memory.get(compute.id)
+    end
+  end
+
   describe "a supervisor stop with no tracking store configured" do
     setup do
       ExAtlas.Test.Orchestrator.start!()

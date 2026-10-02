@@ -146,7 +146,8 @@ defmodule ExAtlas.Callback.Limiter do
       :undefined ->
         raise ArgumentError,
               "#{inspect(__MODULE__)} is not running. The pod callback boundary needs the " <>
-                "orchestrator supervision tree: `config :ex_atlas, start_orchestrator: true`."
+                "orchestrator supervision tree: `config :ex_atlas, start_orchestrator: true`, " <>
+                "or ExAtlas.Orchestrator.Supervisor in your application's children."
 
       _ref ->
         @table

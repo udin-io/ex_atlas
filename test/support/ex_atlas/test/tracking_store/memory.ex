@@ -22,7 +22,9 @@ defmodule ExAtlas.Test.TrackingStore.Memory do
   end
 
   def start_link(_opts \\ []) do
-    Agent.start_link(fn -> %{records: %{}, all_error: nil} end, name: __MODULE__)
+    Agent.start_link(fn -> %{records: %{}, all_error: nil, get_raises: false} end,
+      name: __MODULE__
+    )
   end
 
   @doc """
@@ -51,6 +53,14 @@ defmodule ExAtlas.Test.TrackingStore.Memory do
     Agent.update(__MODULE__, &%{&1 | all_error: reason})
   end
 
+  @doc """
+  Make `get/1` raise, as a host store does when its database is down or a row
+  will not decode. `fail_get(false)` restores it.
+  """
+  def fail_get(raises?) do
+    Agent.update(__MODULE__, &%{&1 | get_raises: raises?})
+  end
+
   @impl ExAtlas.Orchestrator.TrackingStore
   def put(record) do
     Agent.update(__MODULE__, &put_in(&1, [:records, record.id], record))
@@ -58,12 +68,14 @@ defmodule ExAtlas.Test.TrackingStore.Memory do
 
   @impl ExAtlas.Orchestrator.TrackingStore
   def get(id) do
-    Agent.get(__MODULE__, fn state ->
-      case Map.fetch(state.records, id) do
-        {:ok, record} -> {:ok, record}
-        :error -> :error
-      end
-    end)
+    state = Agent.get(__MODULE__, & &1)
+
+    if state.get_raises, do: raise(RuntimeError, "simulated tracking store outage on get/1")
+
+    case Map.fetch(state.records, id) do
+      {:ok, record} -> {:ok, record}
+      :error -> :error
+    end
   end
 
   @impl ExAtlas.Orchestrator.TrackingStore
