@@ -200,6 +200,23 @@ defmodule ExAtlas.CallbackTest do
       end
     end
 
+    # The pod appends /finish, so a query or a fragment would swallow the
+    # path, and userinfo would show in `ps` wherever curl runs.
+    test "refuses a url with userinfo, a query or a fragment, even when insecure is allowed" do
+      for url <- [
+            "https://user:secret@app.example.com/cb",
+            "https://app.example.com/cb?x=1",
+            "https://app.example.com/cb#part"
+          ],
+          insecure <- [false, true] do
+        assert {:error, {:invalid_callback_url, reason}} =
+                 Callback.prepare(callback: url, allow_insecure_callback: insecure),
+               "expected #{url} to be refused"
+
+        assert reason in [:has_userinfo, :has_query, :has_fragment]
+      end
+    end
+
     test "allow_insecure_callback opens the door for a tunnel-free dev loop" do
       assert {:ok, opts} =
                Callback.prepare(

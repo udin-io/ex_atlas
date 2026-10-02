@@ -603,11 +603,19 @@ compute.ports
 - The spawn picks the first of `region_hints` with capacity, else Lambda's
   first region with capacity. `provider_opts: %{instance_type: "..."}` names
   the type directly.
-- `stop/2`, `start/2`, `spot: true`, `template_id:`, `network_volume_id:`
-  and `command:` return `:unsupported`. The Reaper does not cover Lambda yet.
+- `command:` runs in the container. An instance cannot delete itself, so
+  with the default `self_terminate: true` it needs a `callback:`: the host
+  POSTs the container's exit code, and `run_task/1`'s tracker terminates the
+  instance. Without one it is `:validation`; pass `self_terminate: false`.
+  See "On Lambda Labs, the host reports instead" in the transient pods guide.
+- `stop/2`, `start/2`, `spot: true`, `template_id:` and `network_volume_id:`
+  return `:unsupported`.
+- The Reaper covers Lambda with `reap_providers: [:lambda_labs]`. It lists
+  with no per-call options, so set `config :ex_atlas, :lambda_labs, api_key:`
+  (and `base_url:` for a proxy).
 - `env:` names starting `DOCKER_` or `LD_` are refused: the script exports
   each value for `docker run` on the host, where docker and the loader read
-  them.
+  them. So are names bash keeps for itself (`UID`, `RANDOM`, `BASH_*`).
 
 ### Canonical GPU atoms
 
@@ -1519,7 +1527,7 @@ mandate Req — it's an implementation choice of the bundled providers.
 
 - **v0.1** — RunPod (full surface), Mock provider, orchestrator, auth,
   LiveDashboard page.
-- **v0.8** — Lambda Labs compute: spawn, get, list, terminate. Next: `command:`,
+- **v0.8** — Lambda Labs compute: spawn, get, list, terminate, `command:`,
   `run_task/1` and the Reaper. `ports:` open in Lambda's firewall.
 - Fly.io Machines GPUs: Fly retired GPU Machines on 2026-07-31, so the `:fly`
   compute provider stays a stub. `ExAtlas.Fly` platform ops are unaffected.

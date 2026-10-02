@@ -26,8 +26,16 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   The spawn picks the first of `:region_hints` with capacity, else Lambda's
   first region with capacity. Lambda has no stop, no spot, no templates and no
-  network volumes: those return `:unsupported`, as does `:command` for now.
-  Open the `:ports` in Lambda's firewall yourself, in the Lambda dashboard.
+  network volumes: those return `:unsupported`. Open the `:ports` in Lambda's
+  firewall yourself, in the Lambda dashboard.
+
+  `:command` runs in the container. An instance cannot delete itself, so the
+  default `self_terminate: true` needs a `:callback`: the host POSTs the
+  container's exit code to it, and `ExAtlas.Orchestrator.run_task/1`'s
+  tracker deletes the instance on that report. Without a callback, pass
+  `self_terminate: false`; `:validation` otherwise. A report ends the
+  instance only under `mode: :task`, which `run_task/1` sets: an
+  interactive session runs on until its idle TTL.
   """
 
   @behaviour ExAtlas.Provider
@@ -107,17 +115,31 @@ defmodule ExAtlas.Providers.LambdaLabs do
       [
         spot: request.spot,
         template_id: request.template_id != nil,
-        network_volume_id: request.network_volume_id != nil,
-        command: request.command not in [nil, []]
+        network_volume_id: request.network_volume_id != nil
       ]
       |> Enum.find(fn {_field, set?} -> set? end)
 
     case unsupported do
-      nil -> :ok
-      {:command, _} -> unsupported(":command is not supported on Lambda yet")
+      nil -> check_self_terminate(request)
       {field, _} -> unsupported("Lambda has no #{field}")
     end
   end
+
+  # `self_terminate` defaults on to stop a bill. Lambda gives an instance no
+  # key to delete itself, so only a callback report, which the tracker turns
+  # into a terminate, can end the instance when its command exits.
+  defp check_self_terminate(%Spec.ComputeRequest{command: [_ | _], self_terminate: true} = r)
+       when is_nil(r.callback) do
+    {:error,
+     Error.new(:validation,
+       provider: :lambda_labs,
+       message:
+         "Lambda cannot delete an instance from inside it: pass self_terminate: false, " <>
+           "or run it through ExAtlas.Orchestrator.run_task/1 with :callback"
+     )}
+  end
+
+  defp check_self_terminate(_request), do: :ok
 
   defp ssh_key(request) do
     configured = Application.get_env(:ex_atlas, :lambda_labs, [])[:ssh_key_name]

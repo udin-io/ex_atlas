@@ -13,10 +13,12 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   | `atlas-image` | the image, when 128 characters or fewer | `image` |
 
   Every function here is pure, except `launch_parts/2`, which mints the
-  `:auth` credential.
+  `:auth` credential, and `instance_to_compute/2`, which reads an
+  `atlas-created-at` more than ten minutes ahead of the clock as absent.
   """
 
   alias ExAtlas.{Error, Secret, Spec}
+  alias ExAtlas.Providers.Shell
 
   @tag_ports "atlas-ports"
   @tag_created_at "atlas-created-at"
@@ -25,12 +27,23 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   # Lambda's tag values hold at most 128 characters.
   @max_tag_value 128
 
+  # How far ahead of this node's clock an `atlas-created-at` tag may read.
+  @max_clock_skew_s 10 * 60
+
   # Lambda caps `user_data` at "1MB"; we take the smaller reading.
   @max_user_data_bytes 1_000_000
 
   @any_source "0.0.0.0/0"
 
   @shell_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
+
+  # Names bash keeps for itself. `export` of a readonly one stops the script
+  # before `docker run`; bash rewrites or drops a special one, so the
+  # container would get another value. `BASH_*` and `COMP_*` are refused as
+  # prefixes, which covers bash 5's `BASH_ARGV0`, `BASH_SUBSHELL` and the rest.
+  @bash_names ~w(UID EUID PPID SHELLOPTS BASHOPTS RANDOM SRANDOM SECONDS LINENO GROUPS
+                 FUNCNAME HISTCMD OPTIND DIRSTACK PIPESTATUS BASHPID EPOCHSECONDS
+                 EPOCHREALTIME _)
 
   # How long the script waits for the Docker daemon, which cloud-init can
   # reach before `docker.service` is up: 90 tries, 2 s apart.
@@ -53,13 +66,16 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   Returns `{:error, %ExAtlas.Error{kind: :validation}}`, naming no value, for:
 
-    * an env name that is not a shell identifier, or starts with `DOCKER_` or
-      `LD_`, which the host's docker client and loader read;
-    * a value holding a NUL byte, or a value or `:image` that is not UTF-8;
+    * an env name that is not a shell identifier, starts with `DOCKER_` or
+      `LD_`, which the host's docker client and loader read, or is one bash
+      keeps for itself (`UID`, `RANDOM`, `BASH_*`, ...);
+    * a value or `:image` holding a NUL byte or not UTF-8;
     * an `:image` that starts with `-`;
     * a port that is not `{1..65535, :http | :tcp}`, or ports too many for a
       #{@max_tag_value}-character tag;
-    * `:env`, `:s3`, `:auth`, `:ports` or a callback without an `:image`;
+    * a `:command` argument holding a NUL byte or not UTF-8;
+    * `:env`, `:s3`, `:auth`, `:ports`, `:command` or a callback without an
+      `:image`;
     * a script over #{@max_user_data_bytes} bytes.
   """
   @spec launch_parts(Spec.ComputeRequest.t(), DateTime.t()) ::
@@ -71,7 +87,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       env = request |> Spec.ComputeRequest.container_env() |> Map.merge(auth_env)
 
       with :ok <- check_env(env),
-           {:ok, user_data} <- user_data(request.image, env, ports),
+           {:ok, user_data} <- user_data(request, env, ports),
            {:ok, tags} <- tags(request.image, ports, now) do
         {:ok,
          %{
@@ -190,7 +206,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       image: tags[@tag_image],
       name: instance["name"],
       auth: auth,
-      created_at: parse_time(tags[@tag_created_at]),
+      created_at: tags[@tag_created_at] |> parse_time() |> drop_far_future(),
       # `jupyter_token`, and the URL that carries it, open the instance's
       # Jupyter.
       raw: Map.drop(instance, ["jupyter_token", "jupyter_url"])
@@ -251,16 +267,20 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   # --- launch parts ---
 
-  defp check_container_fields(%Spec.ComputeRequest{image: image}) when is_binary(image) do
+  defp check_container_fields(%Spec.ComputeRequest{image: image} = request)
+       when is_binary(image) do
     cond do
       not String.valid?(image) ->
         validation(":image is not valid UTF-8")
+
+      String.contains?(image, <<0>>) ->
+        validation(":image holds a NUL byte, which a shell cannot carry")
 
       String.starts_with?(image, "-") ->
         validation(":image starts with -, which docker reads as a flag")
 
       true ->
-        :ok
+        check_command(request.command || [])
     end
   end
 
@@ -271,7 +291,8 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         s3: request.s3 != nil,
         auth: request.auth != :none,
         ports: request.ports != [],
-        callback: request.callback != nil
+        callback: request.callback != nil,
+        command: request.command not in [nil, []]
       ]
       |> Enum.filter(fn {_field, set?} -> set? end)
       |> Enum.map(fn {field, _} -> inspect(field) end)
@@ -286,6 +307,18 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
             "with an :image"
         )
     end
+  end
+
+  # Lambda's body is JSON, which carries UTF-8 only, and no shell argument
+  # can carry a NUL byte. The message names the position, never the value.
+  defp check_command(command) do
+    command
+    |> Enum.with_index()
+    |> Enum.find_value(:ok, fn {arg, index} ->
+      if String.valid?(arg) and not String.contains?(arg, <<0>>),
+        do: nil,
+        else: validation(":command argument #{index} holds a NUL byte or is not valid UTF-8")
+    end)
   end
 
   defp ports(ports) do
@@ -311,6 +344,12 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
             "env name #{inspect(name)} is not a shell identifier ([A-Za-z_][A-Za-z0-9_]*)"
           )
 
+        name in @bash_names or String.starts_with?(name, ["BASH_", "COMP_"]) ->
+          validation(
+            "env name #{inspect(name)} is a bash variable; Lambda's script cannot export it " <>
+              "for docker run"
+          )
+
         String.starts_with?(name, ["DOCKER_", "LD_"]) ->
           validation(
             "env name #{inspect(name)} would steer the host's docker client or loader; " <>
@@ -330,35 +369,46 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
     end)
   end
 
-  defp user_data(nil, _env, _ports), do: {:ok, nil}
+  defp user_data(%Spec.ComputeRequest{image: nil}, _env, _ports), do: {:ok, nil}
 
-  defp user_data(image, env, ports) do
+  defp user_data(%Spec.ComputeRequest{image: image} = request, env, ports) do
     names = env |> Map.keys() |> Enum.sort()
 
-    exports = Enum.map(names, fn name -> "export #{name}=#{shell_quote(env[name])}\n" end)
+    exports = Enum.map(names, fn name -> "export #{name}=#{Shell.quote_arg(env[name])}\n" end)
 
     flags =
       Enum.map(ports, fn {port, _} -> " -p #{port}:#{port}" end) ++
         Enum.map(names, &" -e #{&1}")
 
+    reporter = request.callback && finish_reporter(env)
+
     # Values reach `docker` through its environment, never its argv, so `ps`
     # on the instance shows names only. The script finds docker and waits for
     # its daemon before it exports the values, so a container `PATH` cannot
-    # hide docker; `DOCKER_BIN` falls under the refused `DOCKER_` names. No
-    # `set -x`: cloud-init logs the script's output.
+    # hide docker; `DOCKER_BIN` falls under the refused `DOCKER_` names. The
+    # exports stay in the subshell that runs docker, so no container variable
+    # steers `systemd-run` after it. No `set -x`: cloud-init logs the script's
+    # output.
     script =
       IO.iodata_to_binary([
         "#!/bin/bash\n",
         "set -euo pipefail\n",
         "DOCKER_BIN=$(command -v docker)\n",
+        if(reporter, do: "SYSTEMD_RUN_BIN=$(command -v systemd-run)\n", else: []),
         "for _ in $(seq 1 #{@docker_wait_tries}); do ",
         "\"$DOCKER_BIN\" info >/dev/null 2>&1 && break; sleep 2; done\n",
+        if(reporter, do: reporter.write, else: []),
+        "(\n",
         exports,
         "exec \"$DOCKER_BIN\" run --detach --name atlas --gpus all --restart no",
         flags,
         " ",
-        shell_quote(image),
-        "\n"
+        Shell.quote_arg(image),
+        command_args(request.command),
+        # With a reporter, a failed `docker run` goes on to start the unit,
+        # which reports 125 for the missing container.
+        if(reporter, do: "\n) || true\n", else: "\n)\n"),
+        if(reporter, do: reporter.start, else: [])
       ])
 
     if byte_size(script) > @max_user_data_bytes do
@@ -371,9 +421,59 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
     end
   end
 
-  # POSIX single quotes: nothing inside is shell syntax, and an embedded `'`
-  # closes, escapes and reopens.
-  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
+  defp command_args(nil), do: []
+  defp command_args([]), do: []
+  defp command_args(command), do: [" ", Shell.join(command)]
+
+  # A Lambda instance holds no key that can delete it, so the container cannot
+  # end its own bill as RunPod's does. The host reports instead: a transient
+  # systemd unit runs `docker wait atlas` and POSTs the exit code, and the
+  # tracker deletes the instance on that report. A unit, not a wait in this
+  # script, because cloud-init's final stage would wait on the whole task.
+  # With no container to wait on (`docker run` failed, or a `dockerd` restart
+  # removed it), the unit reports 125, docker's code for a failed run, so the
+  # task ends now instead of at `max_runtime_ms`.
+  #
+  # The unit's script holds the callback URL and token. `printf` is a bash
+  # builtin, so the token never appears on an argv; `mktemp` makes the file
+  # readable by root alone, and the unit deletes it as it starts; and curl reads the `Authorization` header from
+  # stdin, since the host's `ps` shows every login each process's argv.
+  # `finish` is first-report-wins, so curl's retries are safe.
+  defp finish_reporter(env) do
+    unit_script =
+      IO.iodata_to_binary([
+        "#!/bin/bash\n",
+        "set -uo pipefail\n",
+        # bash holds the file open, so it reads the lines below after this.
+        "rm -f -- \"$0\"\n",
+        "ATLAS_CALLBACK_URL=",
+        Shell.quote_arg(env["ATLAS_CALLBACK_URL"]),
+        "\n",
+        "ATLAS_CALLBACK_TOKEN=",
+        Shell.quote_arg(env["ATLAS_CALLBACK_TOKEN"]),
+        "\n",
+        ~S"""
+        code=$("$1" wait atlas) || code=125
+        case "$code" in ''|*[!0-9]*) code=125 ;; esac
+        printf 'Authorization: Bearer %s\n' "$ATLAS_CALLBACK_TOKEN" |
+          curl -fsS -m 10 --retry 5 --retry-connrefused -H @- \
+            -H 'Content-Type: application/json' -d "{\"exit_code\":$code}" \
+            "$ATLAS_CALLBACK_URL/finish"
+        """
+      ])
+
+    %{
+      write: [
+        "ATLAS_FINISH=$(mktemp \"${TMPDIR:-/tmp}/atlas-finish.XXXXXX\")\n",
+        "printf '%s' ",
+        Shell.quote_arg(unit_script),
+        " > \"$ATLAS_FINISH\"\n"
+      ],
+      start:
+        "exec \"$SYSTEMD_RUN_BIN\" --unit=atlas-finish --collect --quiet " <>
+          "/bin/bash \"$ATLAS_FINISH\" \"$DOCKER_BIN\"\n"
+    }
+  end
 
   defp tags(image, ports, now) do
     ports_value = Enum.map_join(ports, ",", fn {port, protocol} -> "#{port}/#{protocol}" end)
@@ -532,6 +632,18 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       _ -> nil
     end
   end
+
+  # Anyone on the Lambda account can edit a tag. One far in the future would
+  # keep an orphan inside the Reaper's grace window for ever, so it reads as
+  # absent, which gets no grace. Clamping it to now would not help: every
+  # read would see a new instance. A launching node's clock may run ahead of
+  # this one, hence the allowance.
+  defp drop_far_future(%DateTime{} = at) do
+    limit = DateTime.add(DateTime.utc_now(), @max_clock_skew_s, :second)
+    if DateTime.compare(at, limit) == :gt, do: nil, else: at
+  end
+
+  defp drop_far_future(nil), do: nil
 
   defp gpu_count(type) do
     case map_or_empty(type["specs"])["gpus"] do

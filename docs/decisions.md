@@ -35,6 +35,22 @@ names the PR or issue that holds the reasoning.
 | An image starting with `-` is `:validation` | `--` before the image: docker CLI support unchecked on Lambda's image | #89 |
 | A missing API key raises `:unauthorized`, as RunPod does, through the shared `Providers.HTTP.bearer/3` | Return an error tuple for Lambda only | #89 |
 | `Providers.HTTP` and `ExAtlas.Auth.for_scheme/1` hold what both providers share | Copy `RunPod.Client` and RunPod's auth minting | #84, #89 |
+| The host reports the exit code: a unit runs `docker wait atlas` and POSTs it with the host's `curl` | Trap inside the container, as RunPod does: the image may have no `curl`, and the container holds no key to delete the instance | #85 |
+| `command:` with `self_terminate: true` and no callback is `:validation` | Ignore `self_terminate`: it defaults on to stop a bill, and ignoring it would bill silently. Mirrors `spot: true` on RunPod | #85 |
+| A transient `systemd-run` unit | Wait in the cloud-init script: cloud-init's final stage would wait on the whole task | #85 |
+| The unit's script, URL and token in a `mktemp` file written by the `printf` builtin | `systemd-run --setenv=NAME` with no value: systemd 249 (Ubuntu 22.04) takes only `NAME=VALUE`, which puts the token on argv | #85 |
+| curl reads the `Authorization` header from stdin (`-H @-`) | The header on argv, as RunPod's container does: every login on the host sees argv in `ps` | #85 |
+| The exports run in a `( ... )` subshell with `docker run` | Export at script level: `DBUS_*`, `SYSTEMD_*` or `TMPDIR` from `env:` would steer `systemd-run` and `mktemp` | #85 |
+| The unit starts with any callback, with or without `command:` | Only with `command:`, as RunPod wraps only a command: the host can report the image's own command too | #85 |
+| curl retries 5 times, connection refused included | One try, as RunPod's container: `finish` is first-report-wins, and a lost report bills until `max_runtime_ms` | #85 |
+| `config :ex_atlas, :lambda_labs, base_url:` for calls with none | A base URL in `Config.build_ctx/2` for every provider: RunPod has two base URLs | #85 |
+| An `atlas-created-at` more than 10 minutes ahead reads as absent | Clamp it to now: every list would read the instance as new, so it stays young for ever | #85 |
+| RunPod and Lambda share `Providers.Shell` quoting; each keeps its own finish snippet | Share the snippet too, as #85 planned: Lambda's reads the token from stdin on the host | #85 |
+| With a callback, a failed `docker run` still starts the unit, which reports 125 for the missing container | Stop the script: the instance billed until `max_runtime_ms` (review finding) | #85 |
+| Env names bash keeps for itself (`UID`, `RANDOM`, `BASH_*`, `COMP_*`, ...) are `:validation` | Pass them: `export UID` stops the script, and bash rewrites `RANDOM` (review finding) | #85 |
+| The unit deletes its script as it starts | Keep it until reboot: it holds the token | #85 |
+| A callback URL with userinfo, a query or a fragment is refused, for every provider | Keep accepting it: `/finish` appended after a query never reached the plug, and userinfo shows in `ps` | #85 |
+| `Orchestrator.spawn/1` in interactive mode with Lambda `command:` and `callback:` is allowed; the idle TTL ends it | Refuse it in the orchestrator for every provider without `:self_terminate`: the Mock lacks it too, and interactive Mock sessions with a command would break | #85 |
 | One firewall ruleset per instance, attached at launch | Edit the account's global rules: they change every instance on the account, including ones ExAtlas does not own | #86 |
 | Every spawn with `ports:` first deletes `atlas-` rulesets that no instance uses | A periodic sweeper process: a new process, and a ruleset in use cannot be deleted anyway | #86 |
 | The sweep skips rulesets younger than 5 minutes and deletes at most 10 per spawn | Delete every empty one: a second spawn would delete a ruleset created a moment ago and not launched yet, and Lambda allows about one request a second | #86 |

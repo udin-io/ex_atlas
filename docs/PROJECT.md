@@ -23,7 +23,7 @@ deletes the pods you rent. It also carries Fly.io platform operations
 | Catalog | `ExAtlas` | `list_gpu_types/1`, `capabilities/1` |
 | Resources | `ExAtlas` | network volumes, templates, endpoints (list, get, create, delete), `compute_spend/2` |
 | Provider contract | `ExAtlas.Provider` | Behaviour. Newer callbacks are optional; `ExAtlas` returns `:unsupported` when a provider lacks one |
-| Providers | `ExAtlas.Providers.*` | `RunPod` (complete), `LambdaLabs` (spawn, get, list, terminate, GPU types), `Mock` (tests, demos), `Fly`, `Vast` (stubs) |
+| Providers | `ExAtlas.Providers.*` | `RunPod` (complete), `LambdaLabs` (spawn, get, list, terminate, GPU types, `command:` and `run_task/1`), `Mock` (tests, demos), `Fly`, `Vast` (stubs) |
 | Orchestrator | `ExAtlas.Orchestrator` | `spawn/1`, `run_task/1`, `await_ready/2`, `touch/1`, `info/1`, `stop_tracked/1`, `list_ids/0`, `lookup/1` |
 | Pod callbacks | `ExAtlas.Callback`, `ExAtlas.Callback.Plug` | A pod reports progress, logs and its exit code to the host |
 | Auth | `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` | Bearer tokens and signed URLs for browser-to-pod traffic |
@@ -60,17 +60,17 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Orchestrator: polling, task mode, callbacks, adoption, multi-node | Shipped |
 | Cost caps with billing reconciliation (feature #28) | Shipped in #70 (slices #67, #69, #70) |
 | S3-compatible data staging (#26) | Shipped in four slices: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods (#75); a guide and a tested entrypoint script say what the container does with them (PR #77); credentials print redacted in crash reports (#78); presigned URLs put no storage key on the pod (#80); `persist: true` with `s3:` stores no credential, and an adopted task cannot respawn (#81); `env:` values print redacted and records keep names only (#82) |
-| Lambda Labs provider (feature #83) | Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 3 (#86, PR #91): one firewall ruleset per instance opens its `ports:`. Next: `command:`, `run_task/1` and the Reaper (#85) |
+| Lambda Labs provider (feature #83) | Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 3 (#86, PR #91): one firewall ruleset per instance opens its `ports:`. Slice 2 (#85, PR #90): `command:`, `run_task/1` ended by the host's finish report, the Reaper |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages
 
 | Page | Question it answers | Status |
 |---|---|---|
-| [roadmap.md](roadmap.md) | What shipped, what is next? | Current to #91 |
-| [architecture.md](architecture.md) | Which modules and processes exist? | Current to #91 |
-| [risks.md](risks.md) | What could go wrong? | Current to #91 |
-| [decisions.md](decisions.md) | Which choices shape the system? | Current to #91 |
+| [roadmap.md](roadmap.md) | What shipped, what is next? | Current to #90 |
+| [architecture.md](architecture.md) | Which modules and processes exist? | Current to #90 |
+| [risks.md](risks.md) | What could go wrong? | Current to #90 |
+| [decisions.md](decisions.md) | Which choices shape the system? | Current to #90 |
 
 There is no `uat.md`: the library has no user interface. The guides in
 `guides/` and the live tests (`mix test --only runpod_live`,

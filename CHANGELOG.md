@@ -24,13 +24,45 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
 - Instance tags `atlas-ports`, `atlas-created-at` and `atlas-image` let
   `get_compute/2` and `list_compute/1` rebuild `ports`, URLs and
   `created_at` on any node.
-- `stop/2`, `start/2`, `spot: true`, `template_id:`, `network_volume_id:`
-  and `command:` return `:unsupported`.
+- `stop/2`, `start/2`, `spot: true`, `template_id:` and
+  `network_volume_id:` return `:unsupported`.
 - `raw` leaves out `jupyter_token` and `jupyter_url`. A refused launch keeps
   its status and Lambda's error code, and withholds Lambda's message, which
   can echo `user_data`.
 - An env name starting `DOCKER_` or `LD_`, a value or image that is not
   UTF-8, and an image starting with `-` are `:validation`.
+
+### Added: Lambda Labs `command:` and `run_task/1` (#85)
+
+- `command:` runs in the container, after the image, each argument
+  shell-quoted. `command: []` runs the image's own command.
+- With a `callback:`, the instance's host reports the container's exit code:
+  a `systemd-run` unit runs `docker wait atlas` and POSTs
+  `{"exit_code": n}` to `$ATLAS_CALLBACK_URL/finish`. `run_task/1` ends on
+  that report and terminates the instance. The image needs no `curl`.
+- `command:` with `self_terminate: true` (the default) and no callback is
+  `:validation` before any request: Lambda gives an instance no key to
+  delete itself, so nothing would end it.
+- When the container never ran (`docker run` failed) or is gone, the host
+  reports exit code 125, so the task ends at once instead of at
+  `max_runtime_ms`. The unit deletes its script, which holds the token, as
+  it starts.
+- `command:` without `image:`, a command argument or image holding a NUL
+  byte or not UTF-8, and an env name bash keeps for itself (`UID`,
+  `RANDOM`, `BASH_*`, `COMP_*`, ...) are `:validation`. bash refused to
+  export the readonly ones, which stopped the script before `docker run`.
+- `config :ex_atlas, :lambda_labs, base_url:` sets the API URL for calls that
+  pass none, such as the Reaper's list.
+- An `atlas-created-at` tag more than ten minutes ahead of the clock reads
+  as no `created_at`, so the Reaper gives that instance no grace window.
+
+### Fixed: a callback URL with userinfo, a query or a fragment is refused (#85)
+
+`ExAtlas.Callback.prepare/1` returns `{:error, {:invalid_callback_url,
+:has_userinfo | :has_query | :has_fragment}}`, with or without
+`allow_insecure_callback`. The pod appends `/finish`, which a query or a
+fragment swallowed, so the report never arrived; userinfo showed in `ps`
+wherever curl ran.
 
 ### Added: Lambda opens an instance's `ports:` in its firewall (#86)
 

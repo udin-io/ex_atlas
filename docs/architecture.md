@@ -12,7 +12,7 @@ database and no web UI. It runs inside the host application's VM.
 | Host Phoenix app | Calls `ExAtlas` and `ExAtlas.Orchestrator`; subscribes to `ExAtlas.PubSub` topics `"compute:<id>"` |
 | RunPod | HTTPS through `Req` (`ExAtlas.Providers.RunPod.Client`): pods, catalog, billing, templates, volumes, endpoints, jobs |
 | Lambda Cloud API v1 | HTTPS through `Req` (`ExAtlas.Providers.LambdaLabs.Client`): instance types, firewall rulesets, launch, get, list, terminate |
-| A Lambda instance | cloud-init runs the `user_data` script ExAtlas wrote; it starts the container with `docker run` |
+| A Lambda instance | cloud-init runs the `user_data` script ExAtlas wrote; it starts the container with `docker run`. With a callback, a `systemd-run` unit POSTs the container's exit code to `Callback.Plug` |
 | A running pod | POSTs to the host through `ExAtlas.Callback.Plug` (progress, logs, finish) |
 | Fly.io | `ExAtlas.Fly.*`: deploys, log streams, tokens |
 | A shared store | Optional host `TrackingStore` implementation (a database) |
@@ -23,7 +23,7 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Facade | `ExAtlas` (`dispatch/3`, `dispatch_optional/3`), `ExAtlas.Config` (its `seal_credentials/1` wraps credentials), `ExAtlas.Secret`, `ExAtlas.Error` |
 | Contract | `ExAtlas.Provider` (behaviour, optional callbacks) |
-| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast` (built with `Providers.Stub`) |
+| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Shell` (POSIX quoting for both providers' scripts), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast` (built with `Providers.Stub`) |
 | Specs | `ExAtlas.Spec.*`: `ComputeRequest` (its `container_env/1` is the env every provider sends), `Staging` (the `s3:` option), `Compute`, `Spend`, `Template`, `NetworkVolume`, `Endpoint`, `Job`, `GpuType` and the request structs |
 | Callback | `ExAtlas.Callback`, `Callback.Plug`, `Callback.Token`, `Callback.Limiter` |
 | Auth | `ExAtlas.Auth` (the env and handle for each `auth:` scheme, shared by providers), `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` |
@@ -73,7 +73,7 @@ flowchart TD
   cs -->|"events"| ev["Events / PubSub"]
   ev --> host
   cs -->|"terminate/2: ExAtlas.terminate/2"| prov
-  pod["Pod"] -->|"Callback.Plug"| cb["Callback"]
+  pod["RunPod container, or Lambda host unit"] -->|"Callback.Plug"| cb["Callback"]
   cb -->|"progress, log, finish"| cs
   boot["Boot"] --> ad["Adopter"]
   ad -->|"all/0"| store
@@ -182,6 +182,41 @@ sequenceDiagram
   FW->>L: DELETE /firewall-rulesets/id (the in-use refusal is ignored)
 ```
 
+## A Lambda task, ended by the host's report
+
+A Lambda instance holds no key that can delete it. With `command:` and a
+callback, the host script starts the container, then a transient
+`systemd-run` unit that waits on it and POSTs its exit code. The tracker
+finishes on the report and terminates the instance. Without a callback,
+`self_terminate: true` is `:validation` before any request. Added in #85.
+
+```mermaid
+sequenceDiagram
+  participant Host as Host app
+  participant O as Orchestrator.run_task
+  participant LL as Providers.LambdaLabs
+  participant CS as ComputeServer
+  participant VM as Instance user_data
+  participant U as systemd unit atlas-finish
+  participant C as Container
+  participant CB as Callback.Plug
+  Host->>O: run_task(provider: :lambda_labs, command:, callback:)
+  O->>LL: spawn_compute with ATLAS_CALLBACK_* in the env
+  LL-->>O: Compute provisioning
+  O->>CS: start tracker
+  VM->>VM: mktemp, printf the unit script (URL, token)
+  VM->>C: docker run --detach image command (exports in a subshell)
+  VM->>U: systemd-run /bin/bash unit-script docker
+  U->>U: rm its own script
+  U->>C: docker wait atlas
+  C-->>U: exit code, or 125 when the container never ran
+  U->>CB: POST /finish exit_code, token on curl stdin
+  CB->>CS: finish report
+  CS->>CS: finish_grace_ms, then task completed or failed
+  CS->>LL: terminate(id)
+  CS-->>Host: task outcome event
+```
+
 ```mermaid
 classDiagram
   class HTTP["Providers.HTTP"] {
@@ -221,6 +256,11 @@ classDiagram
   class Auth["ExAtlas.Auth"] {
     for_scheme(scheme)
   }
+  class Shell["Providers.Shell"] {
+    quote_arg(value)
+    join(command)
+  }
+  class RunPodTranslate["RunPod.Translate"]
   RunPodClient ..> HTTP
   LambdaClient ..> HTTP
   LambdaLabs --> LambdaClient
@@ -230,4 +270,6 @@ classDiagram
   LambdaTranslate ..> Auth
   LambdaTranslate ..> GpuCatalog
   LambdaTranslate ..> ComputeRequest
+  LambdaTranslate ..> Shell
+  RunPodTranslate ..> Shell
 ```
