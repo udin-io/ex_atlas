@@ -32,8 +32,8 @@ if Code.ensure_loaded?(Igniter) do
     def info(_argv, _parent) do
       %Igniter.Mix.Task.Info{
         group: :ex_atlas,
-        example: "mix ex_atlas.install",
-        schema: [],
+        example: "mix ex_atlas.install --tracking-store ecto",
+        schema: [tracking_store: :string, repo: :string],
         aliases: []
       }
     end
@@ -44,6 +44,7 @@ if Code.ensure_loaded?(Igniter) do
       |> configure_fly_defaults()
       |> create_storage_dir()
       |> update_gitignore()
+      |> install_tracking_store(Keyword.get(igniter.args.options, :tracking_store))
       |> Igniter.add_notice("""
       ExAtlas installed.
 
@@ -63,6 +64,92 @@ if Code.ensure_loaded?(Igniter) do
       path is not writable, so a missing env var won't break boot — but
       tokens will not survive container restarts in that case.
       """)
+    end
+
+    defp install_tracking_store(igniter, nil), do: igniter
+
+    defp install_tracking_store(igniter, "ecto") do
+      case select_repo(igniter) do
+        {igniter, {:ok, repo}} ->
+          igniter
+          |> add_migration(repo)
+
+        {igniter, {:error, message}} ->
+          Igniter.add_issue(igniter, message)
+      end
+    end
+
+    defp install_tracking_store(igniter, other) do
+      Igniter.add_issue(
+        igniter,
+        "Unknown --tracking-store #{inspect(other)}. The one store it installs is `ecto`; " <>
+          "leave the option out to keep the DETS default."
+      )
+    end
+
+    defp select_repo(igniter) do
+      {igniter, repos} = Igniter.Libs.Ecto.list_repos(igniter)
+      {igniter, pick_repo(Keyword.get(igniter.args.options, :repo), repos)}
+    end
+
+    defp pick_repo(nil, []) do
+      {:error,
+       "mix ex_atlas.install --tracking-store ecto found no Ecto repo in this project. " <>
+         "Add a repo, or keep the DETS default."}
+    end
+
+    defp pick_repo(nil, [repo]), do: {:ok, repo}
+
+    defp pick_repo(nil, repos) do
+      {:error,
+       "mix ex_atlas.install --tracking-store ecto found several Ecto repos: " <>
+         "#{Enum.map_join(repos, ", ", &inspect/1)}. Pick one with --repo."}
+    end
+
+    defp pick_repo(name, repos) do
+      repo = Igniter.Project.Module.parse(name)
+
+      if repo in repos do
+        {:ok, repo}
+      else
+        {:error,
+         "--repo #{name} is not an Ecto repo in this project. " <>
+           "Repos found: #{Enum.map_join(repos, ", ", &inspect/1)}."}
+      end
+    end
+
+    # Igniter's convention for a repo's migrations: `priv/<last alias
+    # segment, underscored>/migrations`.
+    defp add_migration(igniter, repo) do
+      dir =
+        Path.join([
+          "priv",
+          repo |> Module.split() |> List.last() |> Macro.underscore(),
+          "migrations"
+        ])
+
+      igniter = Igniter.include_glob(igniter, Path.join(dir, "*.exs"))
+
+      if calls_store_migration?(igniter, dir) do
+        igniter
+      else
+        Igniter.Libs.Ecto.gen_migration(igniter, repo, "add_atlas_tracking",
+          body: """
+          def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()
+          def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down()
+          """,
+          on_exists: :skip
+        )
+      end
+    end
+
+    # A host that followed the README by hand named its migration itself.
+    defp calls_store_migration?(igniter, dir) do
+      Enum.any?(igniter.rewrite, fn source ->
+        Path.dirname(Rewrite.Source.get(source, :path)) == dir and
+          Rewrite.Source.get(source, :content) =~
+            "ExAtlas.Orchestrator.TrackingStore.Ecto.Migration"
+      end)
     end
 
     # Writes default `config :ex_atlas, :fly` block. Each key is only written if
