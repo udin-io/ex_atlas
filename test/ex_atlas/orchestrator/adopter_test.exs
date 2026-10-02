@@ -1070,19 +1070,12 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
 
     test "a result whose check raises ends the task, and nothing prints the value" do
-      # A hand-built Secret whose value is no function raises `BadFunctionError`
-      # with the term in its message when the env check reveals it.
-      bad = %ExAtlas.Secret{value: "hf-badfun-leak-3d6a"}
       image = "trainer-resolver-raising-check:latest"
 
       log =
         capture_log(fn ->
           compute =
-            orphaned_resolved_task(
-              image,
-              {:return, {:ok, env: %{"HF_TOKEN" => bad, "WANDB_PROJECT" => "w"}}},
-              s3: nil
-            )
+            orphaned_resolved_task(image, :broken_secret, s3: nil)
 
           pid = adopt_and_preempt(compute.id)
           send(self(), {:message, assert_refused(compute.id, pid, image)})
@@ -1221,6 +1214,32 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert message =~ "config :ex_atlas, :orchestrator, respawn_credentials"
     end
 
+    test "a stored or configured resolver whose module lacks the behaviour is never called" do
+      # `:erlang.send/2` is exported, and would send `info` here if it ran.
+      undeclared = {:erlang, :send, [self()]}
+      TestOrchestrator.put_env(respawn_credentials: undeclared)
+
+      compute =
+        orphaned_resolved_task("trainer-resolver-undeclared:latest", @ok_both,
+          respawn_credentials: nil
+        )
+
+      id = compute.id
+      {:ok, record} = Memory.get(id)
+      opts = Keyword.put(record.opts, :respawn_credentials, undeclared)
+      :ok = Memory.put(%{record | opts: opts})
+
+      log = capture_log(fn -> send(self(), {:tracker, adopt_and_preempt(id)}) end)
+      assert_received {:tracker, pid}
+      message = assert_refused(id, pid, "trainer-resolver-undeclared:latest")
+
+      # The stored tuple was dropped at adoption, and the configured one refused.
+      assert log =~ "ExAtlas.Orchestrator.RespawnCredentials"
+      assert message =~ "config :ex_atlas, :orchestrator, respawn_credentials"
+      assert message =~ "ExAtlas.Orchestrator.RespawnCredentials"
+      refute_received %{env_names: _}
+    end
+
     test "scrub_keys: [:env] gives no names, and the result must hold env:" do
       TestOrchestrator.put_env(scrub_keys: [:env])
 
@@ -1278,7 +1297,8 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       for {bad, n} <-
             Enum.with_index([
               {"Elixir.ExAtlas.Test.CredentialResolver", "resolve", []},
-              {ExAtlas.Test.NoSuchResolver, :resolve, []}
+              {ExAtlas.Test.NoSuchResolver, :resolve, []},
+              {:erlang, :send, [self()]}
             ]) do
         compute = orphaned_task(name: "atlas-bad-resolver-#{n}")
         {:ok, record} = Memory.get(compute.id)

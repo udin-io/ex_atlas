@@ -195,6 +195,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     ComputeRegistry,
     CostMeter,
     Events,
+    RespawnCredentials,
     TaskOutcome,
     Timer,
     TrackingStore,
@@ -407,24 +408,51 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     do: {:error, "expected a positive number of US dollars, got: #{inspect(other)}"}
 
   @doc false
+  # The tuple is read back from the store, so whoever writes the store picks
+  # the function: only a module that declares `RespawnCredentials` is called.
+  # The args are stored as given, so they hold no closure and no `Secret`.
   def validate_respawn_credentials({module, function, args} = mfa)
       when is_atom(module) and is_atom(function) and is_list(args) do
     cond do
       List.improper?(args) ->
         {:error, "expected {module, function, args} with args a proper list"}
 
-      Code.ensure_loaded?(module) and function_exported?(module, function, length(args) + 1) ->
-        {:ok, mfa}
-
-      true ->
+      not (Code.ensure_loaded?(module) and
+               function_exported?(module, function, length(args) + 1)) ->
         {:error,
          "expected #{Exception.format_mfa(module, function, length(args) + 1)} to be " <>
            "an exported function: it is called with args ++ [info]"}
+
+      not RespawnCredentials.declared_by?(module) ->
+        {:error,
+         "expected #{inspect(module)} to declare @behaviour #{inspect(RespawnCredentials)}"}
+
+      sealed_or_closure?(args) ->
+        {:error,
+         "args must hold no function and no ExAtlas.Secret: the tracking record stores " <>
+           "them as given. Fetch secrets inside the resolver"}
+
+      true ->
+        {:ok, mfa}
     end
   end
 
   def validate_respawn_credentials(_other),
     do: {:error, "expected {module, function, args}, with atoms and a list"}
+
+  defp sealed_or_closure?(%ExAtlas.Secret{}), do: true
+  defp sealed_or_closure?(term) when is_function(term), do: true
+
+  defp sealed_or_closure?(term) when is_list(term),
+    do: Enum.any?(List.flatten(term), &sealed_or_closure?/1)
+
+  defp sealed_or_closure?(term) when is_tuple(term), do: sealed_or_closure?(Tuple.to_list(term))
+
+  defp sealed_or_closure?(term) when is_map(term),
+    do:
+      Enum.any?(term, fn {key, value} -> sealed_or_closure?(key) or sealed_or_closure?(value) end)
+
+  defp sealed_or_closure?(_term), do: false
 
   # `persist: true` is a promise that the resource can be rebuilt at boot, and
   # for an interactive session it cannot: `compute.auth.token` is a bearer

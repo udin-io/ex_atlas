@@ -475,6 +475,34 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
     end
 
+    test "a module that does not declare the RespawnCredentials behaviour is refused" do
+      # `:erlang.send/2` is exported and would send `info` to this process.
+      assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+               Orchestrator.run_task(task_opts(respawn_credentials: {:erlang, :send, [self()]}))
+
+      assert Exception.message(error) =~ "ExAtlas.Orchestrator.RespawnCredentials"
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "args holding a function or a Secret are refused, since the record stores them" do
+      for args <- [
+            [fn -> "hf-closure-arg-5a1c" end],
+            [%{token: ExAtlas.Secret.wrap("hf-secret-arg-08be")}],
+            [{:nested, [ExAtlas.Secret.wrap("hf-secret-arg-08be")]}]
+          ] do
+        assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+                 Orchestrator.run_task(
+                   task_opts(
+                     respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, args}
+                   )
+                 )
+
+        assert Exception.message(error) =~ "args"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
     test "a function the module does not export is refused, naming it" do
       assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
                Orchestrator.run_task(
