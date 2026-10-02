@@ -33,6 +33,8 @@ names the PR or issue that holds the reasoning.
 | `Spec.Staging` holds `dataset_url` and `artifact_url` as `ExAtlas.Secret`s | Plain strings left out of `Inspect`'s `only:` list: `structs: false` and `~p` print them | #73 |
 | The entrypoint downloads the dataset archive to a file, then runs `tar -xf` | `curl \| tar -x`: GNU tar detects no compression on a pipe, and the pipe hides curl's exit code | #73 |
 | The artifacts and the log go up as one `.tar.gz` built with `tar -czf` | `tar \| gzip`: POSIX `sh` cannot read tar's exit code in a pipe | #73 |
+| Presigned URLs need an object path and only RFC 3986 characters after the host, no `{ } [ ]` | Scheme and host only: curl globs `{ }` and `[ ]` and prints the whole URL in its error; `curl -T` appends a file name to a URL with no path | #73 review |
+| The entrypoint unsets both URLs before the trainer starts, and calls curl with `-q -g -f` and a stall limit | Leave them exported: a trainer that dumps its environment prints them. Plain `curl -f`: a `.curlrc` can turn on `--verbose` | #73 review |
 | A URI and a URL for the same side: the URI wins and the script prints which variable it ignored | Refuse both in `Staging.new/1`: blocks an image that reads only one of them | #73 |
 
 ## Cost caps (feature #28)

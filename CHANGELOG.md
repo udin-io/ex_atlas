@@ -15,9 +15,12 @@ gets no storage key. Each must be `http://` or `https://` with a host and no
 user info. `Spec.Staging` holds them as `ExAtlas.Secret`s, so `inspect/1`,
 validation errors and crash reports never print them. `s3:` now needs one of
 `dataset_uri`, `artifact_uri`, `dataset_url` or `artifact_url`; the error for
-none says so. The reference entrypoint downloads and unpacks the dataset
-archive with `curl` and `tar`, and on exit PUTs one `.tar.gz` of the artifact
-directory and the log. A URI beats a URL for the same side.
+none says so. A URL also needs a path to an object and only RFC 3986
+characters after the host, with no braces or brackets. The reference
+entrypoint downloads and unpacks the dataset archive with `curl` and `tar`,
+and on exit PUTs one `.tar.gz` of the artifact directory and the log. It
+removes both URLs from the trainer's environment, and calls curl with `-q -g
+-f` and a stall limit. A URI beats a URL for the same side.
 
 ### Changed: credentials travel as `ExAtlas.Secret` (#76)
 
