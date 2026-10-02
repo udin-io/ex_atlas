@@ -4,11 +4,19 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
   #
   #     LAMBDA_LABS_API_KEY=... LAMBDA_SSH_KEY_NAME=... mix test --only lambda_live
   #
-  # Each test records one point the Bypass suite cannot settle (#84):
+  # Each test records one point the Bypass suite cannot settle (#84, #85):
   # Lambda's real instance type names, whether cloud-init runs the bash
-  # `user_data` on the default image, and what an `invalid-parameters` error
-  # echoes. Set LAMBDA_LIVE_HTTP=1 once Lambda's firewall admits port 80 to
-  # assert that nginx answers too.
+  # `user_data` on the default image, what an `invalid-parameters` error
+  # echoes, and whether the host has the `systemd-run`, `curl` and `mktemp`
+  # the finish report needs. Set LAMBDA_LIVE_HTTP=1 once Lambda's firewall
+  # admits port 80 to assert that nginx answers too.
+  #
+  # The finish-report test needs a public HTTPS URL that reaches this
+  # machine. Start a tunnel to port 4040 and pass its URL:
+  #
+  #     cloudflared tunnel --url http://localhost:4040
+  #     LAMBDA_LIVE_CALLBACK_URL=https://<name>.trycloudflare.com \
+  #       LAMBDA_LABS_API_KEY=... LAMBDA_SSH_KEY_NAME=... mix test --only lambda_live
   use ExUnit.Case, async: false
 
   @moduletag :lambda_live
@@ -47,14 +55,7 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
     name: name,
     ssh_key: ssh_key
   } do
-    {:ok, types} = ExAtlas.list_gpu_types(opts)
-
-    cheapest =
-      types
-      |> Enum.reject(&(&1.stock == :unavailable))
-      |> Enum.min_by(& &1.lowest_price_per_hour, fn -> flunk("no type has capacity") end)
-
-    IO.puts("\nrenting #{cheapest.id} at $#{cheapest.lowest_price_per_hour}/h")
+    cheapest = cheapest_type(opts)
 
     {:ok, compute} =
       ExAtlas.spawn_compute(
@@ -85,6 +86,76 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
     assert reason in [:vanished, :terminated]
   end
 
+  test "a command instance with self_terminate: false reads running, then terminates", %{
+    opts: opts,
+    name: name,
+    ssh_key: ssh_key
+  } do
+    cheapest = cheapest_type(opts)
+
+    {:ok, compute} =
+      ExAtlas.spawn_compute(
+        [
+          gpu: :h100,
+          name: name,
+          image: "busybox:latest",
+          command: ["sh", "-c", "exit 0"],
+          self_terminate: false,
+          provider_opts: %{instance_type: cheapest.id, ssh_key_name: ssh_key}
+        ] ++ opts
+      )
+
+    {:alive, _running} = wait_until(compute.id, opts, &match?({:alive, %{status: :running}}, &1))
+
+    assert :ok = ExAtlas.terminate(compute.id, opts)
+    assert {:dead, reason, _} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))
+    assert reason in [:vanished, :terminated]
+  end
+
+  # The host's unit POSTs the container's exit code through the tunnel to
+  # `ExAtlas.Callback.Plug` here, and the tracker terminates the instance.
+  @tag skip:
+         System.get_env("LAMBDA_LIVE_CALLBACK_URL") == nil &&
+           "set LAMBDA_LIVE_CALLBACK_URL to a tunnel to port 4040"
+  test "run_task: the host reports the exit code and the tracker terminates the instance", %{
+    opts: opts,
+    name: name,
+    ssh_key: ssh_key
+  } do
+    cheapest = cheapest_type(opts)
+    ExAtlas.Test.Orchestrator.start!()
+
+    start_supervised!(
+      {Plug.Cowboy, scheme: :http, plug: ExAtlas.Callback.Plug, options: [port: 4040]}
+    )
+
+    {:ok, pid, compute} =
+      ExAtlas.Orchestrator.run_task(
+        [
+          gpu: :h100,
+          name: name,
+          image: "busybox:latest",
+          command: ["sh", "-c", "sleep 20; exit 7"],
+          callback: System.fetch_env!("LAMBDA_LIVE_CALLBACK_URL"),
+          max_runtime_ms: 25 * 60_000,
+          ready_timeout_ms: 20 * 60_000,
+          finish_grace_ms: 5_000,
+          provider_opts: %{instance_type: cheapest.id, ssh_key_name: ssh_key}
+        ] ++ opts
+      )
+
+    id = compute.id
+    Phoenix.PubSub.subscribe(ExAtlas.PubSub, ExAtlas.Orchestrator.Events.topic(id))
+    ref = Process.monitor(pid)
+
+    assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 7}}}, 24 * 60_000
+    assert_receive {:atlas_compute, ^id, {:task, {:failed, {:exit_code, 7}}}}, 60_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 60_000
+
+    assert {:dead, reason, _} = wait_until(id, opts, &match?({:dead, _, _}, &1))
+    assert reason in [:vanished, :terminated]
+  end
+
   # A region that does not exist and a tag key Lambda's pattern refuses, so
   # Lambda cannot launch: this spends nothing.
   test "a refused launch echoes no user_data value", %{opts: opts, ssh_key: ssh_key} do
@@ -103,6 +174,18 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
     assert {:error, %ExAtlas.Error{} = error} = result
     IO.puts("\nLambda refused the probe: #{inspect(error.status)} #{inspect(error.raw)}")
     refute inspect(error) =~ marker, "Lambda echoes user_data in its error"
+  end
+
+  defp cheapest_type(opts) do
+    {:ok, types} = ExAtlas.list_gpu_types(opts)
+
+    cheapest =
+      types
+      |> Enum.reject(&(&1.stock == :unavailable))
+      |> Enum.min_by(& &1.lowest_price_per_hour, fn -> flunk("no type has capacity") end)
+
+    IO.puts("\nrenting #{cheapest.id} at $#{cheapest.lowest_price_per_hour}/h")
+    cheapest
   end
 
   defp wait_until(id, opts, done?, deadline \\ System.monotonic_time(:second) + 1200) do
