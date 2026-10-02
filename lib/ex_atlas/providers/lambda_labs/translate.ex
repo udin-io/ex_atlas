@@ -376,28 +376,31 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
     with {:ok, suffix} <- family_or_error(request.gpu) do
       name = "gpu_#{request.gpu_count}x_#{suffix}"
 
-      if Map.has_key?(types, name) do
-        {:ok, name}
-      else
-        counts =
-          types
-          |> Map.keys()
-          |> Enum.flat_map(fn listed ->
-            case Regex.run(~r/\Agpu_(\d+)x_#{Regex.escape(suffix)}\z/, listed) do
-              [_, count] -> [String.to_integer(count)]
-              nil -> []
-            end
-          end)
-          |> Enum.sort()
-
-        listed =
-          if counts == [],
-            do: "lists no #{suffix} type",
-            else: "lists #{suffix} with #{Enum.join(counts, ", ")} GPUs"
-
-        validation("Lambda has no #{name}: it #{listed}")
-      end
+      if Map.has_key?(types, name),
+        do: {:ok, name},
+        else: validation("Lambda has no #{name}: it #{listed(types, suffix)}")
     end
+  end
+
+  defp listed(types, suffix) do
+    case listed_counts(types, suffix) do
+      [] -> "lists no #{suffix} type"
+      counts -> "lists #{suffix} with #{Enum.join(counts, ", ")} GPUs"
+    end
+  end
+
+  defp listed_counts(types, suffix) do
+    pattern = ~r/\Agpu_(\d+)x_#{Regex.escape(suffix)}\z/
+
+    types
+    |> Map.keys()
+    |> Enum.flat_map(fn listed ->
+      case Regex.run(pattern, listed) do
+        [_, count] -> [String.to_integer(count)]
+        nil -> []
+      end
+    end)
+    |> Enum.sort()
   end
 
   defp listed_type(name, types) do
@@ -420,18 +423,19 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   end
 
   defp family(canonical) do
-    with {:ok, "gpu_1x_" <> suffix} <- Spec.GpuCatalog.for_provider(canonical, :lambda_labs) do
-      {:ok, suffix}
-    else
+    case Spec.GpuCatalog.for_provider(canonical, :lambda_labs) do
+      {:ok, "gpu_1x_" <> suffix} -> {:ok, suffix}
       _ -> :error
     end
   end
 
   defp canonical_for("gpu_" <> rest) do
-    with [_count, suffix] <- String.split(rest, "x_", parts: 2) do
-      Enum.find(Spec.GpuCatalog.supported_gpus(:lambda_labs), &(family(&1) == {:ok, suffix}))
-    else
-      _ -> nil
+    case String.split(rest, "x_", parts: 2) do
+      [_count, suffix] ->
+        Enum.find(Spec.GpuCatalog.supported_gpus(:lambda_labs), &(family(&1) == {:ok, suffix}))
+
+      _ ->
+        nil
     end
   end
 

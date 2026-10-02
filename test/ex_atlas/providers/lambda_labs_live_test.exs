@@ -36,7 +36,7 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
 
   test "the catalog lists names that follow gpu_<n>x_<family>", %{opts: opts} do
     assert {:ok, types} = ExAtlas.list_gpu_types(opts)
-    IO.puts("\nLambda instance types: #{types |> Enum.map(& &1.id) |> Enum.join(", ")}")
+    IO.puts("\nLambda instance types: #{Enum.map_join(types, ", ", & &1.id)}")
 
     assert types != []
     assert Enum.all?(types, &Regex.match?(~r/\Agpu_\d+x_[a-z0-9_]+\z/, &1.id))
