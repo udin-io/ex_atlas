@@ -212,6 +212,14 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_s3_secrets(log)
     end
 
+    test "the provider ctx of a status poll holds no s3:" do
+      ctx = ExAtlas.Config.build_ctx(:mock, s3: @s3, endpoint: "abc123")
+
+      refute Map.has_key?(ctx, :s3)
+      # Control: other pass-through options still reach the provider.
+      assert ctx.endpoint == "abc123"
+    end
+
     test "an invalid s3: is an error from spawn/1, before the provider is called" do
       assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
                ExAtlas.Orchestrator.spawn(
@@ -224,6 +232,18 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_s3_secrets(inspect(error))
       {:ok, computes} = ExAtlas.list_compute(provider: :mock)
       refute Enum.any?(computes, &(&1.image == "x-s3-invalid"))
+    end
+
+    test "spawn_compute/2 refuses s3: in its provider opts" do
+      req = ExAtlas.Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+
+      error =
+        assert_raise ArgumentError, fn ->
+          ExAtlas.spawn_compute(req, provider: :mock, s3: @s3)
+        end
+
+      assert Exception.message(error) =~ "ComputeRequest"
+      refute_s3_secrets(Exception.message(error))
     end
   end
 

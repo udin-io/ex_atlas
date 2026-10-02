@@ -111,6 +111,12 @@ defmodule ExAtlas do
   @spec spawn_compute(Spec.ComputeRequest.t(), opts()) ::
           {:ok, Spec.Compute.t()} | {:error, term()}
   def spawn_compute(%Spec.ComputeRequest{} = req, opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :s3) do
+      raise ArgumentError,
+            "s3: belongs to the ComputeRequest; pass it to ComputeRequest.new/1, " <>
+              "not to spawn_compute/2's provider opts"
+    end
+
     {provider, opts} = Config.pop_provider!(opts)
     ctx = Config.build_ctx(provider, opts)
     provider |> Config.provider_module() |> apply(:spawn_compute, [req, ctx])
