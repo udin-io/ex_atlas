@@ -189,6 +189,36 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
       assert_has_issue(install_ecto(files), &(&1 =~ "ExAtlas.Orchestrator.Supervisor"))
     end
 
+    test "writes the migration under the repo's configured priv directory" do
+      files =
+        Map.put(host(), "config/config.exs", """
+        import Config
+        config :test, Test.Repo, priv: "priv/db"
+        """)
+
+      assert [path] = migrations(install_ecto(files))
+      assert path =~ ~r|^priv/db/migrations/\d{14}_add_atlas_tracking\.exs$|
+    end
+
+    test "finds a hand-written migration under the repo's configured priv directory" do
+      files =
+        host()
+        |> Map.put("config/config.exs", """
+        import Config
+        config :test, Test.Repo, priv: "priv/db"
+        """)
+        |> Map.put("priv/db/migrations/20260101000000_keep_pods.exs", """
+        defmodule Test.Repo.Migrations.KeepPods do
+          use Ecto.Migration
+          def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()
+        end
+        """)
+
+      assert migrations(install_ecto(files)) == [
+               "priv/db/migrations/20260101000000_keep_pods.exs"
+             ]
+    end
+
     test "turns a config.exs start_orchestrator: true off, since the supervisor refuses it" do
       files =
         Map.put(host(), "config/config.exs", """

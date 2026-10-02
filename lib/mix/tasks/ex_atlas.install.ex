@@ -59,6 +59,7 @@ if Code.ensure_loaded?(Igniter) do
     @ecto_store ExAtlas.Orchestrator.TrackingStore.Ecto
     @supervisor ExAtlas.Orchestrator.Supervisor
     @other_config_files ["runtime.exs", "prod.exs", "dev.exs", "test.exs"]
+    @config_files ["config.exs" | @other_config_files]
 
     @impl Igniter.Mix.Task
     def info(_argv, _parent) do
@@ -101,6 +102,8 @@ if Code.ensure_loaded?(Igniter) do
     defp install_tracking_store(igniter, nil), do: igniter
 
     defp install_tracking_store(igniter, "ecto") do
+      igniter = Enum.reduce(@config_files, igniter, &OrchestratorConfig.include_config/2)
+
       case select_repo(igniter) do
         {igniter, {:ok, repo}} ->
           igniter
@@ -158,39 +161,64 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    # Igniter's convention for a repo's migrations: `priv/<last alias
-    # segment, underscored>/migrations`.
     defp add_migration(igniter, repo) do
-      dir =
-        Path.join([
-          "priv",
-          repo |> Module.split() |> List.last() |> Macro.underscore(),
-          "migrations"
-        ])
-
+      default_dir = default_migrations_dir(repo)
+      dir = configured_migrations_dir(igniter, repo) || default_dir
       igniter = Igniter.include_glob(igniter, Path.join(dir, "*.exs"))
 
       if calls_store_migration?(igniter, dir) do
         igniter
       else
-        Igniter.Libs.Ecto.gen_migration(igniter, repo, "add_atlas_tracking",
+        igniter
+        |> Igniter.Libs.Ecto.gen_migration(repo, "add_atlas_tracking",
           body: """
           def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()
           def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down()
-          """,
-          on_exists: :skip
+          """
         )
+        |> move_new_migration(default_dir, dir)
       end
     end
 
-    defp configure_ecto_store(igniter, repo) do
-      igniter =
-        Enum.reduce(
-          ["config.exs" | @other_config_files],
-          igniter,
-          &OrchestratorConfig.include_config/2
-        )
+    # Igniter's convention, and Ecto's default: `priv/<last alias segment,
+    # underscored>/migrations`.
+    defp default_migrations_dir(repo) do
+      Path.join([
+        "priv",
+        repo |> Module.split() |> List.last() |> Macro.underscore(),
+        "migrations"
+      ])
+    end
 
+    # `config :my_app, MyApp.Repo, priv: "priv/db"` moves Ecto's migrations
+    # directory. Only a literal string is read.
+    defp configured_migrations_dir(igniter, repo) do
+      app = Igniter.Project.Application.app_name(igniter)
+
+      @config_files
+      |> Enum.flat_map(&OrchestratorConfig.config_values(igniter, &1, app, [repo, :priv]))
+      |> Enum.find_value(fn value ->
+        case Common.expand_literal(value) do
+          {:ok, priv} when is_binary(priv) -> Path.join(priv, "migrations")
+          _ -> nil
+        end
+      end)
+    end
+
+    # `Igniter.Libs.Ecto.gen_migration/4` always writes to the default
+    # directory.
+    defp move_new_migration(igniter, dir, dir), do: igniter
+
+    defp move_new_migration(igniter, default_dir, dir) do
+      igniter.rewrite
+      |> Enum.map(&Rewrite.Source.get(&1, :path))
+      |> Enum.filter(&(Path.dirname(&1) == default_dir and &1 =~ "_add_atlas_tracking"))
+      |> Enum.reduce(igniter, fn path, igniter ->
+        Igniter.move_file(igniter, path, Path.join(dir, Path.basename(path)))
+      end)
+    end
+
+    defp configure_ecto_store(igniter, repo) do
       started? = OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true)
 
       igniter
@@ -220,7 +248,7 @@ if Code.ensure_loaded?(Igniter) do
     # the flag under a condition, so the installer names it instead of
     # editing it.
     defp warn_start_orchestrator(igniter) do
-      ["config.exs" | @other_config_files]
+      @config_files
       |> Enum.filter(&OrchestratorConfig.sets_start_orchestrator?(igniter, &1, true))
       |> Enum.reduce(igniter, fn file, igniter ->
         Igniter.add_warning(igniter, """
