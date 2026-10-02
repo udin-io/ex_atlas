@@ -78,7 +78,7 @@ sequenceDiagram
   participant Reaper as Reaper
   Host->>Repo: start (child 1)
   Host->>Sup: start (child 2), refuses when start_orchestrator is true
-  Sup->>Store: start_link, raises ArgumentError when repo is unset
+  Sup->>Store: start_link, raises ArgumentError when repo is unset or not running
   Sup->>Reaper: start gated
   Sup->>Adopter: run
   Adopter->>Store: all()

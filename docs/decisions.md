@@ -20,6 +20,10 @@ names the PR or issue that holds the reasoning.
 | No `:repo` raises `ArgumentError` at boot; a missing table answers `{:error, _}` | Log and run: a config mistake would surface only at a deploy | #120 |
 | The repo comes from `config :ex_atlas, :orchestrator, repo:` | Child opts: `put/1`, `get/1` and `all/0` take no opts | #120 |
 | Migration steps create only what is missing; `version:` names the last step to run | A version stored in the table, as Oban does: more code for a one-step table | #120 |
+| A row over 1 MiB (bytes) or a compressed row is refused; `put/1` writes nothing over 1 MiB | Trust `[:safe]`: it accepts a compressed term that declares up to 4 GB decoded | #123 review |
+| Writes run in a `Task`, outside any caller transaction | Write in the caller's process: a host rollback erases the record of a running pod | #123 review |
+| The store's `start_link/1` refuses when the repo is not running | Refuse only the duplicate tree: `start_orchestrator: true` with the Ecto store would boot with an unreadable store every time | #123 review |
+| One refused row still fails `all/0`. Since `get/1` raises on that row and the Reaper treats a raise as "ours", skipping it would also keep its pod; we keep the design's rule, which adopts nothing that boot | Skip the row as the Adopter skips a record of an unknown version: the other records get trackers | #120, #123 review |
 | `ensure_running!/0` checks that `ComputeSupervisor` is alive | Check `start_orchestrator`: it is false for a host-started tree | #120 |
 | Tests run on SQLite (`ecto_sqlite3`, test only) | Postgres: every checkout would need a database server | #120 |
 | The table is `atlas_tracking_records` in the repo's default prefix; MySQL is not supported | A configurable name or prefix: no host has asked. MySQL's upsert takes no conflict target | #120 |

@@ -1400,7 +1400,14 @@ children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
 - With the database down, the store logs failed writes and the tracker runs
   on; the Reaper leaves every pod alone.
 - With both `start_orchestrator: true` and the supervisor in your children,
-  the supervisor refuses to start. With no `:repo`, the store raises at boot.
+  the supervisor refuses to start. With no `:repo`, or a repo that is not yet
+  running, the store raises at boot.
+- A row over 1 MiB, or a compressed one, is refused like any row that will
+  not decode. Writes run in their own process, so a rollback of your own
+  `Repo.transaction` never erases a record.
+- A decoded row is not trusted input: its `base_url:` steers the adopted
+  task's provider calls, which carry your API key (issue 125). Let only your
+  app write `atlas_tracking_records`.
 
 ## Phoenix LiveDashboard integration
 

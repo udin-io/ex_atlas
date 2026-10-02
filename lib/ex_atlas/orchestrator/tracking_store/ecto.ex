@@ -64,6 +64,10 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     or one over 1 MiB (1,048,576 bytes): a compressed term declares its own decoded
     size, up to 4 GB. `put/1` logs a record over that size and writes nothing.
 
+    A row that decodes is still not trusted input. Its opts steer the provider
+    calls an adopted task makes with this node's API key, `:base_url` among
+    them (issue 125). Let only the app write `atlas_tracking_records`.
+
       * `all/0` answers `{:error, {:undecodable, ids}}` when any row is
         refused. The Adopter then adopts nothing and the Reaper reaps nothing
         this boot, as for a corrupt DETS file. Skipping the row instead would
