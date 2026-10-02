@@ -9,6 +9,10 @@ names the PR or issue that holds the reasoning.
 
 | Decision | Alternative not taken | Where |
 |---|---|---|
+| The node signs every tracking record it writes (HMAC-SHA256, key derived from `config :ex_atlas, :callback, secret:` with its own salt, over the whole record), and an adopted task respawns only from a record whose `:mac` checks | Re-validate the stored callback descriptor field by field: no field check tells a forged `task_id`, image or command from a real one | #131 |
+| An unsigned or mismatched record adopts (deadline, polls, cost cap) and refuses only the respawn | Refuse to adopt it: a 0.8.0 task in flight across the upgrade loses its deadline. Trust it: a writer drops the `:mac` | #131 |
+| A rewrite re-signs only a record whose stored `:mac` checked, read from the store at that moment | Re-sign what the tracker trusted at adoption: an edit made after adoption would come back signed | #131 |
+| The signing key comes from the callback secret; a node without one writes unsigned records and warns at a respawnable `persist: true` spawn | A new `record_secret:` setting: every host would need it | #131 |
 | An adopted task takes `:base_url` and `:req_options` from `config :ex_atlas, <provider>`, as `:api_key`; a record stores neither, and every rewrite drops them from an older one | Keep storing them and refuse a record whose URL differs from config: it still reads a value the store's writer chose, and refuses live pods after a host changes its URL | #125 |
 | An adopted task drops every credential key from its record's opts too (`:api_key` and the rest of `scrub_opts/1`'s list) | Trust a stored `:api_key` as a per-call one: it would point polls and the respawn's rent at the writer's account (review finding) | #125 |
 | Drop all of `:req_options` from the record | Drop a list of Req keys (`base_url`, `plug`, `connect_options`): Req adds keys, and a deny-list misses them | #125 |

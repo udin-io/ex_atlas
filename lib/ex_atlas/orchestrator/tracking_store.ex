@@ -174,11 +174,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
       that declares `@behaviour ExAtlas.Provider`. Any other record is
       skipped, kept, and logged.
 
-  The record still chooses what a respawn after adoption rents (the image,
-  command, GPU and env names) and the callback descriptor its token is minted
-  over. With `respawn_credentials:`, the resolver's secrets go into that
-  image. A writer needs a live pod of this account that then fails for it to
-  come to that (issue 131).
+  The node signs every record it writes, under `:mac`, with a key derived
+  from `config :ex_atlas, :callback, secret:` (see `seal/1`). An adopted task
+  respawns only from a record whose signature checks, so a writer without the
+  secret cannot choose what a respawn rents, the callback descriptor its
+  token is minted over, or where a `respawn_credentials:` resolver's secrets
+  go. An unsigned record (written by 0.8.0, by a node with no callback
+  secret, or signed under a rotated one) adopts, keeps its deadline and cost
+  cap, and ends with `{:respawn_failed, _}` where it would respawn. A store
+  must return each record term for term, `:mac` byte for byte.
+
+  An unsigned record can still name any pod id of this account, and its
+  deadline deletes that pod (issue 138).
 
   ## A store shared by several nodes
 

@@ -162,6 +162,10 @@ flowchart TD
 
 ## What a respawn after adoption does
 
+The node signs every record it writes (#131). An adopted task whose record
+does not carry this node's signature never respawns, so a store writer
+cannot choose what a respawn rents.
+
 A tracking record holds `:not_stored` in place of `s3:` credentials and
 `env:` values. When an adopted `on_failure: {:respawn, n}` task is
 preempted, `ComputeServer.spawn_replacement/1` asks the host's
@@ -179,15 +183,18 @@ sequenceDiagram
   participant Host as Host app, PubSub
   Ad->>St: all/0 at boot
   St-->>Ad: record, s3 and env values not_stored, respawn_credentials MFA
-  Ad->>CS: start with adopted record
+  Ad->>CS: start with adopted record, sealed when its mac checks
   CS->>P: status poll
   P-->>CS: pod gone, preempted
+  alt record not signed by this node
+  CS-->>Host: respawn_failed, nothing rented, no resolver call
+  end
   CS->>R: apply(m, f, args ++ [info]) in a task, at most 30 s
   R-->>CS: ok, s3 and env
   CS->>CS: validate as ComputeRequest.new/1 does, seal as Secrets
   CS->>P: spawn_compute with resolved s3 and env
   P-->>CS: replacement compute
-  CS->>St: carry record, markers kept, no value written
+  CS->>St: carry record, markers kept, no value written, re-signed only if the stored one was
   CS-->>Host: respawned, new id
   alt no resolver, error, raise, throw, exit or timeout
   CS-->>Host: respawn_failed with a validation error naming the resolver
