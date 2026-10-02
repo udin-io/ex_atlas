@@ -33,7 +33,9 @@ defmodule ExAtlas.Providers.LambdaLabs do
   default `self_terminate: true` needs a `:callback`: the host POSTs the
   container's exit code to it, and `ExAtlas.Orchestrator.run_task/1`'s
   tracker deletes the instance on that report. Without a callback, pass
-  `self_terminate: false`; `:validation` otherwise.
+  `self_terminate: false`; `:validation` otherwise. A report ends the
+  instance only under `mode: :task`, which `run_task/1` sets: an
+  interactive session runs on until its idle TTL.
   """
 
   @behaviour ExAtlas.Provider
