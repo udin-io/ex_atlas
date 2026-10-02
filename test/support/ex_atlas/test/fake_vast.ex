@@ -154,6 +154,23 @@ defmodule ExAtlas.Test.FakeVast do
       json(conn, 200, %{"success" => true})
     end)
 
+    # Not Vast's API: sets what the charges route bills an instance.
+    Bypass.stub(bypass, "POST", "/fake/bill/:id", fn conn ->
+      id = List.last(conn.path_info)
+      {%{"usd" => usd}, conn} = read_json(conn)
+      Agent.update(store, &update_in(&1[id], fn i -> Map.put(i, "fake_bill_usd", usd) end))
+      json(conn, 200, %{"success" => true})
+    end)
+
+    # The account's contract rows: one per instance with a bill set, all GPU.
+    Bypass.stub(bypass, "GET", "/api/v0/charges", fn conn ->
+      rows =
+        for %{"id" => id, "fake_bill_usd" => usd} <- Agent.get(store, &Map.values/1),
+            do: charge_row(id, gpu: usd)
+
+      json(conn, 200, %{"success" => true, "results" => rows, "next_token" => nil})
+    end)
+
     Bypass.stub(bypass, "GET", "/api/v0/instances/:id", fn conn ->
       json(conn, 200, %{"instances" => Agent.get(store, &Map.get(&1, List.last(conn.path_info)))})
     end)
@@ -208,6 +225,14 @@ defmodule ExAtlas.Test.FakeVast do
         "dph_total" => Float.round(price + 0.01, 4),
         "min_bid" => price
       })
+
+  @doc "Make `vast`'s charges route bill instance `id` `usd` dollars of GPU time."
+  def bill(vast, id, usd) do
+    {:ok, %{status: 200}} =
+      Req.post("#{vast[:base_url]}/fake/bill/#{id}", json: %{"usd" => usd}, retry: false)
+
+    :ok
+  end
 
   @doc "Outbid a rented instance of `start/0`'s fake: it reads `exited` from now on."
   def outbid(vast, id) do

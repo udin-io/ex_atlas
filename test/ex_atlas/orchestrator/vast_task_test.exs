@@ -1,6 +1,6 @@
 defmodule ExAtlas.Orchestrator.VastTaskTest do
   # The orchestrator on Vast through FakeVast: run_task/1 ended by the
-  # container deleting its own instance, max_cost, and an outbid spot
+  # container deleting its own instance, max_cost (the estimate and the charges bill), and an outbid spot
   # instance replaced by a respawn.
   use ExUnit.Case, async: false
 
@@ -157,32 +157,67 @@ defmodule ExAtlas.Orchestrator.VastTaskTest do
   end
 
   describe "max_cost" do
-    # FakeVast's offer bills $0.42 an hour: a $0.0001 cap is spent in about a
-    # second.
-    test "a spent cap terminates the instance, with no billing read", %{vast: vast} do
-      assert {:ok, pid, %{id: id, cost_per_hour: 0.42}} =
-               ExAtlas.Orchestrator.run_task(
-                 vast ++
-                   [
-                     gpu: :rtx_4090,
-                     image: "pytorch/pytorch",
-                     command: ["python", "train.py"],
-                     max_cost: 0.0001,
-                     reconcile_spend_ms: 10
-                   ]
-               )
+    # FakeVast's offer bills $0.42 an hour, so the estimate alone reaches a
+    # $0.0001 cap in about a second. A $5 cap is out of its reach in a test:
+    # only a bill read from the charges API can spend it.
+    defp capped_task(vast, max_cost) do
+      {:ok, pid, %{id: id}} =
+        ExAtlas.Orchestrator.run_task(
+          vast ++
+            [
+              gpu: :rtx_4090,
+              image: "pytorch/pytorch",
+              command: ["python", "train.py"],
+              max_cost: max_cost,
+              reconcile_spend_ms: 10
+            ]
+        )
 
       subscribe(id)
+      {pid, id}
+    end
+
+    test "a spent cap terminates the instance on the estimate", %{vast: vast} do
+      {pid, id} = capped_task(vast, 0.0001)
       ref = Process.monitor(pid)
 
       assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 5_000
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
       assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute(id, vast)
+    end
 
-      # Vast's spend read is slice 4: the reconcile stops without a read or an
-      # error event.
-      refute_received {:atlas_compute, ^id, {:spend_reconcile_failed, _}}
-      refute_received {:atlas_compute, ^id, {:spend_reconciled, _}}
+    test "a bill above the cap terminates the instance, though the estimate is far under", %{
+      vast: vast
+    } do
+      {pid, id} = capped_task(vast, 5.0)
+      ref = Process.monitor(pid)
+
+      # Control: before Vast bills anything the task runs on, and the reads
+      # reconcile at zero.
+      assert_receive {:atlas_compute, ^id, {:spend_reconciled, %{billed_usd: +0.0}}}, 2_000
+      refute_received {:atlas_compute, ^id, {:terminating, :cost_cap}}
+
+      :ok = bill(vast, id, 6.0)
+
+      assert_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute(id, vast)
+    end
+
+    test "a bill under the cap raises the spend and leaves the instance running", %{vast: vast} do
+      {_pid, id} = capped_task(vast, 5.0)
+      :ok = bill(vast, id, 1.0)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:spend_reconciled, %{billed_usd: 1.0, spent_usd: spent}}},
+                     2_000
+
+      assert spent >= 1.0
+      refute_receive {:atlas_compute, ^id, {:terminating, :cost_cap}}, 200
+      assert {:ok, %{id: ^id}} = ExAtlas.get_compute(id, vast)
+
+      # The tracker polls FakeVast, which ends with this test.
+      ExAtlas.Orchestrator.stop_tracked(id)
     end
   end
 end

@@ -11,7 +11,8 @@ defmodule ExAtlas.Providers.VastLiveTest do
   # Three tests spend money, each renting the cheapest on-demand RTX 4090 for a
   # few minutes: one nginx container, one `command:` container that deletes
   # its own instance (issue 105), and one interruptible (`spot: true`)
-  # container (issue 112). The spot test cannot make Vast outbid the
+  # container (issue 112). A fourth rents the same, stops it, starts it and
+  # reads its bill (issue 116). The spot test cannot make Vast outbid the
   # instance; it prints what Vast reports for a bid, and the outbid status
   # (`exited`) stays read from Vast's docs.
   use ExUnit.Case, async: false
@@ -199,6 +200,60 @@ defmodule ExAtlas.Providers.VastLiveTest do
     )
 
     assert instance["is_bid"] == true, "Vast did not take the rent as an interruptible instance"
+
+    assert :ok = ExAtlas.terminate(compute.id, opts)
+    assert {:dead, :vanished, nil} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))
+  end
+
+  # What only the real API shows (issue 116): that `PUT {"state": "stopped"}`
+  # makes the instance read `exited`, whether `running` brings it back or the
+  # host has rented the GPU out meanwhile, and the real body of a charges row:
+  # its `source`, `amount` and items, and whether a row counts only the days
+  # asked for. The bill can lag the rent by minutes, so the test prints it and
+  # asserts its shape only.
+  test "stop reads :stopped, start runs it again, and the charges API bills it", %{
+    opts: opts,
+    name: name
+  } do
+    {:ok, compute} =
+      ExAtlas.spawn_compute([gpu: :rtx_4090, name: name, image: "nginx:alpine"] ++ opts)
+
+    IO.puts("\nrented #{compute.id} at $#{compute.cost_per_hour}/h")
+    {:alive, _} = wait_until(compute.id, opts, &match?({:alive, %{status: :running}}, &1))
+
+    assert :ok = ExAtlas.stop(compute.id, opts)
+    {:dead, :stopped, _} = wait_until(compute.id, opts, &match?({:dead, :stopped, _}, &1))
+
+    assert {:ok, %{"instances" => stopped}} =
+             Client.get(ctx(opts), "/api/v0/instances/#{compute.id}/")
+
+    IO.puts(
+      "stopped: actual_status #{inspect(stopped["actual_status"])}, " <>
+        "intended_status #{inspect(stopped["intended_status"])}, dph_total #{inspect(stopped["dph_total"])}"
+    )
+
+    # Vast may refuse this when the host rented the GPU to someone else; the
+    # test prints the refusal and fails, and the owner reads which code Vast sent.
+    start = ExAtlas.start(compute.id, opts)
+    IO.puts("start: #{inspect(start)}")
+    assert :ok = start
+    {:alive, _} = wait_until(compute.id, opts, &match?({:alive, %{status: :running}}, &1))
+
+    from = DateTime.add(DateTime.utc_now(), -86_400)
+
+    assert {:ok, rows} =
+             Client.instance_charges(
+               ctx(opts),
+               "instance-#{compute.id}",
+               DateTime.to_unix(from),
+               DateTime.to_unix(DateTime.utc_now())
+             )
+
+    IO.puts("charges rows for the instance: #{inspect(rows)}")
+
+    assert {:ok, spend} = ExAtlas.compute_spend(compute.id, opts)
+    IO.puts("spend: #{inspect(Map.delete(spend, :raw))}")
+    assert is_float(spend.total_usd) and spend.total_usd >= 0
 
     assert :ok = ExAtlas.terminate(compute.id, opts)
     assert {:dead, :vanished, nil} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))

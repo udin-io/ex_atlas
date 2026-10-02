@@ -51,6 +51,10 @@ defmodule ExAtlas.Providers.VastSpendTest do
 
   defp unix(datetime), do: DateTime.to_unix(datetime)
 
+  test "capabilities lists :billing" do
+    assert :billing in ExAtlas.capabilities(:vast)
+  end
+
   describe "compute_spend/3" do
     test "sums the instance's rows into total, gpu and disk", %{bypass: bypass, opts: opts} do
       charges(bypass, [
