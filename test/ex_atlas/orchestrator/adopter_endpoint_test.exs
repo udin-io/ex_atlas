@@ -22,7 +22,20 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
   @node_key "node-key-5c1f"
   @pod_id "pod-forged"
 
+  # Exports `capabilities/0`, which `ExAtlas.Config.provider_module/1` takes,
+  # and declares no `ExAtlas.Provider`.
+  defmodule NotAProvider do
+    @moduledoc false
+    def capabilities, do: []
+
+    def get_compute(_id, _ctx) do
+      send(:adopter_endpoint_test, :not_a_provider_called)
+      {:error, ExAtlas.Error.new(:not_found)}
+    end
+  end
+
   setup do
+    Process.register(self(), :adopter_endpoint_test)
     configured = Bypass.open()
     forged = Bypass.open()
 
@@ -265,6 +278,57 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
 
       assert_received {:per_call, "POST"}
       refute_received {:configured, _method, _auth}
+    end
+  end
+
+  describe "a record's provider" do
+    test "that declares no ExAtlas.Provider is not adopted, and its record is kept", %{
+      tmp_dir: dir
+    } do
+      store = start_ecto!(dir)
+      insert_row!(record(%{provider: NotAProvider, opts: [provider: NotAProvider]}))
+
+      log = adopt!()
+
+      refute_received :not_a_provider_called
+      assert log =~ "not adopting #{@pod_id}"
+      assert {:ok, _record} = store.get(@pod_id)
+      assert Orchestrator.list_ids() == []
+    end
+
+    # The opts' provider wins over the record's, as it did before the gate: a
+    # host store may keep the record's as a string.
+    test "named in the opts and declaring no ExAtlas.Provider is not called either", %{
+      tmp_dir: dir
+    } do
+      store = start_ecto!(dir)
+      insert_row!(record(%{opts: [provider: NotAProvider]}))
+
+      log = adopt!()
+
+      refute_received :not_a_provider_called
+      assert log =~ "not adopting #{@pod_id}"
+      assert {:ok, _record} = store.get(@pod_id)
+    end
+
+    test "control: a provider module that declares ExAtlas.Provider is adopted", %{
+      tmp_dir: dir
+    } do
+      store = start_ecto!(dir)
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+
+      :ok =
+        store.put(
+          record(%{
+            id: compute.id,
+            provider: ExAtlas.Providers.Mock,
+            opts: [provider: ExAtlas.Providers.Mock]
+          })
+        )
+
+      adopt!()
+
+      assert compute.id in Orchestrator.list_ids()
     end
   end
 end

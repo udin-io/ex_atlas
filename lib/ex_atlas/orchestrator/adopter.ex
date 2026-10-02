@@ -82,6 +82,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
   require Logger
 
   alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Ownership, Reaper, TrackingStore}
+  alias ExAtlas.Config
   alias ExAtlas.Orchestrator.UpstreamStatus
   alias ExAtlas.Spec
 
@@ -199,10 +200,33 @@ defmodule ExAtlas.Orchestrator.Adopter do
       record.mode != :task ->
         skip(record, "mode #{inspect(record.mode)} is not adoptable")
 
+      not declared_provider?(record) ->
+        skip(record, "its provider is neither built in nor a module declaring ExAtlas.Provider")
+
       true ->
         warn_stored_endpoint(record)
         adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
     end
+  end
+
+  # The provider is code this node runs, named by whoever wrote the store. Only
+  # a module that opted in by declaring the behaviour qualifies, never one that
+  # merely exports `capabilities/0`.
+  defp declared_provider?(record) do
+    case Keyword.get(TrackingStore.observe_opts(record), :provider) do
+      provider when is_atom(provider) ->
+        Map.has_key?(Config.builtin_providers(), provider) or declares_provider?(provider)
+
+      _not_an_atom ->
+        false
+    end
+  end
+
+  defp declares_provider?(module) do
+    Code.ensure_loaded?(module) and
+      ExAtlas.Provider in (module.module_info(:attributes)
+                           |> Keyword.get_values(:behaviour)
+                           |> List.flatten())
   end
 
   # Names the keys alone: their values came from the store's writer.
