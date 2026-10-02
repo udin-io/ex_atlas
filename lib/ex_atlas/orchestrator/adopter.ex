@@ -71,8 +71,10 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   ## Records this build does not understand
 
-  A record with a `:v` other than 1, 2 or 3, or a `:mode` other than `:task`, is
-  skipped with a warning and **left in the store**. Deleting it would be worse than
+  A record with a `:v` other than 1, 2 or 3, a `:mode` other than `:task`, or a
+  provider that is neither built in nor a module declaring
+  `@behaviour ExAtlas.Provider`, is skipped with a warning and **left in the
+  store**. Deleting it would be worse than
   useless: the store entry is the only thing telling the Reaper that a live,
   prefix-matching pod belongs to this app.
   """

@@ -154,6 +154,27 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   leaves nothing to refuse on, and its adopted respawn runs with no
   environment.
 
+  ## Where an adopted task's calls go
+
+  Whoever can write the store writes the record the next boot adopts, and the
+  adopted task calls its provider with this node's API key. So the record
+  steers neither where those calls go nor which code makes them:
+
+    * `:base_url` and `:req_options` come from
+      `config :ex_atlas, <provider>, base_url: ..., req_options: [...]`, as
+      `:api_key` does. A record does not store them; one written before this
+      rule keeps them, the adopted task ignores them, and the first rewrite of
+      the record drops them. A host that passes either per call to a
+      `persist: true` spawn sets them in config too, or its adopted tasks call
+      the provider's public URL.
+    * The provider is adopted only when it is a built-in name or a module
+      that declares `@behaviour ExAtlas.Provider`. Any other record is
+      skipped, kept, and logged.
+
+  The record still chooses what a respawn after adoption rents: the image,
+  command and GPU. A writer needs a live pod of this account for it to come
+  to that.
+
   ## A store shared by several nodes
 
   A node adopts only the records whose `:owner` is its own `:reap_owner`. Set
