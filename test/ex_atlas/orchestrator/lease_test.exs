@@ -17,7 +17,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
   alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
-  alias ExAtlas.Test.Repo
+  alias ExAtlas.Test.{LeaseClock, Repo}
 
   @moduletag :tmp_dir
 
@@ -287,37 +287,9 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       on_exit(fn -> Application.delete_env(:ex_atlas, :lease_test_failing) end)
     end
 
-    # A Lease on two clocks the test steps: the wall clock it renews and
-    # reads expiries with, and the monotonic clock it times the window on.
     defp watching_lease!(owner, opts \\ []) do
-      {:ok, wall} = Agent.start_link(&now/0)
-      {:ok, mono} = Agent.start_link(fn -> 0 end)
-
-      pid =
-        start_lease!(
-          owner,
-          Keyword.merge(
-            [clock: fn -> Agent.get(wall, & &1) end, monotonic: fn -> Agent.get(mono, & &1) end],
-            opts
-          )
-        )
-
-      %{pid: pid, wall: wall, mono: mono}
-    end
-
-    defp step!(lease, wall_ms, mono_ms) do
-      Agent.update(lease.wall, &(&1 + wall_ms))
-      Agent.update(lease.mono, &(&1 + mono_ms))
-      tick!(lease.pid)
-    end
-
-    # Both clocks run on together for `ms`, with a renewal every third of a
-    # ttl, as a live node renews.
-    defp run_for!(lease, ms) when ms <= @step, do: step!(lease, ms, ms)
-
-    defp run_for!(lease, ms) do
-      step!(lease, @step, @step)
-      run_for!(lease, ms - @step)
+      as_owner(owner)
+      LeaseClock.start!(Keyword.merge([store: Store, owner: owner, ttl_ms: @ttl], opts))
     end
 
     defp fail!(calls), do: Application.put_env(:ex_atlas, :lease_test_failing, calls)
@@ -326,23 +298,23 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       expire!("m1")
       lease = watching_lease!("m2")
 
-      run_for!(lease, @window - 1)
+      LeaseClock.run_for!(lease, @window - 1)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, 1)
+      LeaseClock.run_for!(lease, 1)
       assert Lease.dead_owners() == %{"m1" => lease_expiry("m1")}
     end
 
     test "control: an owner that renews mid-window, still expired, starts a new window" do
       expire!("m1")
       lease = watching_lease!("m2")
-      run_for!(lease, div(@window, 2))
+      LeaseClock.run_for!(lease, div(@window, 2))
 
       :ok = Store.renew_lease("m1", lease_expiry("m1") - 1_000)
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, @step)
+      LeaseClock.run_for!(lease, @step)
       assert Lease.dead_owners() == %{"m1" => lease_expiry("m1")}
     end
 
@@ -350,7 +322,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       :ok = Store.renew_lease("m1", now() + 10 * @window)
       lease = watching_lease!("m2")
 
-      run_for!(lease, 2 * @window)
+      LeaseClock.run_for!(lease, 2 * @window)
 
       assert Lease.dead_owners() == %{}
     end
@@ -360,59 +332,50 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     test "a Lease restarted near the end of a window waits a full new window" do
       expire!("m1")
       lease = watching_lease!("m2")
-      run_for!(lease, @window - @step)
+      LeaseClock.run_for!(lease, @window - @step)
 
-      stop_supervised!(Lease)
+      lease = LeaseClock.restart!(lease)
 
-      lease = %{
-        lease
-        | pid:
-            start_lease!("m2",
-              clock: fn -> Agent.get(lease.wall, & &1) end,
-              monotonic: fn -> Agent.get(lease.mono, & &1) end
-            )
-      }
-
-      run_for!(lease, @window - 1)
+      LeaseClock.run_for!(lease, @window - 1)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, 1)
+      LeaseClock.run_for!(lease, 1)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
     test "one failed renewal of its own lease clears the watch for a full new window" do
       expire!("m1")
       lease = watching_lease!("m2", store: Flaky)
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
 
       fail!([:renew_lease])
-      capture_log(fn -> run_for!(lease, @step) end)
+      capture_log(fn -> LeaseClock.run_for!(lease, @step) end)
       assert Lease.dead_owners() == %{}
 
       fail!([])
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, @step)
+      LeaseClock.run_for!(lease, @step)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
     test "one failed read of the expired leases clears the watch for a full new window" do
       expire!("m1")
       lease = watching_lease!("m2", store: Flaky)
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
 
       fail!([:expired_leases])
-      log = capture_log(fn -> run_for!(lease, @step) end)
+      log = capture_log(fn -> LeaseClock.run_for!(lease, @step) end)
       assert log =~ "could not read expired leases"
       assert Lease.dead_owners() == %{}
 
       fail!([])
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, @step)
+      LeaseClock.run_for!(lease, @step)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
@@ -421,39 +384,39 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     test "a gap of a full ttl between its renewals on the wall clock starts a new window" do
       expire!("m1")
       lease = watching_lease!("m2")
-      run_for!(lease, @window - @step)
+      LeaseClock.run_for!(lease, @window - @step)
 
-      step!(lease, @ttl, @step)
+      LeaseClock.step!(lease, @ttl, @step)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, @window - 1)
+      LeaseClock.run_for!(lease, @window - 1)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, 1)
+      LeaseClock.run_for!(lease, 1)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
     test "a gap of a full ttl between its renewals on the monotonic clock starts a new window" do
       expire!("m1")
       lease = watching_lease!("m2")
-      run_for!(lease, @window - @step)
+      LeaseClock.run_for!(lease, @window - @step)
 
-      step!(lease, @step, @ttl)
+      LeaseClock.step!(lease, @step, @ttl)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, @window - 1)
+      LeaseClock.run_for!(lease, @window - 1)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, 1)
+      LeaseClock.run_for!(lease, 1)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
     test "nothing is dead once its own last renewal is a ttl old" do
       expire!("m1")
       lease = watching_lease!("m2")
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
 
-      Agent.update(lease.mono, &(&1 + @ttl))
+      LeaseClock.stall!(lease, @ttl)
 
       assert Lease.dead_owners() == %{}
     end
@@ -463,7 +426,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     test "an owner that renewed since the last tick is not dead" do
       expire!("m1")
       lease = watching_lease!("m2")
-      run_for!(lease, @window)
+      LeaseClock.run_for!(lease, @window)
 
       :ok = Store.renew_lease("m1", lease_expiry("m1") - 1_000)
       assert Lease.dead_owners() == %{}
@@ -478,20 +441,20 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       :ok = Store.renew_lease("m1", DateTime.to_unix(~U[2000-01-01 00:00:00Z], :millisecond))
       lease = watching_lease!("m2")
 
-      run_for!(lease, @window - 1)
+      LeaseClock.run_for!(lease, @window - 1)
       assert Lease.dead_owners() == %{}
 
-      run_for!(lease, 1)
+      LeaseClock.run_for!(lease, 1)
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
 
     test "a wall clock a day ahead makes no live owner dead" do
       :ok = Store.renew_lease("m1", now() + @ttl)
       lease = watching_lease!("m2")
-      run_for!(lease, @step)
+      LeaseClock.run_for!(lease, @step)
 
-      step!(lease, 86_400_000, @step)
-      run_for!(lease, @window - 2 * @step - 1)
+      LeaseClock.step!(lease, 86_400_000, @step)
+      LeaseClock.run_for!(lease, @window - 2 * @step - 1)
 
       assert Lease.dead_owners() == %{}
     end
@@ -501,7 +464,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       expire!("m1")
       lease = watching_lease!("m2")
 
-      run_for!(lease, 2 * @window)
+      LeaseClock.run_for!(lease, 2 * @window)
 
       assert Map.keys(Lease.dead_owners()) == ["m1"]
     end
@@ -516,7 +479,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       log =
         capture_log(fn ->
           lease = watching_lease!("m2", store: NoExpiredLeases)
-          run_for!(lease, 2 * @window)
+          LeaseClock.run_for!(lease, 2 * @window)
         end)
 
       assert Lease.dead_owners() == %{}
