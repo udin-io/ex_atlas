@@ -36,12 +36,14 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   @typedoc """
   What a launch needs from the request alone: the `user_data` script as a
-  `Secret` (`nil` with no image), the tags and the `Compute.auth` handle.
+  `Secret` (`nil` with no image), the tags, and the `Compute.auth` handle as
+  a `Secret`, since its token is a credential and `parts` is an argument of
+  the launch functions a crash would print.
   """
   @type parts :: %{
           user_data: Secret.t() | nil,
           tags: [%{String.t() => String.t()}],
-          auth: Spec.Compute.auth_handle() | nil
+          auth: Secret.t() | nil
         }
 
   @doc """
@@ -73,7 +75,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
          %{
            user_data: Secret.wrap(user_data),
            tags: tags,
-           auth: auth
+           auth: Secret.wrap(auth)
          }}
       end
     end
@@ -184,7 +186,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       region: region,
       image: request.image,
       name: request.name,
-      auth: parts.auth,
+      auth: Secret.reveal(parts.auth),
       created_at: parse_time(tags[@tag_created_at]),
       raw: %{"instance_ids" => [id]}
     }
