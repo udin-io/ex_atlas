@@ -1,7 +1,8 @@
 defmodule ExAtlas.Providers.HTTP do
   @moduledoc """
   The `Req` plumbing every REST provider shares: the Bearer credential,
-  telemetry, the caller's `req_options` and response normalisation.
+  telemetry, the caller's `req_options`, response normalisation, and the
+  retry rule for a request that rents something.
   """
 
   @doc """
@@ -78,6 +79,18 @@ defmodule ExAtlas.Providers.HTTP do
   def handle_response({:error, other}, _expected, provider) do
     {:error, ExAtlas.Error.new(:transport, provider: provider, raw: other)}
   end
+
+  @doc """
+  The `retry` option for a request that rents something, such as a spawn
+  `POST`: retry a 429 only.
+
+  A 5xx or a timeout can arrive after the cloud acted, so a retry there rents
+  a second resource that nothing tracks. A 429 means the cloud did nothing.
+  Req honours the response's `Retry-After`.
+  """
+  @spec retry_rate_limited(Req.Request.t(), Req.Response.t() | Exception.t()) :: boolean()
+  def retry_rate_limited(_request, %Req.Response{status: 429}), do: true
+  def retry_rate_limited(_request, _response_or_exception), do: false
 
   defp status_in?(status, %Range{} = range), do: status in range
   defp status_in?(status, expected) when is_integer(expected), do: status == expected

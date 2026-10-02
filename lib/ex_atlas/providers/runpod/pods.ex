@@ -7,18 +7,20 @@ defmodule ExAtlas.Providers.RunPod.Pods do
   lives in `ExAtlas.Providers.RunPod.Translate`.
   """
 
+  alias ExAtlas.Providers.HTTP
   alias ExAtlas.Providers.RunPod.Client
 
   @doc """
   POST /pods — create a pod. `body` is already in Runpod's native shape.
 
-  Never retried: a create that timed out or answered 5xx may still have made a
-  pod, and a retry would rent a second one that nothing tracks.
+  Retried on a 429 only (`ExAtlas.Providers.HTTP.retry_rate_limited/2`): a
+  create that timed out or answered 5xx may still have made a pod, and a retry
+  would rent a second one that nothing tracks.
   """
   def create(ctx, body) do
     ctx
     |> Client.management()
-    |> Req.post(url: "/pods", json: body, retry: false)
+    |> Req.post(url: "/pods", json: body, retry: &HTTP.retry_rate_limited/2)
     |> Client.handle_response(201)
   end
 
