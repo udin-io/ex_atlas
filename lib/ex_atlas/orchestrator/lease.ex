@@ -85,6 +85,8 @@ defmodule ExAtlas.Orchestrator.Lease do
       owner: Keyword.fetch!(opts, :owner),
       ttl_ms: ttl!(Keyword.get_lazy(opts, :ttl_ms, &configured_ttl/0)),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
+      renewed_at: nil,
+      held_since: nil,
       skipped: MapSet.new()
     }
 
@@ -117,8 +119,9 @@ defmodule ExAtlas.Orchestrator.Lease do
   defp renew(state, now) do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
       :ok ->
+        state = hold(state, now)
         release_lost_trackers(state)
-        claim(state, now)
+        if now - state.held_since >= state.ttl_ms, do: claim(state, now)
         state
 
       other ->
@@ -171,6 +174,15 @@ defmodule ExAtlas.Orchestrator.Lease do
       do: Adopter.refusal(record),
       else: "its record is not signed by this node's key"
   end
+
+  # `held_since` is the start of this node's unbroken run of renewals. A node
+  # claims only once it has held its lease a full ttl: at boot, and after its
+  # own lease lapsed (a database outage expires every lease at once), every
+  # live node then renews before any of them claims.
+  defp hold(%{renewed_at: at, ttl_ms: ttl} = state, now) when is_integer(at) and now - at < ttl,
+    do: %{state | renewed_at: now}
+
+  defp hold(state, now), do: %{state | renewed_at: now, held_since: now}
 
   # On every renewal, not only after a lapse this node's clock saw: skew, a
   # late write, a forged expiry or a claim before this node's first renewal

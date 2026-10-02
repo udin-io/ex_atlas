@@ -80,6 +80,21 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     pid
   end
 
+  # A Lease that has renewed without a gap for one full ttl, by its own
+  # clock, so it claims on its last tick.
+  defp held_lease!(owner, opts \\ []) do
+    {:ok, clock} = Agent.start_link(&now/0)
+    t0 = Agent.get(clock, & &1)
+    pid = start_lease!(owner, Keyword.put(opts, :clock, fn -> Agent.get(clock, & &1) end))
+
+    for at <- [t0 + div(@ttl, 2), t0 + @ttl] do
+      Agent.update(clock, fn _ -> at end)
+      tick!(pid)
+    end
+
+    pid
+  end
+
   defp tick!(pid) do
     send(pid, :tick)
     :sys.get_state(pid)
@@ -170,7 +185,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       %{id: id} = orphaned_task("m1")
       expire!("m1")
 
-      start_lease!("m2")
+      held_lease!("m2")
 
       assert Orchestrator.list_ids() == [id]
       assert {:ok, record} = Store.get(id)
@@ -183,7 +198,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       %{id: id} = orphaned_task("m1")
       :ok = Store.renew_lease("m1", now() + @ttl)
 
-      start_lease!("m2")
+      held_lease!("m2")
 
       assert Orchestrator.list_ids() == []
       assert {:ok, %{owner: "m1"}} = Store.get(id)
@@ -194,7 +209,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       :ok = Mock.forget(id)
       expire!("m1")
 
-      start_lease!("m2")
+      held_lease!("m2")
 
       assert Orchestrator.list_ids() == []
       assert Store.get(id) == :error
@@ -204,7 +219,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       %{id: id} = orphaned_task("m1")
       expire!("m1")
 
-      log = capture_log(fn -> start_lease!("m2", store: RenewFails) end)
+      log = capture_log(fn -> held_lease!("m2", store: RenewFails) end)
 
       assert log =~ "could not renew the lease of \"m2\""
       assert Orchestrator.list_ids() == []
@@ -219,7 +234,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       log =
         capture_log(fn ->
-          pid = start_lease!("m2")
+          pid = held_lease!("m2")
           tick!(pid)
         end)
 
@@ -227,6 +242,50 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       assert Orchestrator.list_ids() == []
       assert {:ok, %{owner: "m1"}} = Store.get(id)
       assert pod_status(id) == :running
+    end
+  end
+
+  describe "when a node claims" do
+    defp clocked_lease!(owner) do
+      {:ok, clock} = Agent.start_link(&now/0)
+      pid = start_lease!(owner, clock: fn -> Agent.get(clock, & &1) end)
+      {pid, clock, Agent.get(clock, & &1)}
+    end
+
+    defp tick_at!(pid, clock, at) do
+      Agent.update(clock, fn _ -> at end)
+      tick!(pid)
+    end
+
+    # After a database outage every lease reads expired. The first node back
+    # must not take every other live node's tasks.
+    test "claims nothing until it has held its own lease for one full ttl" do
+      %{id: id} = orphaned_task("m1")
+      expire!("m1")
+      {lease, clock, t0} = clocked_lease!("m2")
+
+      tick_at!(lease, clock, t0 + @ttl - 1)
+      assert {:ok, %{owner: "m1"}} = Store.get(id)
+
+      tick_at!(lease, clock, t0 + @ttl)
+      assert {:ok, %{owner: "m2"}} = Store.get(id)
+    end
+
+    test "after its own lease lapsed, holds it a full ttl again before claiming" do
+      {lease, clock, t0} = clocked_lease!("m2")
+      tick_at!(lease, clock, t0 + div(@ttl, 2))
+      %{id: id} = orphaned_task("m1")
+      expire!("m1")
+      as_owner("m2")
+
+      # No renewal for a full ttl: m2's own lease lapsed in between.
+      lapsed = t0 + div(@ttl, 2) + @ttl
+      tick_at!(lease, clock, lapsed)
+      tick_at!(lease, clock, lapsed + @ttl - 1)
+      assert {:ok, %{owner: "m1"}} = Store.get(id)
+
+      tick_at!(lease, clock, lapsed + @ttl)
+      assert {:ok, %{owner: "m2"}} = Store.get(id)
     end
   end
 
@@ -241,7 +300,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       log =
         capture_log(fn ->
-          pid = start_lease!("m2")
+          pid = held_lease!("m2")
           tick!(pid)
         end)
 

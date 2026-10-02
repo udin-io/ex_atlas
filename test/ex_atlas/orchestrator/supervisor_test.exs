@@ -188,11 +188,11 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
         :ok = Store.renew_lease("m1", System.system_time(:millisecond) - 1)
       end)
 
-      TestOrchestrator.put_env(reap_owner: "m2")
+      # m2 claims once it has held its own lease one ttl.
+      TestOrchestrator.put_env(reap_owner: "m2", lease_ttl_ms: 1_000)
       boot(db)
-      :sys.get_state(Lease)
 
-      assert Orchestrator.list_ids() == [compute.id]
+      assert await(fn -> Orchestrator.list_ids() == [compute.id] end)
       assert {:ok, %{owner: "m2"}} = Store.get(compute.id)
     end
 
@@ -206,8 +206,14 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
       assert_receive {:DOWN, ^ref, :process, ^tracker, :killed}, 2_000
       shutdown()
 
-      TestOrchestrator.put_env(reap_owner: "m2")
+      with_repo(db, fn ->
+        :ok = Store.renew_lease("m1", System.system_time(:millisecond) + 60_000)
+      end)
+
+      TestOrchestrator.put_env(reap_owner: "m2", lease_ttl_ms: 1_000)
       boot(db)
+      # Past the ttl m2 must hold before it claims, and one more tick.
+      Process.sleep(1_500)
       :sys.get_state(Lease)
 
       assert Orchestrator.list_ids() == []
@@ -308,6 +314,21 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
   end
 
   defp shutdown, do: stop_supervised!(:host)
+
+  # Polls `fun` every 10 ms for up to 3 s.
+  defp await(fun, tries \\ 300) do
+    cond do
+      fun.() ->
+        true
+
+      tries == 0 ->
+        false
+
+      true ->
+        Process.sleep(10)
+        await(fun, tries - 1)
+    end
+  end
 
   defp with_repo(database, fun) do
     start_supervised!({Repo, database: database, log: false})
