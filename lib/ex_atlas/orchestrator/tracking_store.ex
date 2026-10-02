@@ -118,10 +118,12 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   A record written before this rule holds the values: its adopted tracker
   seals them, and its respawn still sends them. Every rewrite of the record
   (a claim, a cost update, a respawn) stores the names alone, so the values
-  serve one adoption and no more. A host store that returns the marker as
-  the string `"not_stored"` refuses the respawn the same way. A host store that drops `:env`
-  from the opts leaves nothing to refuse on, and its adopted respawn runs with
-  no environment.
+  serve one adoption and no more.
+
+  A host store that returns the marker as the string `"not_stored"` refuses
+  the respawn the same way. A host store that drops `:env` from the opts
+  leaves nothing to refuse on, and its adopted respawn runs with no
+  environment.
 
   ## A store shared by several nodes
 
