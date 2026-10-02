@@ -8,7 +8,6 @@ if Code.ensure_loaded?(Igniter) do
     alias Igniter.Code.Function
     alias Igniter.Code.Keyword, as: IgniterKeyword
     alias Igniter.Code.List, as: IgniterList
-    alias Igniter.Project.Config
     alias Sourceror.Zipper
 
     @guide_url "https://hexdocs.pm/ex_atlas/upgrading.html"
@@ -105,7 +104,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp sets_reap_owner?(igniter, file) do
-      Config.configures_key?(igniter, file, :ex_atlas, [:orchestrator, :reap_owner])
+      config_values(igniter, file, :ex_atlas, [:orchestrator, :reap_owner]) != []
     end
 
     @doc """

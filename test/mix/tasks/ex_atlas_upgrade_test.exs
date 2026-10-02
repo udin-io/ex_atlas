@@ -161,6 +161,25 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
     end
 
+    test "finds a reap owner inside a runtime.exs block" do
+      igniter =
+        upgrade_0_7(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, start_orchestrator: true
+          """,
+          "config/runtime.exs" => """
+          import Config
+
+          if config_env() == :prod do
+            config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
+          end
+          """
+        })
+
+      refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
+    end
+
     test "stays quiet about the reap owner when the orchestrator is not started" do
       igniter =
         upgrade_0_7(%{
