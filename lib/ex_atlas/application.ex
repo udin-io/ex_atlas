@@ -17,6 +17,10 @@ defmodule ExAtlas.Application do
       `ExAtlas.Orchestrator.Adopter` that re-adopts persisted compute at boot
       and releases the Reaper's gate.
 
+      A host whose tracking store lives in its own repo starts the same tree
+      itself, after the repo, with `ExAtlas.Orchestrator.Supervisor` and
+      `start_orchestrator: false`.
+
     * **Fly platform ops** (default on, disable via
       `config :ex_atlas, :fly, enabled: false`) — boots the token storage, token
       server, log streamer supervisor, and (when the dispatcher mode is
@@ -25,17 +29,6 @@ defmodule ExAtlas.Application do
       safely disable the tree.
   """
   use Application
-
-  alias ExAtlas.Callback.Limiter
-
-  alias ExAtlas.Orchestrator.{
-    Adopter,
-    ComputeRegistry,
-    ComputeServer,
-    ComputeSupervisor,
-    Reaper,
-    TrackingStore
-  }
 
   @impl true
   def start(_type, _args) do
@@ -53,45 +46,7 @@ defmodule ExAtlas.Application do
   @spec orchestrator_children() :: [Supervisor.child_spec() | {module(), term()} | module()]
   def orchestrator_children do
     if Application.get_env(:ex_atlas, :start_orchestrator, false) do
-      base =
-        tracking_store_child() ++
-          [
-            {Registry, keys: :unique, name: ComputeRegistry},
-            {Task.Supervisor, name: ComputeServer.task_supervisor_name()},
-            {DynamicSupervisor, name: ComputeSupervisor, strategy: :one_for_one},
-            Limiter
-          ]
-
-      # The Adopter goes last: it needs the store, the Registry and the
-      # DynamicSupervisor, and it signals the Reaper, which must therefore
-      # already be registered. The Reaper starts gated, so ordering them this
-      # way costs nothing and removes the only way the signal could be lost.
-      base ++ pubsub_child() ++ [Reaper] ++ adopter_child()
-    else
-      []
-    end
-  end
-
-  # First in the list, so that in a `:one_for_one` tree — where shutdown is the
-  # reverse of startup — it is still there when the trackers run `terminate/2`
-  # and delete their records on the way out.
-  defp tracking_store_child do
-    case TrackingStore.impl() do
-      nil -> []
-      store -> [{store, []}]
-    end
-  end
-
-  defp adopter_child do
-    case TrackingStore.impl() do
-      nil -> []
-      _store -> [Adopter]
-    end
-  end
-
-  defp pubsub_child do
-    if Code.ensure_loaded?(Phoenix.PubSub) do
-      [{Phoenix.PubSub, name: ExAtlas.PubSub}]
+      ExAtlas.Orchestrator.Supervisor.children()
     else
       []
     end

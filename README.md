@@ -1325,7 +1325,7 @@ Seven things to know before you rely on it:
   `tmp`), and **a Fly machine with no attached volume gets a fresh filesystem
   on every deploy** — the store comes up empty, adoption silently does nothing,
   and the pods are reaped anyway. Mount a volume and point `:storage_path` at
-  it, or supply your own store.
+  it, or keep the records in your database (see "In your own database").
 - **The behaviour is the real feature.** `ExAtlas.Orchestrator.TrackingStore`
   is five callbacks; implement it against Postgres or anything else you already
   trust to survive a deploy, and set
@@ -1365,6 +1365,49 @@ Seven things to know before you rely on it:
 
 Nothing here is on by default. With `persist: false` — the default — the
 orchestrator behaves exactly as it did before the store existed.
+
+#### In your own database
+
+`ExAtlas.Orchestrator.TrackingStore.Ecto` keeps the records in a table of your
+Ecto repo (Postgres or SQLite; add `ecto_sql` to your deps). The Adopter reads
+it at boot, so the orchestrator must start after the repo: you start
+`ExAtlas.Orchestrator.Supervisor` yourself instead of setting
+`start_orchestrator: true`.
+
+```elixir
+# config/runtime.exs
+config :ex_atlas, start_orchestrator: false
+config :ex_atlas, :orchestrator,
+  tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto,
+  repo: MyApp.Repo,
+  reap_owner: "web-1"
+
+# priv/repo/migrations/20261002000000_add_atlas_tracking.exs
+defmodule MyApp.Repo.Migrations.AddAtlasTracking do
+  use Ecto.Migration
+  def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()
+  def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down()
+end
+
+# lib/my_app/application.ex
+children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
+```
+
+- Each record is one `term_to_binary` blob, decoded with `[:safe]`. A row
+  that will not decode (an unknown atom, a function, another id's record)
+  makes the boot adopt nothing and reap nothing, as an unreadable DETS file
+  does.
+- With the database down, the store logs failed writes and the tracker runs
+  on; the Reaper leaves every pod alone.
+- With both `start_orchestrator: true` and the supervisor in your children,
+  the supervisor refuses to start. With no `:repo`, or a repo that is not yet
+  running, the store raises at boot.
+- A row over 1 MiB, or a compressed one, is refused like any row that will
+  not decode. Writes run in their own process, so a rollback of your own
+  `Repo.transaction` never erases a record.
+- A decoded row is not trusted input: its `base_url:` steers the adopted
+  task's provider calls, which carry your API key (issue 125). Let only your
+  app write `atlas_tracking_records`.
 
 ## Phoenix LiveDashboard integration
 
@@ -1574,8 +1617,9 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
 ## Troubleshooting & FAQ
 
 **Q: `(RuntimeError) ExAtlas.Orchestrator is not started`**
-You didn't set `config :ex_atlas, start_orchestrator: true`. The orchestrator
-is opt-in.
+The orchestrator is opt-in. Set `config :ex_atlas, start_orchestrator: true`,
+or add `ExAtlas.Orchestrator.Supervisor` to your application's children after
+your repo (see "In your own database").
 
 **Q: `{:error, %ExAtlas.Error{kind: :unauthorized}}` on every RunPod call**
 Your API key is missing or wrong. Check the resolution order:

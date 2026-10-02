@@ -7,6 +7,47 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: keep tracking records in your database (#120)
+
+`ExAtlas.Orchestrator.TrackingStore.Ecto` stores `persist: true` records in a
+table of the host's Ecto repo, so a task survives a deploy on a machine with no
+volume. `ExAtlas.Orchestrator.Supervisor` starts the orchestrator in the host's
+tree, after the repo.
+
+```elixir
+config :ex_atlas, start_orchestrator: false
+config :ex_atlas, :orchestrator,
+  tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto, repo: MyApp.Repo
+
+children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
+# after a deploy on a machine with no volume
+ExAtlas.Orchestrator.list_ids()
+# => ["pod-abc"]   (before: [] and the Reaper deleted the pod)
+```
+
+- `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up/1` creates
+  `atlas_tracking_records`; call it from a migration. `ecto_sql` is an
+  optional dependency.
+- A row that will not decode safely makes the boot adopt nothing and reap
+  nothing, as an unreadable DETS file does.
+- `ExAtlas.Orchestrator.Supervisor` refuses to start when
+  `start_orchestrator: true` is also set.
+- The orchestrator's functions now check that its tree is running, not the
+  `start_orchestrator` flag. The "not started" error names both ways to start
+  it.
+- The store refuses a compressed row and a row over 1 MiB (1,048,576 bytes),
+  since a compressed term declares its own decoded size, up to 4 GB. `put/1`
+  logs a record over 1 MiB and writes nothing.
+- The store writes in its own process, so a host that spawns inside a
+  `Repo.transaction` and rolls back keeps the record of the running pod.
+- The store refuses to start before its repo runs. `start_orchestrator: true`
+  with the Ecto store fails at boot, since ExAtlas's tree starts before the
+  host's repo.
+- A tracker whose tracking store raises (a database that is down, a row that
+  will not decode) logs it and runs on. Before, it crashed and deleted its pod.
+- The callback limiter's "not running" error names both ways to start the
+  orchestrator.
+
 ### Fixed: a Reaper that restarts reaps again (#122)
 
 With a tracking store, a Reaper that crashed and restarted waited for the

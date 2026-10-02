@@ -31,7 +31,8 @@ if Code.ensure_loaded?(Phoenix.LiveDashboard.PageBuilder) do
     buttons to render — mirrors the built-in "Kill process" convention.
 
     Open `/dashboard/atlas` to see the table. The page needs the orchestrator
-    supervision tree; enable it via `config :ex_atlas, start_orchestrator: true`.
+    supervision tree: `config :ex_atlas, start_orchestrator: true`, or
+    `ExAtlas.Orchestrator.Supervisor` in the host's children.
 
     ## What it shows
 
