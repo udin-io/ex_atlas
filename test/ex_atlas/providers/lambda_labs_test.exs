@@ -131,6 +131,16 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     end
   end
 
+  describe "get_compute/2 ids" do
+    test "an id is one path segment: a slash in it is escaped", %{bypass: bypass, opts: opts} do
+      Bypass.expect_once(bypass, "GET", "/instances/a%2F..%2Fb", fn conn ->
+        json(conn, 404, not_found())
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute("a/../b", opts)
+    end
+  end
+
   describe "list_compute/1" do
     test "follows page_token over two pages", %{bypass: bypass, opts: opts} do
       Bypass.expect(bypass, "GET", "/instances", fn conn ->

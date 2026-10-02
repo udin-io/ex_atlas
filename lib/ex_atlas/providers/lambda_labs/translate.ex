@@ -250,7 +250,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         {:halt, validation("a port must be {1..65535, :http | :tcp}, got: #{inspect(other)}")}
     end)
     |> case do
-      {:ok, acc} -> {:ok, acc |> Enum.reverse() |> Enum.uniq()}
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
       error -> error
     end
   end

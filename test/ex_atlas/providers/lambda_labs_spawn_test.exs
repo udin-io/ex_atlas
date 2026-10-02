@@ -340,6 +340,47 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
   end
 
+  describe "spawn_compute/1 ports and launch answer" do
+    test "a port that is not {1..65535, :http | :tcp} is :validation, and no launch", %{
+      opts: opts
+    } do
+      for port <- [{0, :http}, {65_536, :tcp}, {8000, :udp}, 8000] do
+        assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+                 ExAtlas.spawn_compute(opts ++ [ports: [port]]),
+               "expected #{inspect(port)} to be refused"
+
+        assert message =~ "port"
+      end
+    end
+
+    test "ports too many for one 128-character tag are :validation, and no launch", %{
+      opts: opts
+    } do
+      ports = for port <- 10_000..10_013, do: {port, :http}
+
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+               ExAtlas.spawn_compute(opts ++ [ports: ports])
+
+      assert message =~ "128"
+    end
+
+    test "a launch answered 200 with no instance id is a :provider error", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+
+      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+        json(conn, 200, %{"data" => %{"instance_ids" => []}})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
+               ExAtlas.spawn_compute(opts)
+
+      assert message =~ "/instance-operations/launch"
+    end
+  end
+
   describe "spawn_compute/1 unsupported fields" do
     test "spot, template_id, network_volume_id and command are :unsupported, and no request", %{
       opts: opts
