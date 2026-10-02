@@ -16,10 +16,12 @@ if Code.ensure_loaded?(Igniter) do
 
     ## Arguments
 
-    When called directly by `mix igniter.upgrade`, receives `<from_version> <to_version>`.
-    When called directly by you, reads versions from `mix.lock` and the current
-    ex_atlas mix.exs; defaults to running *all* upgraders if versions can't be
-    determined.
+    `mix igniter.upgrade ex_atlas` passes `<from_version> <to_version>`, the
+    version in `mix.lock` before the update and the one after. Run directly,
+    the task takes `<from_version>` as `0.1.0` and `<to_version>` as the
+    installed ex_atlas version, so it runs every upgrader. Each upgrader is
+    idempotent. `mix ex_atlas.upgrade 0.7.0 0.8.0` runs the steps in that range
+    only.
 
     ## Registered upgraders
 
@@ -29,6 +31,10 @@ if Code.ensure_loaded?(Igniter) do
     """
 
     use Igniter.Mix.Task
+
+    # The version of the installed dep, read from its own mix.exs when it
+    # compiles. `Application.spec/2` returns nothing while the app is not loaded.
+    @atlas_version Mix.Project.config()[:version]
 
     @impl Igniter.Mix.Task
     def info(_argv, _parent) do
@@ -50,15 +56,8 @@ if Code.ensure_loaded?(Igniter) do
     defp pick_versions(igniter) do
       args = Map.get(igniter.args, :positional, %{})
       from = Map.get(args, :from) || "0.1.0"
-      to = Map.get(args, :to) || atlas_version()
+      to = Map.get(args, :to) || @atlas_version
       {from, to}
-    end
-
-    defp atlas_version do
-      case :application.get_key(:ex_atlas, :vsn) do
-        {:ok, vsn} -> to_string(vsn)
-        _ -> "0.2.0"
-      end
     end
 
     defp upgraders do

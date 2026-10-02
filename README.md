@@ -110,8 +110,10 @@ mix deps.update ex_atlas
 mix ex_atlas.upgrade
 ```
 
-The upgrade task is idempotent and runs only the steps needed between your
-previous and current ExAtlas version.
+`mix igniter.upgrade ex_atlas` passes your previous and new version, so the
+task runs only the steps between them. Run directly, `mix ex_atlas.upgrade`
+starts at 0.1.0 and runs every step; each step is idempotent.
+`mix ex_atlas.upgrade 0.7.0 0.8.0` runs one range.
 
 ## Architecture at a glance
 
