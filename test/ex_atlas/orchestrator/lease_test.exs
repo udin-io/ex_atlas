@@ -250,6 +250,58 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     end
   end
 
+  describe "a node that lost a record without a lapse of its own" do
+    defp own_task do
+      as_owner("m2")
+
+      {:ok, tracker, %{id: id}} =
+        Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "trainer:latest",
+          name: "atlas-lease",
+          mode: :task,
+          max_runtime_ms: 90 * 60 * 1_000,
+          persist: true
+        )
+
+      {tracker, id}
+    end
+
+    defp claim_as_m3!(id) do
+      to_m3 = fn record -> {:ok, TrackingStore.rewrite(Map.put(record, :owner, "m3"), true)} end
+      assert {:ok, [%{id: ^id}]} = Store.claim_expired("m3", now() + 1, to_m3)
+    end
+
+    # A database writer, or clock skew, expires m2's lease while m2's own
+    # clock says it renewed in time.
+    test "releases its tracker once another node owns the record" do
+      {tracker, id} = own_task()
+      lease = start_lease!("m2")
+      expire!("m2")
+      claim_as_m3!(id)
+
+      capture_log(fn -> tick!(lease) end)
+
+      refute Process.alive?(tracker)
+      assert {:ok, %{owner: "m3"}} = Store.get(id)
+      assert pod_status(id) == :running
+    end
+
+    # The boot Adopter started the tracker; m3 claimed the record before this
+    # node's first renewal.
+    test "releases it on the first renewal after boot" do
+      {tracker, id} = own_task()
+      expire!("m2")
+      claim_as_m3!(id)
+
+      capture_log(fn -> start_lease!("m2") end)
+
+      refute Process.alive?(tracker)
+      assert {:ok, %{owner: "m3"}} = Store.get(id)
+    end
+  end
+
   describe "a node whose lease lapsed" do
     # m2 tracks its own task. Its lease lapses (the clock jumps past it), m3
     # claims the record meanwhile, then m2 renews.

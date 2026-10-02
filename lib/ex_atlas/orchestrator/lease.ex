@@ -28,14 +28,16 @@ defmodule ExAtlas.Orchestrator.Lease do
   account, and the deadline would delete it. An owner that never renewed a
   lease (a node on an older release) never expires.
 
-  ## A slow node
+  ## A record lost to another node
 
-  A node whose renewal lands after its own lease expired may have lost
-  records to another node meanwhile. It stops its tracker of each record now
-  owned by someone else. The tracker stops without deleting the pod or
-  writing the record, even when it holds a finish report: both are the new
-  owner's now. Until that renewal, both nodes can
-  track the same pod for up to `lease_ttl_ms / 3`.
+  A node can lose a record while it still tracks it: its renewal came late,
+  its clock runs behind, or someone edited its lease row. On every
+  successful renewal it reads the record of each pod it tracks, and stops
+  each tracker whose record now names another owner. The tracker stops
+  without deleting the pod or writing the record, even when it holds a
+  finish report: both are the new owner's. Until that renewal, both nodes
+  track the pod, for up to `lease_ttl_ms / 3` while the losing node can
+  renew.
 
   ## Clocks
 
@@ -80,7 +82,6 @@ defmodule ExAtlas.Orchestrator.Lease do
       owner: Keyword.fetch!(opts, :owner),
       ttl_ms: ttl!(Keyword.get_lazy(opts, :ttl_ms, &configured_ttl/0)),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
-      renewed_at: nil,
       skipped: MapSet.new()
     }
 
@@ -113,9 +114,9 @@ defmodule ExAtlas.Orchestrator.Lease do
   defp renew(state, now) do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
       :ok ->
-        if lapsed?(state, now), do: stop_lost_trackers(state)
+        release_lost_trackers(state)
         claim(state, now)
-        %{state | renewed_at: now}
+        state
 
       other ->
         Logger.warning(
@@ -126,11 +127,6 @@ defmodule ExAtlas.Orchestrator.Lease do
         state
     end
   end
-
-  # The previous renewal's lease ran out before this one: another node may
-  # have claimed records this node still tracks.
-  defp lapsed?(%{renewed_at: nil}, _now), do: false
-  defp lapsed?(%{renewed_at: at, ttl_ms: ttl}, now), do: now - at >= ttl
 
   defp claim(state, now) do
     lease = self()
@@ -173,13 +169,16 @@ defmodule ExAtlas.Orchestrator.Lease do
       else: "its record is not signed by this node's key"
   end
 
-  defp stop_lost_trackers(state) do
+  # On every renewal, not only after a lapse this node's clock saw: skew, a
+  # late write, a forged expiry or a claim before this node's first renewal
+  # all lose records without one.
+  defp release_lost_trackers(state) do
     for id <- Orchestrator.list_ids(),
         lost?(state, id),
         {:ok, pid} <- [Orchestrator.lookup(id)] do
       Logger.warning(
-        "[ExAtlas.Orchestrator.Lease] the lease of #{inspect(state.owner)} lapsed and another " <>
-          "node now owns #{inspect(id)}; stopping this node's tracker and leaving the pod to it."
+        "[ExAtlas.Orchestrator.Lease] another node now owns #{inspect(id)}; stopping " <>
+          "#{inspect(state.owner)}'s tracker and leaving the pod to it."
       )
 
       ComputeServer.release(pid)
