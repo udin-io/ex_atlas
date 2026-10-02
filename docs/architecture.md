@@ -176,7 +176,17 @@ A node can die after the provider rents the replacement and before
 writes `respawning: n` into the old record. The next boot's tracker counts
 attempt `n` as spent and registers `:none`, which matches no token, until its
 own respawn registers `n + 1`. It logs a warning naming the pod name; the
-Reaper deletes the orphan, which no record names.
+Reaper deletes the orphan, which no record names, when its provider is in
+`:reap_providers`. `spawn/1` warns when a respawning task's provider is not
+(#118); `:vast` is not by default.
+
+The tracker checks a report against the attempt in its opts' callback
+descriptor, which every respawn writes, while `respawns` counts the budget.
+The two differ only in an interrupted adoption. If the first poll reads the
+record's pod alive again (an outbid spot pod that won back its bid), the
+tracker leaves `:none` and registers that pod's own attempt (#118). With
+`status_poll_ms: false` no poll runs, and the pod's reports get 410 until the
+deadline.
 
 ```mermaid
 sequenceDiagram
@@ -196,6 +206,9 @@ sequenceDiagram
   Note over CS2: respawns 1, Registry value :none
   B->>Cb: POST /finish, attempt 1
   Cb-->>B: 410
+  alt first poll reads pod A alive again
+    CS2->>Cb: Registry value attempt 0, pod A's own
+  end
   CS2->>P: spawn_compute, attempt 2
   P-->>C: rented
   CS2->>St: record C, respawns 2, respawning nil

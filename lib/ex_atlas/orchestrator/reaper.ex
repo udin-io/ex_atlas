@@ -26,6 +26,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   touches pods spawned by other tools on the same RunPod account. Set it to
   `""` to disable the safeguard.
 
+  `:vast` is not in the default `:reap_providers`. A Vast label is free text
+  a user types in Vast's console, so the prefix can match an instance ExAtlas
+  never rented; opt in once your own instances carry no `atlas-` label.
+  `ExAtlas.Orchestrator.spawn/1` warns when a task that can respawn runs on a
+  provider outside `:reap_providers`: a node that dies mid-respawn leaves the
+  replacement with no record, and only the Reaper deletes it.
+
   ## "Ours" means the Registry *or* the store
 
   A tracker in the Registry is the live answer, and it is the only one a node
