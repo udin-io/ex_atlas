@@ -558,7 +558,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       %{
         new_state(compute, opts, tracking)
         | respawns: spent_respawns(record),
-          interrupted_respawn?: is_integer(Map.get(record, :respawning)),
+          interrupted_respawn?: is_integer(interrupted_attempt(record)),
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
@@ -664,11 +664,27 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # A respawn that was renting when the node died spent its attempt: the
   # provider may have rented the replacement, which no record names (risk 51).
-  # A record without the field (0.8.0's) or with `nil` started none.
-  defp spent_respawns(%{respawning: attempt}) when is_integer(attempt), do: attempt
-  defp spent_respawns(record), do: record.respawns
+  defp spent_respawns(record), do: interrupted_attempt(record) || record.respawns
 
-  defp warn_interrupted_respawn(%{respawning: attempt} = record) when is_integer(attempt) do
+  # Only an attempt past `respawns` was started and not finished. A record
+  # without the field (0.8.0's) or with `nil` started none. So did one whose
+  # value is not past `respawns`: a host column's default of 0, or an intent an
+  # earlier build's `carry_record` copied onto the replacement after a
+  # rollback. Reading those as interrupted would refuse the live pod.
+  defp interrupted_attempt(%{respawning: attempt, respawns: respawns})
+       when is_integer(attempt) and attempt > respawns,
+       do: attempt
+
+  defp interrupted_attempt(_record), do: nil
+
+  defp warn_interrupted_respawn(record) do
+    case interrupted_attempt(record) do
+      nil -> :ok
+      attempt -> log_interrupted_respawn(record, attempt)
+    end
+  end
+
+  defp log_interrupted_respawn(record, attempt) do
     Logger.warning(
       "[ExAtlas.Orchestrator.ComputeServer] adopting #{record.id}: the node stopped while it " <>
         "rented the replacement for attempt #{attempt}. A pod named " <>
@@ -677,8 +693,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         "#{inspect(record.provider)} is in :reap_providers; otherwise delete it by hand."
     )
   end
-
-  defp warn_interrupted_respawn(_record), do: :ok
 
   # What is left of a wall-clock budget, measured from the spawn that started
   # it. `0` means the budget is gone and the deadline fires on the next pass

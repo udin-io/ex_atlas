@@ -1878,9 +1878,12 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
 
     # A record 0.8.0 wrote has no `:respawning`; a host store that nils a
-    # field it does not know returns `nil`. Both adopt as before this field:
-    # the current pod reports, and the budget is what `respawns` says.
-    for shape <- [:missing, nil] do
+    # field it does not know returns `nil`. A host column with a default
+    # returns 0, and a rollback's `carry_record` copies a stale intent equal to
+    # `respawns`: neither is an attempt beyond `respawns`. All adopt as before
+    # this field: the current pod reports, and the budget is what `respawns`
+    # says.
+    for shape <- [:missing, nil, 0] do
       test "a record with :respawning #{inspect(shape)} adopts and respawns as before" do
         compute =
           orphaned_task(
@@ -1896,7 +1899,7 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
         record =
           case unquote(shape) do
             :missing -> Map.delete(record, :respawning)
-            nil -> Map.put(record, :respawning, nil)
+            value -> Map.put(record, :respawning, value)
           end
 
         :ok = Memory.put(record)
