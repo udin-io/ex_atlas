@@ -31,8 +31,13 @@ POST /atlas/cb/finish  Bearer <B's token, attempt 1>
 - The record schema stays at version 3. A record without `:respawning`
   (0.8.0's) or with `nil` adopts as before. A host store that maps fields to
   columns needs a nullable integer `respawning` column; without one the
-  orphan's token passes as before. Rolling back: an earlier build ignores the
-  field.
+  orphan's token passes as before. Only a value past `respawns` counts, so a
+  column default of 0 reads as no respawn.
+- Rolling back: an earlier build ignores the field, and its respawn copies it
+  onto the replacement's record. This build reads that stale value as no
+  respawn, since it is not past `respawns`.
+- A respawn refused before the rent (no `respawn_credentials:` resolver)
+  records no attempt.
 
 ### Added: Vast.ai `spot: true` rents interruptible offers (#112)
 
