@@ -547,6 +547,45 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       refute "trainer-adopted-env-marked:latest" in env_images()
     end
 
+    test "adopts, and a respawn after adoption ends the task without renting" do
+      compute = orphaned_env_task("trainer-adopted-env:latest")
+      id = compute.id
+
+      assert {:ok, %{opts: opts}} = Memory.get(id)
+      assert opts[:env] == %{"HF_TOKEN" => :not_stored, "WANDB_PROJECT" => :not_stored}
+
+      pid = adopt_and_preempt(id)
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed,
+                       {:preempted, %ExAtlas.Error{kind: :validation, message: message}}}},
+                     2_000
+
+      assert message =~ ":env values (HF_TOKEN, WANDB_PROJECT) are not stored"
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute "trainer-adopted-env:latest" in env_images()
+      assert :error = Memory.get(id)
+    end
+
+    test "scrub_keys: [:env] keeps the marker, so the respawn is still refused" do
+      TestOrchestrator.put_env(scrub_keys: [:env])
+      compute = orphaned_env_task("trainer-adopted-env-scrubbed:latest")
+      id = compute.id
+
+      assert {:ok, %{opts: opts}} = Memory.get(id)
+      assert opts[:env] == :not_stored
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation}}}},
+                     2_000
+
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-adopted-env-scrubbed:latest" in env_images()
+    end
+
     test "a record whose env: is the bare marker refuses the respawn" do
       compute = orphaned_env_task("trainer-adopted-env-bare:latest")
       id = compute.id
