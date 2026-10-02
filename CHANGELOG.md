@@ -7,12 +7,12 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
-### Added: a live node deletes a dead owner's untracked pods (#144)
+### Added: a live node deletes a dead owner's untracked pods, opt-in (#144)
 
 A machine destroyed while it ran `spawn/1` sessions left their pods billing
 with no tracker, and every other node only logged them. With
-`TrackingStore.Ecto`, `:reap_owner` and a callback secret, the Reaper now
-deletes an untracked pod named with another owner once that owner's lease has
+`reap_dead_owners: true`, `TrackingStore.Ecto`, `:reap_owner` and a callback
+secret, the Reaper now deletes an untracked pod named with another owner once that owner's lease has
 stayed expired, unchanged, for `:reap_dead_owner_after_ms` (15 minutes by
 default, from two `lease_ttl_ms` to 24 hours):
 
@@ -23,18 +23,19 @@ default, from two `lease_ttl_ms` to 24 hours):
 It keeps the pod when a connected node reports that owner, when any
 connected node reports no valid owner or cannot report one, and when this
 node has not renewed its own lease for the whole window. A node that just
-booted waits a full window. `reap_dead_owners: false` turns it off. A store
-of your own opts in with the optional `expired_leases/1` callback.
+booted waits a full window. A store of your own opts in with the optional
+`expired_leases/1` callback.
 
 A delete that raises or exits no longer stops the Reaper's tick: it logs the
 error's kind and the next pod goes on.
 
-- **Upgrade:** the deletion trusts `atlas_owner_leases`, whose rows are not
-  signed yet (#148). An unclustered live node loses its untracked pods when
-  it is cut off from the database for the whole window, or renews no lease
-  (no callback secret, DETS, an older release) and has an expired row. Give
-  every node the same `lease_ttl_ms`, cluster the nodes, let only the app
-  write the table, or set `reap_dead_owners: false`.
+- **Upgrade:** off by default until lease rows are signed (#148); set
+  `config :ex_atlas, :orchestrator, reap_dead_owners: true` to turn it on.
+  Until then the deletion trusts `atlas_owner_leases`: with it on, an
+  unclustered live node loses its untracked pods when it is cut off from the
+  database for the whole window, or renews no lease (no callback secret,
+  DETS, an older release) and has an expired row. Give every node the same
+  `lease_ttl_ms`, cluster the nodes, and let only the app write the table.
 
 ## v0.9.0 — 2026-10-02
 

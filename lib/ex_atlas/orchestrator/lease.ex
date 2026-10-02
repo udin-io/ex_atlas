@@ -55,7 +55,8 @@ defmodule ExAtlas.Orchestrator.Lease do
   with its expiry. An owner whose expiry stays the same for
   `:reap_dead_owner_after_ms` on this node's monotonic clock is dead
   (`dead_owners/0`), and `ExAtlas.Orchestrator.Reaper` deletes its untracked
-  pods.
+  pods when `reap_dead_owners: true` is set (off by default until lease rows
+  are signed, issue 148).
 
       config :ex_atlas, :orchestrator, reap_dead_owner_after_ms: :timer.minutes(15)
 

@@ -107,8 +107,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   ## A dead owner's pods
 
-  With `ExAtlas.Orchestrator.TrackingStore.Ecto` and a running
-  `ExAtlas.Orchestrator.Lease`, the Reaper also deletes an untracked pod
+  Off by default until lease rows are signed (issue 148). With
+  `reap_dead_owners: true`, `ExAtlas.Orchestrator.TrackingStore.Ecto` and a
+  running `ExAtlas.Orchestrator.Lease`, the Reaper also deletes an untracked pod
   whose name carries another owner, once `ExAtlas.Orchestrator.Lease.dead_owners/0`
   reports that owner dead: its lease stayed expired, with the same expiry,
   for `:reap_dead_owner_after_ms` (15 minutes by default) while this node
@@ -126,12 +127,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   written once by itself or by anyone who can write that table; and one
   whose row a writer keeps pinning to an old expiry. Cluster the nodes, let
   only the app write the table, and give every node the same
-  `lease_ttl_ms`. Issue 148 signs the rows. To turn the deletion off:
+  `lease_ttl_ms`. Issue 148 signs the rows and turns the deletion on by
+  default. Until then, opt in:
 
-      config :ex_atlas, :orchestrator, reap_dead_owners: false
+      config :ex_atlas, :orchestrator, reap_dead_owners: true
 
-  Any value but `true` turns it off. A pod a dead owner's record still names
-  stays, as today.
+  Any other value, or none, leaves it off. A pod a dead owner's record still
+  names stays, as today.
 
   ## The grace window
 

@@ -181,7 +181,8 @@ A pod m1 spawned without `persist: true` has no record to claim. Each
 renewal also reads the expired leases (`expired_leases/1`, #144) and watches
 each owner with its expiry on m2's monotonic clock. Once m1's expiry has
 stayed the same for `:reap_dead_owner_after_ms`, m2's Reaper deletes m1's
-untracked pods:
+untracked pods. This is off unless `reap_dead_owners: true` until lease rows
+are signed (#148):
 
 ```mermaid
 sequenceDiagram
