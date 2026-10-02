@@ -5,6 +5,14 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Release 0.9.0 (#141)
+
+| Decision | Alternative not taken | Where |
+|---|---|---|
+| A `"0.9.0"` upgrader step that adds a notice when the host starts the orchestrator and no config file sets `[:callback, :secret]` | The guide alone: the secret decides both #131 and #138 for every persisted task, and the upgrader can see the config | #141 |
+| A notice, not a warning | A warning: a node with no `persist: true` task needs no secret | #141 |
+| The upgrader reads the secret and `:reap_owner` with `OrchestratorConfig.config_values/4`, inside `if` blocks too | `Igniter.Project.Config.configures_key?/4`: it reads top-level calls only, so a key set under `if config_env() == :prod` gave a false notice | #141 |
+
 ## Database tracking store (milestone 9)
 
 | Decision | Alternative not taken | Where |

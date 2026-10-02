@@ -32,7 +32,7 @@ database and no web UI. It runs inside the host application's VM.
 | Orchestrator | listed below |
 | Fly ops | `ExAtlas.Fly`, `Fly.Deploy`, `Fly.Logs.*`, `Fly.Tokens.*`, `Fly.TokenStorage` (DETS) |
 | Dashboard | `ExAtlas.LiveDashboard.ComputePage` |
-| Installer | `mix ex_atlas.install` (`--tracking-store ecto` writes the migration, config and supervisor child), `mix ex_atlas.upgrade` (Igniter; the 0.8.0 step only warns, see `guides/upgrading.md`). `Mix.ExAtlas.OrchestratorConfig` holds the reap-owner check both share |
+| Installer | `mix ex_atlas.install` (`--tracking-store ecto` writes the migration, config and supervisor child), `mix ex_atlas.upgrade` (Igniter; the 0.8.0 and 0.9.0 steps only warn, see `guides/upgrading.md`). `Mix.ExAtlas.OrchestratorConfig` holds the reap-owner check both share, and the 0.9.0 step's callback-secret check |
 | Test suites for hosts | `ExAtlas.Test.ProviderConformance`, `ExAtlas.Orchestrator.TrackingStoreConformance` (in `lib`, ExUnit only inside the tests they expand) |
 
 ## Orchestrator parts
