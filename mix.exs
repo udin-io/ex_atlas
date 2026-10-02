@@ -80,6 +80,7 @@ defmodule ExAtlas.MixProject do
         "guides/getting_started.md",
         "guides/fly.md",
         "guides/transient_pods.md",
+        "guides/data_staging.md",
         "guides/pod_callbacks.md",
         "guides/writing_a_provider.md",
         "guides/telemetry.md",

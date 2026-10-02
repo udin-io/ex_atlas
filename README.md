@@ -385,6 +385,11 @@ artifacts. ExAtlas makes no S3 call itself.
 - `persist: true` with `s3:` is refused for now: a tracking record never holds
   the credentials, so an adopted task would respawn without them.
 
+The [data staging guide](guides/data_staging.md) says what the container does
+with these variables and ships a tested entrypoint,
+[`atlas_entrypoint.sh`](guides/scripts/atlas_entrypoint.sh), that pulls the
+dataset, runs your trainer and uploads the artifacts and log.
+
 ## Pod callbacks — progress, logs, exit codes
 
 RunPod has no API for pod logs and reports no container state, so for
