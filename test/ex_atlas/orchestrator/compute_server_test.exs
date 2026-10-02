@@ -1828,6 +1828,26 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
     end
 
+    # A spawn starts a task, so its pod is attempt 0 whatever a host-prepared
+    # descriptor says. An attempt carried in would be the one the first
+    # respawn issues again, and the replaced pod's report would pass.
+    test "a host-prepared descriptor with an attempt still refuses the replaced pod",
+         %{base: base} do
+      {:ok, prepared} = Callback.prepare(base)
+      carried = Map.put(prepared[:callback], :attempt, 1)
+      {pid, pod_a, pod_b, _task_id} = respawned_task(Keyword.put(base, :callback, carried))
+      new_id = pod_b.id
+      ref = Process.monitor(pid)
+
+      assert post_report("/finish", pod_token(pod_a), ~s({"exit_code":0})).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+
+      # Control: the replacement reports.
+      assert post_report("/finish", pod_token(pod_b), ~s({"exit_code":3})).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 3}}}, 2_000
+    end
+
     test "the replaced pod's refused finishes do not spend the replacement's finish budget",
          %{base: base} do
       {_pid, pod_a, pod_b, _task_id} = respawned_task(base)

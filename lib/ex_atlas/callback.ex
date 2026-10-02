@@ -213,8 +213,10 @@ defmodule ExAtlas.Callback do
           {:ok, Keyword.put(opts, :callback, build(url, opts))}
         end
 
+      # A spawn starts the task, so its pod is attempt 0. A carried attempt
+      # would be the one the first respawn issues again.
       %{task_id: _} = already_prepared ->
-        {:ok, Keyword.put(opts, :callback, Map.put_new(already_prepared, :attempt, 0))}
+        {:ok, Keyword.put(opts, :callback, Map.put(already_prepared, :attempt, 0))}
 
       other ->
         {:error, {:invalid_callback, other}}
