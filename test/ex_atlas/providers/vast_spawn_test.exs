@@ -488,6 +488,24 @@ defmodule ExAtlas.Providers.VastSpawnTest do
         end
       end
     end
+
+    # A 307 or 308 re-sends the body, env values included, to its Location.
+    test "a redirect is not followed: the env goes to no other host", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      elsewhere = Bypass.open()
+      Bypass.down(elsewhere)
+
+      Bypass.expect_once(bypass, "PUT", "/api/v0/asks/1", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.resp(307, "")
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 307}} =
+               rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token})
+    end
   end
 
   describe "spawn_compute/1 rent timeout" do

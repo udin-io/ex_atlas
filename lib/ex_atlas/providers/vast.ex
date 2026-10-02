@@ -214,9 +214,12 @@ defmodule ExAtlas.Providers.Vast do
     do: is_integer(status) and status in 400..499 and status not in [401, 403, 429]
 
   # Retried on a 429 only: a rent that answered 5xx or timed out may have
-  # rented an instance already.
+  # rented an instance already. A redirect is not followed: Req would send
+  # the body, env values included, to the `Location` host.
   defp rent(ctx, %{"id" => offer_id}, body) do
-    case Client.put(ctx, "/api/v0/asks/#{offer_id}/", body, retry: &HTTP.retry_rate_limited/2) do
+    path = "/api/v0/asks/#{offer_id}/"
+
+    case Client.put(ctx, path, body, retry: &HTTP.retry_rate_limited/2, redirect: false) do
       {:ok, %{"new_contract" => id}} when is_integer(id) ->
         {:ok, Integer.to_string(id)}
 
