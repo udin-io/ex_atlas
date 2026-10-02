@@ -54,6 +54,19 @@ defmodule ExAtlas.Providers.HTTPTest do
                %{endpoint: %{id: "e1"}}
     end
 
+    test "an atom-keyed RFC 9457 body drops the rejected value too" do
+      body = %{errors: [%{location: "env", message: "bad", value: @secret}], detail: "invalid"}
+
+      assert error_raw(body, 400) == %{
+               errors: [%{location: "env", message: "bad"}],
+               detail: "invalid"
+             }
+    end
+
+    test "a 3xx status keeps env out of the error" do
+      assert error_raw(%{"env" => @secret, "location" => "/x"}, 302) == %{"location" => "/x"}
+    end
+
     test "a body with no env keeps its raw whole, and a field named environment stays" do
       body = %{"detail" => "no", "nested" => [%{"environment" => "prod", "id" => 1}]}
       assert error_raw(body, 404) == body

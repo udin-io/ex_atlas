@@ -111,9 +111,13 @@ defmodule ExAtlas.Error do
     %{body | "errors" => Enum.map(errors, &drop_value/1)}
   end
 
+  defp drop_error_values(%{errors: errors} = body) when is_list(errors) do
+    %{body | errors: Enum.map(errors, &drop_value/1)}
+  end
+
   defp drop_error_values(body), do: body
 
-  defp drop_value(%{} = error), do: Map.delete(error, "value")
+  defp drop_value(%{} = error), do: Map.drop(error, ["value", :value])
   defp drop_value(error), do: error
 
   # An error entry may be a string or an object. An object's `value` is the
