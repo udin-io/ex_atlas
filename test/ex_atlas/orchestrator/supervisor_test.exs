@@ -230,6 +230,16 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
       end
     end
 
+    # It could claim nothing: it verifies no signature. Its own records are
+    # unsigned, so no other node can claim them either.
+    test "starts no Lease on a node with no callback secret", %{database: db} do
+      Application.delete_env(:ex_atlas, :callback)
+      TestOrchestrator.put_env(reap_owner: "m2")
+      boot(db)
+
+      refute Process.whereis(Lease)
+    end
+
     test "starts no Lease with a store that has no lease callbacks", %{tmp_dir: dir} do
       TestOrchestrator.put_env(
         reap_owner: "m2",

@@ -64,7 +64,8 @@ defmodule ExAtlas.Orchestrator.Supervisor do
   from `terminate/2`. The Adopter comes last: it needs the store, the Registry
   and the DynamicSupervisor, and it signals the Reaper, which must already be
   registered. `ExAtlas.Orchestrator.Lease` follows it, only when the store
-  implements leases and `:reap_owner` is set and valid.
+  implements leases, `:reap_owner` is set and valid, and the node signs
+  records (it has a callback secret).
   """
   @spec children() :: [Supervisor.child_spec() | {module(), term()} | module()]
   def children do
@@ -94,6 +95,7 @@ defmodule ExAtlas.Orchestrator.Supervisor do
   defp lease_child do
     with store when not is_nil(store) <- TrackingStore.impl(),
          true <- Lease.supported?(store),
+         true <- TrackingStore.signs?(),
          {:ok, owner} when is_binary(owner) <- Ownership.owner() do
       [{Lease, store: store, owner: owner}]
     else
