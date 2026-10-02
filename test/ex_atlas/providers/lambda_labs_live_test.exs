@@ -4,18 +4,19 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
   #
   #     LAMBDA_LABS_API_KEY=... LAMBDA_SSH_KEY_NAME=... mix test --only lambda_live
   #
-  # Each test records one point the Bypass suite cannot settle (#84):
-  # Lambda's real instance type names, whether cloud-init runs the bash
-  # `user_data` on the default image, and what an `invalid-parameters` error
-  # echoes. Set LAMBDA_LIVE_HTTP=1 once Lambda's firewall admits port 80 to
-  # assert that nginx answers too.
+  # Each test records one point the Bypass suite cannot settle: Lambda's real
+  # instance type names, whether cloud-init runs the bash `user_data` on the
+  # default image, and what an `invalid-parameters` error echoes (#84); and
+  # whether a per-instance firewall ruleset opens port 80 while SSH on port 22
+  # stays open, and whether Lambda lets the ruleset go once the instance is
+  # gone (#86). The instance test rents one instance.
   use ExUnit.Case, async: false
 
   @moduletag :lambda_live
   @moduletag timeout: 30 * 60_000
 
   alias ExAtlas.Orchestrator.UpstreamStatus
-  alias ExAtlas.Providers.LambdaLabs.Client
+  alias ExAtlas.Providers.LambdaLabs.{Client, Firewall}
 
   # Every key `Translate.instance_to_compute/2` reads.
   @read_keys ~w(id name status ip region instance_type tags)
@@ -29,7 +30,10 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
 
     # By name, not by id: a spawn that errors after Lambda launched never
     # returns an id.
-    on_exit(fn -> delete_by_name(name, opts) end)
+    on_exit(fn ->
+      delete_by_name(name, opts)
+      delete_rulesets_named(name, opts)
+    end)
 
     {:ok, opts: opts, name: name, ssh_key: ssh_key}
   end
@@ -42,7 +46,7 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
     assert Enum.all?(types, &Regex.match?(~r/\Agpu_\d+x_[a-z0-9_]+\z/, &1.id))
   end
 
-  test "an instance runs nginx from user_data, reads running with an IP, and terminates", %{
+  test "a ruleset opens port 80, keeps SSH open, and goes once the instance is gone", %{
     opts: opts,
     name: name,
     ssh_key: ssh_key
@@ -76,13 +80,29 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
       assert Map.has_key?(running.raw, key), "GET /instances/{id} has no #{key}"
     end
 
-    if System.get_env("LAMBDA_LIVE_HTTP") == "1" do
-      assert {:ok, %{status: 200}} = wait_for_http(url)
-    end
+    # The question #86 left open: does a per-instance ruleset add to Lambda's
+    # default rules (SSH stays open) or replace them? If this fails, the
+    # ruleset must add a port 22 rule.
+    assert {:ok, _} = wait_for_tcp(running.public_ip, 22),
+           "port 22 is closed: a per-instance ruleset replaces Lambda's default rules"
+
+    ctx = ctx(opts)
+    assert {:ok, rulesets} = Client.get(ctx, "/firewall-rulesets")
+    assert [mine] = Enum.filter(rulesets, &(compute.id in &1["instance_ids"]))
+    assert String.starts_with?(mine["name"], "atlas-")
+    assert [%{"protocol" => "tcp", "port_range" => [80, 80]}] = mine["rules"]
+
+    assert {:ok, %{status: 200}} = wait_for_http(url)
 
     assert :ok = ExAtlas.terminate(compute.id, opts)
     assert {:dead, reason, _} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))
     assert reason in [:vanished, :terminated]
+
+    # Lambda refuses to delete a ruleset an instance still uses; once the
+    # instance is gone the delete must work, as the next spawn's sweep needs.
+    assert :ok = Firewall.delete(ctx, mine["id"])
+    assert {:ok, after_delete} = Client.get(ctx, "/firewall-rulesets")
+    refute Enum.any?(after_delete, &(&1["id"] == mine["id"])), "Lambda kept the ruleset"
   end
 
   # A region that does not exist and a tag key Lambda's pattern refuses, so
@@ -103,6 +123,35 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
     assert {:error, %ExAtlas.Error{} = error} = result
     IO.puts("\nLambda refused the probe: #{inspect(error.status)} #{inspect(error.raw)}")
     refute inspect(error) =~ marker, "Lambda echoes user_data in its error"
+  end
+
+  defp ctx(opts), do: ExAtlas.Config.build_ctx(:lambda_labs, Keyword.delete(opts, :provider))
+
+  # sshd comes up with the instance, some seconds after it reads active.
+  defp wait_for_tcp(ip, port, tries \\ 20) do
+    case :gen_tcp.connect(String.to_charlist(ip), port, [], 5_000) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        {:ok, :open}
+
+      {:error, _} when tries > 1 ->
+        Process.sleep(6_000)
+        wait_for_tcp(ip, port, tries - 1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The ruleset outlives the instance until Lambda lets it go, so a failed run
+  # would leave it behind.
+  defp delete_rulesets_named(name, opts) do
+    with {:ok, rulesets} <- Client.get(ctx(opts), "/firewall-rulesets") do
+      for %{"id" => id, "name" => ruleset} <- rulesets,
+          String.starts_with?(ruleset, "atlas-" <> name) do
+        Firewall.delete(ctx(opts), id)
+      end
+    end
   end
 
   defp wait_until(id, opts, done?, deadline \\ System.monotonic_time(:second) + 1200) do
