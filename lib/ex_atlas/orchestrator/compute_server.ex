@@ -1522,10 +1522,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp update_record(%{store: nil}, _fun), do: :ok
 
   defp update_record(%{store: store} = state, fun) do
-    case store.get(state.compute.id) do
-      {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_env())
-      :error -> :ok
-    end
+    contain_store(state.compute.id, :ok, fn ->
+      case store.get(state.compute.id) do
+        {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_env())
+        :error -> :ok
+      end
+    end)
   end
 
   # The meter's open segment began at monotonic `since_ms`; the record keeps
@@ -1538,33 +1540,54 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp carry_record(%{store: nil}, _old_id, _new_id), do: :ok
 
   defp carry_record(%{store: store} = state, old_id, new_id) do
-    case store.get(old_id) do
-      {:ok, record} ->
-        attempt = state.respawns + 1
+    contain_store(old_id, :ok, fn ->
+      case store.get(old_id) do
+        {:ok, record} ->
+          attempt = state.respawns + 1
 
-        store.put(
-          TrackingStore.scrub_env(
-            Map.merge(record, %{
-              id: new_id,
-              respawns: attempt,
-              respawning: nil,
-              opts: next_attempt(record.opts, attempt)
-            })
+          store.put(
+            TrackingStore.scrub_env(
+              Map.merge(record, %{
+                id: new_id,
+                respawns: attempt,
+                respawning: nil,
+                opts: next_attempt(record.opts, attempt)
+              })
+            )
           )
-        )
 
-        store.delete(old_id)
+          store.delete(old_id)
 
-      :error ->
-        :ok
-    end
+        :error ->
+          :ok
+      end
+    end)
   end
 
+  # A store that cannot answer may still hold the record, so the pod is kept,
+  # as the Reaper keeps it.
   defp recorded?(%{store: nil}), do: false
-  defp recorded?(%{store: store, compute: compute}), do: match?({:ok, _}, store.get(compute.id))
+
+  defp recorded?(%{store: store, compute: compute}),
+    do: contain_store(compute.id, true, fn -> match?({:ok, _}, store.get(compute.id)) end)
 
   defp forget(%{store: nil}, _id), do: :ok
-  defp forget(%{store: store}, id), do: store.delete(id)
+  defp forget(%{store: store}, id), do: contain_store(id, :ok, fn -> store.delete(id) end)
+
+  # A host store raises when its database is down or a row will not decode. A
+  # tracker that crashed on that would delete a pod the store may still hold,
+  # so the raise is logged and the call answers `fallback`.
+  defp contain_store(id, fallback, fun) do
+    fun.()
+  rescue
+    error ->
+      Logger.error(
+        "[ExAtlas.Orchestrator.ComputeServer] tracking store raised for #{id} " <>
+          "(#{inspect(error)}); the tracker carries on and its record may be stale"
+      )
+
+      fallback
+  end
 
   # --- teardown ---
 
