@@ -1914,6 +1914,70 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert length(pods) == 2
     end
 
+    # Adopt with every poll held: the Adopter's own look, then the tracker's
+    # first poll, which is released so the tracker applies it, then the
+    # second poll, held until the caller releases it. When this returns, the
+    # tracker has applied exactly one poll.
+    defp adopt_after_one_poll do
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      me = self()
+      adopter = Task.async(fn -> Adopter.run(notify: me) end)
+      assert_receive {:blocked, :get_compute, observer}, 2_000
+      send(observer, :release)
+      assert_receive {:blocked, :get_compute, first_poll}, 2_000
+      send(first_poll, :release)
+      assert_receive {:blocked, :get_compute, second_poll}, 2_000
+      FaultyProvider.reset()
+      assert :ok = Task.await(adopter)
+      assert_receive :adoption_complete, 2_000
+      second_poll
+    end
+
+    # A spot pod that was outbid can run again (Vast restarts an outbid
+    # instance when its bid wins). The record names it, so its reports are the
+    # task's; the orphan's are not.
+    test "a record's pod that reads alive again reports, and the orphan still gets 410" do
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      :ok = Mock.set_status(old_id, :running)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      poller = adopt_after_one_poll()
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      refute_receive {:atlas_compute, ^old_id, {:task_report, _}}, 100
+
+      assert post_finish(pod_token(pod_a), 3).status == 202
+      assert_receive {:atlas_compute, ^old_id, {:task_report, %{exit_code: 3}}}, 2_000
+
+      send(poller, :release)
+    end
+
+    # The revived pod spends no attempt: the budget still counts the
+    # interrupted one, so the next replacement holds attempt 2, never the
+    # orphan's 1.
+    test "a revived pod preempted again respawns with attempt 2, and the orphan gets 410" do
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      :ok = Mock.set_status(old_id, :running)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      poller = adopt_after_one_poll()
+      :ok = Mock.set_status(old_id, :stopped)
+      send(poller, :release)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_c} = Mock.get_compute(new_id, %{})
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      assert post_finish(pod_token(pod_a), 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 100
+
+      assert post_finish(pod_token(pod_c), 5).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 5}}}, 2_000
+    end
+
     # A record 0.8.0 wrote has no `:respawning`; a host store that nils a
     # field it does not know returns `nil`. A host column with a default
     # returns 0, and a rollback's `carry_record` copies a stale intent equal to

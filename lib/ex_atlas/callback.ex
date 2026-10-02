@@ -265,7 +265,7 @@ defmodule ExAtlas.Callback do
   # it before it rents a replacement. It is `:claimless` while the current
   # pod's own token signs no attempt (a task adopted from 0.8.0), and `:none`,
   # which no token matches, while an adopted task's interrupted respawn left
-  # it no current pod.
+  # it no current pod, until a poll reads the record's pod alive again.
   defp lookup(task_id, presented) do
     with {pid, current} <- owner(task_id),
          true <- current_attempt?(presented, current),
