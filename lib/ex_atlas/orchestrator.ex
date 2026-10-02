@@ -155,8 +155,9 @@ defmodule ExAtlas.Orchestrator do
   what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
 
   The node signs the record with a key from its callback secret. With no
-  secret the record is unsigned, and the next boot adopts it only when the
-  pod's name starts with `:reap_name_prefix` (and carries the `:reap_owner`,
+  secret the record is unsigned, and the next boot adopts it only for a pod
+  this node's Reaper would delete: a provider in `:reap_providers`, and a
+  name that starts with `:reap_name_prefix` (and carries the `:reap_owner`,
   which `spawn/1` writes in). `spawn/1` warns when it will not.
 
   With `s3:` the record keeps the endpoint, region and URIs, never the keys or

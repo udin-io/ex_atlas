@@ -52,14 +52,18 @@ key.
 #         node's Reaper would not delete ...
 ```
 
-- An unsigned record adopts only when the provider's name for its pod starts
-  with `:reap_name_prefix` and, with a `:reap_owner`, carries it: the pods
-  the Reaper deletes once untracked. Any other one is kept, logged and not
-  claimed. So is one whose provider does not answer at boot; the next boot
-  checks it again. Signed records adopt as before.
+- An unsigned record adopts only for a pod the Reaper deletes once
+  untracked: its provider is in `:reap_providers`, the provider reports it
+  `:provisioning` or `:running`, the node has a `:reap_owner` or no connected
+  peers, and the name starts with `:reap_name_prefix` and carries the owner.
+  Any other one is kept, logged and not claimed. So is one whose provider
+  does not answer at boot; the next boot checks it again. Signed records
+  adopt as before.
 - **Upgrade:** a task persisted by 0.8.0, by a node with no callback secret,
-  or under a rotated secret, whose pod name lacks the prefix or this node's
-  owner, is no longer adopted after a restart. The Reaper leaves such a pod
+  or under a rotated secret, is no longer adopted after a restart when its
+  pod fails that test: for example a `:mock`, `:vast` or `:lambda_labs` task
+  under the default `reap_providers: [:runpod]`, or a name without the prefix
+  or this node's owner. The Reaper leaves such a pod
   alone too: terminate it by hand. A `persist: true` spawn on a node with no
   callback secret warns when its name will not pass.
 

@@ -185,10 +185,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   must return each record term for term, `:mac` byte for byte.
 
   An unsigned record names a pod id its writer chose, and its deadline
-  deletes that pod. So it adopts only when the provider names that pod as
-  this node's Reaper would delete it: with `:reap_name_prefix` and, with a
-  `:reap_owner`, that owner. Any other unsigned record is kept and logged,
-  and adopts nothing (see `ExAtlas.Orchestrator.Adopter`).
+  deletes that pod. So it adopts only when the provider reports a pod this
+  node's Reaper would delete once untracked: on a provider in
+  `:reap_providers`, billing, and named with `:reap_name_prefix` and the
+  `:reap_owner`. Any other unsigned record is kept and logged, and adopts
+  nothing (see `ExAtlas.Orchestrator.Adopter`).
 
   ## A store shared by several nodes
 

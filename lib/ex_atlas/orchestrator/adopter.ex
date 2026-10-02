@@ -16,7 +16,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
     * **404 / the provider does not know it** — delete the record. There is
       nothing to adopt and nothing to bill, and starting a tracker would only
       broadcast a death nobody is listening for.
-    * **anything else** — start a `ExAtlas.Orchestrator.ComputeServer` with
+    * **anything else**, for a record this node signed (an unsigned one, see
+      below) — start a `ExAtlas.Orchestrator.ComputeServer` with
       `{:adopted, record}`, which recomputes the deadline from the record's
       wall-clock anchor and polls immediately. A resource that died during the
       downtime is then classified by the tracker's own first poll, through the
@@ -28,8 +29,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
   death-classification logic — which is the thing `UpstreamStatus` was
   extracted to prevent.
 
-  A provider that cannot be reached at all is *not* a reason to skip adoption.
-  The record gets its tracker anyway, on a placeholder observation the
+  A provider that cannot be reached at all is *not* a reason to skip adopting
+  a signed record. It gets its tracker anyway, on a placeholder observation the
   immediate first poll corrects, because the carried deadline is the one thing
   that must be re-armed even when the provider is having a bad day.
 
@@ -76,11 +77,17 @@ defmodule ExAtlas.Orchestrator.Adopter do
   An adopted task deletes its pod at its deadline with this node's key, and
   whoever wrote the record chose the pod id. A record whose signature does not
   check (`ExAtlas.Orchestrator.TrackingStore.sealed?/1`) is adopted only when
-  the provider names its pod as this node's Reaper would delete it: the name
-  starts with `:reap_name_prefix` and, with a `:reap_owner`, carries that
-  owner (`ExAtlas.Orchestrator.Ownership.ours?/3`). Any other unsigned record,
-  and one whose pod the provider could not report, is skipped, kept, logged
-  and not claimed. The next boot checks it again.
+  the provider reports, for the record's provider, what this node's Reaper
+  would delete once untracked: a provider in `:reap_providers`, a pod that
+  bills (`:provisioning` or `:running`), a node that has a `:reap_owner` or
+  is not connected to others, and a name that starts with
+  `:reap_name_prefix` and carries that owner. Any other unsigned record, and one whose pod the
+  provider could not report, is skipped, kept, logged and not claimed. The
+  next boot checks it again.
+
+  The cluster test reads `Node.list/0` at boot, which may run before the
+  cluster connects, and no peer is asked for a duplicate owner, as the
+  Reaper's tick does.
 
   ## Records this build does not understand
 
