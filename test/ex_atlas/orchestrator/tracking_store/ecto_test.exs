@@ -381,6 +381,26 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
     end
 
+    # The claimer writes a blob built from the row it read. A row that moved
+    # to another owner meanwhile, even one whose lease expired too, keeps the
+    # newer copy.
+    test "writes nothing when the row moved to another expired owner since the read", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+      :ok = Store.renew_lease("m9", 1_000)
+
+      moved_first = fn record ->
+        :ok = Store.put(Map.merge(record, %{owner: "m9", user_id: "moved"}))
+        {:ok, Map.put(record, :owner, "m2")}
+      end
+
+      assert {:ok, []} = Store.claim_expired("m2", 2_000, moved_first)
+      assert {:ok, %{owner: "m9", user_id: "moved"}} = Store.get("pod-a")
+    end
+
     test "two nodes claiming at once leave each record with exactly one owner", %{
       tmp_dir: dir
     } do
