@@ -211,6 +211,24 @@ defmodule ExAtlas.Providers.RunPodTest do
       refute inspect(compute, structs: false, limit: :infinity) =~ "tsec-test-9f2c"
     end
 
+    test "a spawn answered 200 instead of 201 errors without the pod's env", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        json(conn, 200, Map.put(pod("p1", "RUNNING", "t"), "env", body["env"]))
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 200} = error} =
+               ExAtlas.spawn_compute(
+                 [gpu: :h100, image: "x", env: %{"HF_TOKEN" => "hf-secret-5d1"}] ++ opts
+               )
+
+      refute inspect(error, structs: false, limit: :infinity) =~ "hf-secret-5d1"
+    end
+
     test "inspect of the compute omits presigned URLs RunPod echoes back", %{
       bypass: bypass,
       ctx_opts: opts
@@ -262,6 +280,20 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert compute.raw["dataCenterId"] == "US-KS-2"
       refute Map.has_key?(compute.raw, "env")
       refute inspect(compute, structs: false, limit: :infinity) =~ "hf-secret-5d1"
+    end
+
+    test "a 200 body that is a list of pods errors without their env", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      echoed = Map.put(pod("pod_abc", "RUNNING", "t"), "env", %{"HF_TOKEN" => "hf-secret-5d1"})
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn -> json(conn, 200, [echoed]) end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider} = error} =
+               ExAtlas.get_compute("pod_abc", opts)
+
+      assert error.message =~ "unexpected body"
+      refute inspect(error, structs: false, limit: :infinity) =~ "hf-secret-5d1"
     end
 
     test "the status poll's compute holds no echoed env", %{bypass: bypass, ctx_opts: opts} do
