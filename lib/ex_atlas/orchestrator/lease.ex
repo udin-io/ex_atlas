@@ -272,26 +272,33 @@ defmodule ExAtlas.Orchestrator.Lease do
   end
 
   defp observe(state, watch, now, mono) do
-    if function_exported?(state.store, :expired_leases, 1) do
-      case safely(fn -> state.store.expired_leases(now) end) do
-        {:ok, expired} when is_map(expired) ->
-          for {owner, at} <- expired, Ownership.valid?(owner), is_integer(at), into: %{} do
-            case watch do
-              %{^owner => {^at, since}} -> {owner, {at, since}}
-              _new_or_moved -> {owner, {at, mono}}
-            end
-          end
+    if function_exported?(state.store, :expired_leases, 1),
+      do: observe_expired(safely(fn -> state.store.expired_leases(now) end), watch, mono),
+      else: %{}
+  end
 
-        other ->
-          Logger.warning(
-            "[ExAtlas.Orchestrator.Lease] could not read expired leases (#{inspect(other)}); " <>
-              "no owner reads as dead for a full :reap_dead_owner_after_ms after the next read."
-          )
+  defp observe_expired({:ok, expired}, watch, mono) when is_map(expired) do
+    for {owner, at} <- expired,
+        Ownership.valid?(owner),
+        is_integer(at),
+        into: %{},
+        do: {owner, {at, first_seen(watch, owner, at, mono)}}
+  end
 
-          %{}
-      end
-    else
-      %{}
+  defp observe_expired(other, _watch, _mono) do
+    Logger.warning(
+      "[ExAtlas.Orchestrator.Lease] could not read expired leases (#{inspect(other)}); " <>
+        "no owner reads as dead for a full :reap_dead_owner_after_ms after the next read."
+    )
+
+    %{}
+  end
+
+  # An expiry that moved is a renewal: its window starts again.
+  defp first_seen(watch, owner, at, mono) do
+    case watch do
+      %{^owner => {^at, since}} -> since
+      _new_or_moved -> mono
     end
   end
 
