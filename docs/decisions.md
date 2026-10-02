@@ -32,6 +32,16 @@ names the PR or issue that holds the reasoning.
 | `ensure_running!/0` checks that `ComputeSupervisor` is alive | Check `start_orchestrator`: it is false for a host-started tree | #120 |
 | Tests run on SQLite (`ecto_sqlite3`, test only) | Postgres: every checkout would need a database server | #120 |
 | The table is `atlas_tracking_records` in the repo's default prefix; MySQL is not supported | A configurable name or prefix: no host has asked. MySQL's upsert takes no conflict target | #120 |
+| The installer writes `config/config.exs`, turns a `start_orchestrator: true` there off, and only warns about one in another file | Edit `runtime.exs`: it often sets the flag under a condition | #128 |
+| A repo the installer cannot find in the application's `children` stops the whole install | Write the config and warn: `start_orchestrator: false` with no supervisor child leaves the host with no orchestrator | #128 review |
+| The installer reads `config` calls at any depth and in the `config/3` form | Igniter's top-level reader: it missed `start_orchestrator: true` under `if config_env() == :prod`, which crashes the prod boot | #128 review |
+| A repo's literal `priv:` moves the migration; another value is ignored | Refuse a repo with `priv:`: most hosts set it as a literal | #128 review |
+| `--repo` accepts any module the project defines | Only modules that `use Ecto.Repo` directly: a repo built on a host's wrapper module was refused | #128 review |
+| Several repos and no `--repo` stop the install with an issue naming them | Igniter's interactive picker: a scripted or `--yes` run would block or guess | #128 |
+| The installer inserts the supervisor right after the repo itself | `Igniter.Project.Application.add_new_child(after: [repo])`: in Igniter 0.8.4 it lands one child late, after the Endpoint in a `phx.new` app | #128 |
+| A migration that already calls the store's Migration module stops a new one | Check the migration module's name: a host that followed the README named its own | #128 |
+| The reap-owner notice fires on `start_orchestrator: true` or on any module naming `ExAtlas.Orchestrator.Supervisor` | Check the application module only: a host may start it in a nested supervisor | #128 |
+| Both conformance suites ship in `lib` and call ExUnit only inside their `quote` | Keep them in `test/support`: the guides tell hosts to `use` them | #128 |
 
 ## Vast.ai provider (feature #98)
 

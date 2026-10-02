@@ -2,23 +2,22 @@ defmodule ExAtlas.Test.ProviderConformance do
   @moduledoc """
   Shared ExUnit suite every `ExAtlas.Provider` implementation must pass.
 
-  Usage:
+  A host that writes its own provider `use`s it in a test module, which must
+  `use ExUnit.Case` first. The suite's tests expand there; this module calls
+  no ExUnit function itself, so it compiles in a host's prod build.
 
-      defmodule ExAtlas.Providers.MockTest do
+      defmodule MyCloud.ProviderTest do
         use ExUnit.Case, async: false
+
         use ExAtlas.Test.ProviderConformance,
-          provider: :mock,
-          reset: {ExAtlas.Providers.Mock, :reset, []}
+          provider: MyCloud.Provider,
+          reset: {MyCloud.TestHelpers, :reset_bypass, []}
       end
 
   The `:reset` option names a `{mod, fun, args}` tuple the suite calls in its
-  `setup` block. Real providers pass a no-op or a Bypass-based helper. When
-  the call returns a keyword list, the suite adds it to every call, so a
-  Bypass-backed provider can return `base_url:` and `api_key:`:
-
-      use ExAtlas.Test.ProviderConformance,
-        provider: :lambda_labs,
-        reset: {ExAtlas.Test.FakeLambda, :start, []}
+  `setup` block: a no-op, or a helper that resets a Bypass server. When the
+  call returns a keyword list, the suite adds it to every call, so a
+  Bypass-backed provider can return `base_url:` and `api_key:`.
   """
 
   @doc false

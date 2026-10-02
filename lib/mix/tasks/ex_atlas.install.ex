@@ -22,18 +22,54 @@ if Code.ensure_loaded?(Igniter) do
       * Creates `priv/ex_atlas_fly/` so DETS has somewhere to write on first run.
       * Adds `.gitignore` rules for the DETS files (`priv/ex_atlas_fly/*.dets`).
 
+    ## Keep tracking records in your database
+
+        mix ex_atlas.install --tracking-store ecto [--repo MyApp.Repo]
+
+    Sets up `ExAtlas.Orchestrator.TrackingStore.Ecto`, so `persist: true` tasks
+    survive a deploy on a machine with no volume:
+
+      * Writes `<timestamp>_add_atlas_tracking.exs` in the repo's migrations
+        (`priv/repo/migrations` for `MyApp.Repo`, or the repo's literal
+        `priv:`), which calls `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration`.
+        A migration that already calls it stops a second one.
+      * Sets `start_orchestrator: false` and the orchestrator's `tracking_store:`
+        and `repo:` in `config/config.exs`. Warns about a
+        `start_orchestrator: true` or another `tracking_store:` left in any
+        config file, inside an `if` block too.
+      * Puts `ExAtlas.Orchestrator.Supervisor` in your application's children,
+        right after the repo.
+
+    `--repo` picks the repo when the project has several, or names one built
+    on your own wrapper module. With no repo, a repo missing from your
+    application's `children` list, or a store other than `ecto`, the task
+    stops and changes nothing.
+
     Idempotent — re-running is safe; `mix ex_atlas.upgrade` handles version-over-version
     migrations.
     """
 
     use Igniter.Mix.Task
 
+    alias Igniter.Code.Common
+    alias Igniter.Code.Function
+    require Function
+    alias Igniter.Code.List, as: IgniterList
+    alias Igniter.Project.Config
+    alias Mix.ExAtlas.OrchestratorConfig
+    alias Sourceror.Zipper
+
+    @ecto_store ExAtlas.Orchestrator.TrackingStore.Ecto
+    @supervisor ExAtlas.Orchestrator.Supervisor
+    @other_config_files ["runtime.exs", "prod.exs", "dev.exs", "test.exs"]
+    @config_files ["config.exs" | @other_config_files]
+
     @impl Igniter.Mix.Task
     def info(_argv, _parent) do
       %Igniter.Mix.Task.Info{
         group: :ex_atlas,
-        example: "mix ex_atlas.install",
-        schema: [],
+        example: "mix ex_atlas.install --tracking-store ecto",
+        schema: [tracking_store: :string, repo: :string],
         aliases: []
       }
     end
@@ -44,6 +80,7 @@ if Code.ensure_loaded?(Igniter) do
       |> configure_fly_defaults()
       |> create_storage_dir()
       |> update_gitignore()
+      |> install_tracking_store(Keyword.get(igniter.args.options, :tracking_store))
       |> Igniter.add_notice("""
       ExAtlas installed.
 
@@ -65,6 +102,303 @@ if Code.ensure_loaded?(Igniter) do
       """)
     end
 
+    defp install_tracking_store(igniter, nil) do
+      if Keyword.has_key?(igniter.args.options, :repo) do
+        Igniter.add_warning(igniter, "--repo does nothing without --tracking-store ecto.")
+      else
+        igniter
+      end
+    end
+
+    defp install_tracking_store(igniter, "ecto") do
+      igniter = Enum.reduce(@config_files, igniter, &OrchestratorConfig.include_config/2)
+
+      case select_repo(igniter) do
+        {igniter, {:ok, repo}} ->
+          igniter
+          |> add_migration(repo)
+          |> configure_ecto_store(repo)
+          |> add_supervisor_child(repo)
+          |> OrchestratorConfig.notice_reap_owner()
+          |> Igniter.add_notice("""
+          ExAtlas keeps `persist: true` tasks in #{inspect(repo)}. Run `mix ecto.migrate` \
+          to create the atlas_tracking_records table. ExAtlas.Orchestrator.Supervisor \
+          starts after #{inspect(repo)} in your application's children.
+          """)
+
+        {igniter, {:error, message}} ->
+          Igniter.add_issue(igniter, message)
+      end
+    end
+
+    defp install_tracking_store(igniter, other) do
+      Igniter.add_issue(
+        igniter,
+        "Unknown --tracking-store #{inspect(other)}. The one store it installs is `ecto`; " <>
+          "leave the option out to keep the DETS default."
+      )
+    end
+
+    defp select_repo(igniter) do
+      {igniter, repos} = Igniter.Libs.Ecto.list_repos(igniter)
+
+      case Keyword.get(igniter.args.options, :repo) do
+        nil ->
+          {igniter, pick_repo(nil, repos)}
+
+        name ->
+          # `Igniter.Libs.Ecto.list_repos/1` finds only modules that
+          # `use Ecto.Repo` directly; a repo built on a host's own wrapper
+          # module is still a module the host names.
+          repo = Igniter.Project.Module.parse(name)
+          {exists?, igniter} = Igniter.Project.Module.module_exists(igniter, repo)
+          {igniter, pick_repo(name, if(exists?, do: [repo | repos], else: repos))}
+      end
+    end
+
+    defp pick_repo(nil, []) do
+      {:error,
+       "mix ex_atlas.install --tracking-store ecto found no Ecto repo in this project. " <>
+         "Add a repo, or keep the DETS default."}
+    end
+
+    defp pick_repo(nil, [repo]), do: {:ok, repo}
+
+    defp pick_repo(nil, repos) do
+      {:error,
+       "mix ex_atlas.install --tracking-store ecto found several Ecto repos: " <>
+         "#{Enum.map_join(repos, ", ", &inspect/1)}. Pick one with --repo."}
+    end
+
+    defp pick_repo(name, repos) do
+      repo = Igniter.Project.Module.parse(name)
+
+      if repo in repos do
+        {:ok, repo}
+      else
+        {:error,
+         "--repo #{name} is not an Ecto repo in this project. " <>
+           "Repos found: #{Enum.map_join(repos, ", ", &inspect/1)}."}
+      end
+    end
+
+    defp add_migration(igniter, repo) do
+      default_dir = default_migrations_dir(repo)
+      dir = configured_migrations_dir(igniter, repo) || default_dir
+      igniter = Igniter.include_glob(igniter, Path.join(dir, "*.exs"))
+
+      if calls_store_migration?(igniter, dir) do
+        igniter
+      else
+        igniter
+        |> Igniter.Libs.Ecto.gen_migration(repo, "add_atlas_tracking",
+          body: """
+          def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up()
+          def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down()
+          """
+        )
+        |> move_new_migration(default_dir, dir)
+      end
+    end
+
+    # Igniter's convention, and Ecto's default: `priv/<last alias segment,
+    # underscored>/migrations`.
+    defp default_migrations_dir(repo) do
+      Path.join([
+        "priv",
+        repo |> Module.split() |> List.last() |> Macro.underscore(),
+        "migrations"
+      ])
+    end
+
+    # `config :my_app, MyApp.Repo, priv: "priv/db"` moves Ecto's migrations
+    # directory. Only a literal string is read.
+    defp configured_migrations_dir(igniter, repo) do
+      app = Igniter.Project.Application.app_name(igniter)
+
+      @config_files
+      |> Enum.flat_map(&OrchestratorConfig.config_values(igniter, &1, app, [repo, :priv]))
+      |> Enum.find_value(fn value ->
+        case Common.expand_literal(value) do
+          {:ok, priv} when is_binary(priv) -> Path.join(priv, "migrations")
+          _ -> nil
+        end
+      end)
+    end
+
+    # `Igniter.Libs.Ecto.gen_migration/4` always writes to the default
+    # directory.
+    defp move_new_migration(igniter, dir, dir), do: igniter
+
+    defp move_new_migration(igniter, default_dir, dir) do
+      igniter.rewrite
+      |> Enum.map(&Rewrite.Source.get(&1, :path))
+      |> Enum.filter(&(Path.dirname(&1) == default_dir and &1 =~ "_add_atlas_tracking"))
+      |> Enum.reduce(igniter, fn path, igniter ->
+        Igniter.move_file(igniter, path, Path.join(dir, Path.basename(path)))
+      end)
+    end
+
+    defp configure_ecto_store(igniter, repo) do
+      started? = OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true)
+      replaced = other_stores(igniter, "config.exs")
+
+      igniter
+      |> Config.configure("config.exs", :ex_atlas, [:start_orchestrator], false)
+      |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :tracking_store], @ecto_store)
+      |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :repo], repo)
+      |> notice_start_orchestrator(started?)
+      |> warn_start_orchestrator()
+      |> notice_replaced_stores(replaced)
+      |> warn_other_stores()
+    end
+
+    defp other_stores(igniter, file) do
+      igniter
+      |> OrchestratorConfig.config_values(file, :ex_atlas, [:orchestrator, :tracking_store])
+      |> Enum.reject(&Common.nodes_equal?(&1, @ecto_store))
+      |> Enum.map(&Sourceror.to_string(Zipper.node(&1)))
+    end
+
+    # Records stay in the old store, so a task persisted there is not adopted.
+    defp notice_replaced_stores(igniter, replaced) do
+      Enum.reduce(replaced -- other_stores(igniter, "config.exs"), igniter, fn store, igniter ->
+        Igniter.add_notice(igniter, """
+        config/config.exs set `tracking_store: #{store}`; the installer set \
+        ExAtlas.Orchestrator.TrackingStore.Ecto. Records in #{store} are not \
+        moved: deploy the switch with no `persist: true` task running, or call \
+        `ExAtlas.Orchestrator.stop_tracked/1` on each first.
+        """)
+      end)
+    end
+
+    defp warn_other_stores(igniter) do
+      Enum.reduce(@config_files, igniter, fn file, igniter ->
+        igniter
+        |> other_stores(file)
+        |> Enum.reduce(igniter, fn store, igniter ->
+          Igniter.add_warning(igniter, """
+          config/#{file} sets `tracking_store: #{store}`, which can override the \
+          Ecto store in config/config.exs. Remove it.
+          """)
+        end)
+      end)
+    end
+
+    # `ExAtlas.Orchestrator.Supervisor` refuses to start beside
+    # `start_orchestrator: true`.
+    defp notice_start_orchestrator(igniter, started?) do
+      if started? and not OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true) do
+        Igniter.add_notice(igniter, """
+        config/config.exs set `start_orchestrator: true`; the installer set \
+        `start_orchestrator: false`. Your app now starts the orchestrator with \
+        ExAtlas.Orchestrator.Supervisor, which refuses to start beside the flag.
+        """)
+      else
+        igniter
+      end
+    end
+
+    # A `true` the installer did not turn off: one in another file, or one
+    # inside a block such as `if config_env() == :prod`. Either often sets
+    # the flag under a condition, so the installer names it instead of
+    # editing it.
+    defp warn_start_orchestrator(igniter) do
+      @config_files
+      |> Enum.filter(&OrchestratorConfig.sets_start_orchestrator?(igniter, &1, true))
+      |> Enum.reduce(igniter, fn file, igniter ->
+        Igniter.add_warning(igniter, """
+        config/#{file} sets `config :ex_atlas, start_orchestrator: true`. Remove it: \
+        ExAtlas.Orchestrator.Supervisor refuses to start beside it.
+        """)
+      end)
+    end
+
+    # `Igniter.Project.Application.add_new_child/3` with `after: [repo]`
+    # inserts one place late when another child follows the repo (Igniter
+    # 0.8.4's `skip_after/2`), which would start the supervisor after the
+    # Endpoint. The installer finds the repo in `children` and inserts right
+    # after it.
+    defp add_supervisor_child(igniter, repo) do
+      app =
+        case Igniter.Project.Application.app_module(igniter) do
+          {app, _} -> app
+          app -> app
+        end
+
+      with true <- is_atom(app) and not is_nil(app),
+           {:ok, igniter} <-
+             Igniter.Project.Module.find_and_update_module(igniter, app, &insert_child(&1, repo)) do
+        igniter
+      else
+        _ -> Igniter.add_issue(igniter, add_child_by_hand(repo))
+      end
+    end
+
+    defp insert_child(zipper, repo) do
+      with {:ok, zipper} <- Function.move_to_def(zipper, :start, 2),
+           {:ok, zipper} <-
+             Function.move_to_function_call_in_current_scope(zipper, :=, [2], &children?/1),
+           {:ok, zipper} <- Function.move_to_nth_argument(zipper, 1),
+           {:ok, list} <- children_list(zipper) do
+        cond do
+          match?({:ok, _}, IgniterList.move_to_list_item(list, &child?(&1, @supervisor))) ->
+            {:ok, list}
+
+          match?({:ok, _}, IgniterList.move_to_list_item(list, &child?(&1, repo))) ->
+            {:ok, item} = IgniterList.move_to_list_item(list, &child?(&1, repo))
+            {:ok, Zipper.insert_right(item, @supervisor)}
+
+          true ->
+            {:error, add_child_by_hand(repo)}
+        end
+      else
+        _ -> {:error, add_child_by_hand(repo)}
+      end
+    end
+
+    defp children?(call) do
+      Function.argument_matches_pattern?(call, 0, {:children, _, context} when is_atom(context))
+    end
+
+    # `children = [...]` or `children = [...] ++ more`.
+    defp children_list(zipper) do
+      cond do
+        IgniterList.list?(zipper) -> {:ok, zipper}
+        Function.function_call?(zipper, :++, 2) -> Function.move_to_nth_argument(zipper, 0)
+        true -> :error
+      end
+    end
+
+    # A child is `Module` or `{Module, opts}`; `Common.nodes_equal?/2`
+    # expands aliases.
+    defp child?(item, module) do
+      with true <- Igniter.Code.Tuple.tuple?(item),
+           {:ok, first} <- Igniter.Code.Tuple.tuple_elem(item, 0) do
+        Common.nodes_equal?(first, module)
+      else
+        _ -> Common.nodes_equal?(item, module)
+      end
+    end
+
+    # An issue, so Igniter writes nothing: `start_orchestrator: false` with no
+    # supervisor child would leave the host with no orchestrator.
+    defp add_child_by_hand(repo) do
+      "The installer found no `children = [...]` list holding #{inspect(repo)} in " <>
+        "your application's start/2, so it changed nothing. Set up the Ecto store by " <>
+        "hand (README, \"In your own database\"): put ExAtlas.Orchestrator.Supervisor " <>
+        "in your children right after #{inspect(repo)}."
+    end
+
+    # A host that followed the README by hand named its migration itself.
+    defp calls_store_migration?(igniter, dir) do
+      Enum.any?(igniter.rewrite, fn source ->
+        Path.dirname(Rewrite.Source.get(source, :path)) == dir and
+          Rewrite.Source.get(source, :content) =~
+            "ExAtlas.Orchestrator.TrackingStore.Ecto.Migration"
+      end)
+    end
+
     # Writes default `config :ex_atlas, :fly` block. Each key is only written if
     # it's not already set, so re-running is safe.
     defp configure_fly_defaults(igniter) do
@@ -72,14 +406,14 @@ if Code.ensure_loaded?(Igniter) do
 
       igniter =
         igniter
-        |> Igniter.Project.Config.configure(
+        |> Config.configure(
           "config.exs",
           :ex_atlas,
           [:fly, :enabled],
           true,
           updater: &already_set/1
         )
-        |> Igniter.Project.Config.configure(
+        |> Config.configure(
           "config.exs",
           :ex_atlas,
           [:fly, :storage_path],
@@ -88,7 +422,7 @@ if Code.ensure_loaded?(Igniter) do
         )
 
       if has_pubsub? do
-        Igniter.Project.Config.configure(
+        Config.configure(
           igniter,
           "config.exs",
           :ex_atlas,
@@ -97,7 +431,7 @@ if Code.ensure_loaded?(Igniter) do
           updater: &already_set/1
         )
       else
-        Igniter.Project.Config.configure(
+        Config.configure(
           igniter,
           "config.exs",
           :ex_atlas,

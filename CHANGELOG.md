@@ -7,6 +7,59 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: `mix ex_atlas.install --tracking-store ecto` (#128)
+
+The installer sets up `ExAtlas.Orchestrator.TrackingStore.Ecto` in one run:
+the migration, the config, and `ExAtlas.Orchestrator.Supervisor` right after
+the repo in your application's children. A second run changes nothing.
+
+```sh
+mix ex_atlas.install --tracking-store ecto     # --repo MyApp.Repo with several repos
+mix ecto.migrate
+```
+
+```elixir
+# lib/my_app/application.ex
+# before: children = [MyApp.Repo, MyAppWeb.Endpoint]
+# after:  children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
+```
+
+- `config/config.exs` gets `start_orchestrator: false` and the orchestrator's
+  `tracking_store:` and `repo:`. A `start_orchestrator: true` there becomes
+  `false`. One the installer leaves, in another config file or inside an
+  `if config_env() == :prod` block, gets a warning naming the file; so does
+  another `tracking_store:`.
+- Replacing another tracking store adds a notice: its records are not moved.
+- The migration goes in the repo's migrations directory, its literal `priv:`
+  included. One that already calls
+  `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration` stops a second one.
+- No repo, several repos and no `--repo`, a repo missing from the
+  application's `children` list, or a store other than `ecto` stop the task
+  before it writes anything. `--repo` also takes a repo built on your own
+  wrapper module.
+
+### Fixed: the conformance suites ship in the package (#128)
+
+The guides told hosts to `use ExAtlas.Orchestrator.TrackingStoreConformance`
+and `ExAtlas.Test.ProviderConformance`, but both lived in `test/support` and
+were not in the hex package.
+
+```elixir
+use ExAtlas.Orchestrator.TrackingStoreConformance, store: MyApp.AtlasStore
+# before: ** (CompileError) module ExAtlas.Orchestrator.TrackingStoreConformance is not loaded
+# after:  the shared contract tests run against MyApp.AtlasStore
+```
+
+Both call ExUnit only inside the tests they expand in your test module, so
+they compile in a prod build.
+
+### Fixed: the reap-owner notice covers a host-started orchestrator (#128)
+
+`mix ex_atlas.upgrade`'s 0.8.0 step told a host with no `:reap_owner` to set
+one only when the config set `start_orchestrator: true`. It now also fires
+when a module names `ExAtlas.Orchestrator.Supervisor`, and the installer shows
+the same notice.
+
 ### Fixed: a forged tracking record no longer steers an adopted task's calls (#125)
 
 Whoever could write the tracking store (the DETS file, or a row in your

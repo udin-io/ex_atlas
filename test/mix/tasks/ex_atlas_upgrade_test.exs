@@ -4,24 +4,9 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
 
   import Igniter.Test
 
-  # Igniter's test mode matches `lib/**/*.{ex,exs}` against each test file's
-  # absolute path, and GlobEx's `**` skips a dot directory. A checkout under
-  # `~/.claude_worktrees` finds no module, so the project runs from a temp
-  # directory with no dot segment in its path.
-  defp upgrade(argv \\ [], files \\ %{}) do
-    dir = Path.join(System.tmp_dir!(), "ex_atlas_upgrade_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
+  alias ExAtlas.Test.IgniterProject
 
-    try do
-      File.cd!(dir, fn ->
-        [files: files]
-        |> test_project()
-        |> Igniter.compose_task("ex_atlas.upgrade", argv)
-      end)
-    after
-      File.rm_rf!(dir)
-    end
-  end
+  defp upgrade(argv \\ [], files \\ %{}), do: IgniterProject.run("ex_atlas.upgrade", argv, files)
 
   defp unloaded(fun) do
     :ok = Application.stop(:ex_atlas)
@@ -145,6 +130,21 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
     end
 
+    test "finds start_orchestrator: true inside a runtime.exs block" do
+      igniter =
+        upgrade_0_7(%{
+          "config/runtime.exs" => """
+          import Config
+
+          if config_env() == :prod do
+            config :ex_atlas, start_orchestrator: true
+          end
+          """
+        })
+
+      assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
+    end
+
     test "stays quiet about the reap owner when runtime.exs sets one" do
       igniter =
         upgrade_0_7(%{
@@ -169,6 +169,43 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
           config :ex_atlas, start_orchestrator: false
           """
         })
+
+      refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
+    end
+
+    test "tells a host that starts ExAtlas.Orchestrator.Supervisor about the reap owner" do
+      igniter = upgrade_0_7(IgniterProject.app_with_children("ExAtlas.Orchestrator.Supervisor"))
+
+      assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
+    end
+
+    # The alias line names only `ExAtlas.Orchestrator`, so the match needs
+    # alias expansion on `Orchestrator.Supervisor`.
+    test "finds the supervisor child through an alias" do
+      files =
+        IgniterProject.app_with_children("Orchestrator.Supervisor",
+          alias: "alias ExAtlas.Orchestrator"
+        )
+
+      assert_has_notice(upgrade_0_7(files), &(&1 =~ ":reap_owner"))
+    end
+
+    test "stays quiet about the reap owner when the host starts the supervisor and sets one" do
+      files =
+        Map.put(
+          IgniterProject.app_with_children("ExAtlas.Orchestrator.Supervisor"),
+          "config/runtime.exs",
+          """
+          import Config
+          config :ex_atlas, :orchestrator, reap_owner: System.get_env("FLY_MACHINE_ID")
+          """
+        )
+
+      refute Enum.any?(upgrade_0_7(files).notices, &(&1 =~ ":reap_owner"))
+    end
+
+    test "stays quiet about the reap owner when the application starts other children only" do
+      igniter = upgrade_0_7(IgniterProject.app_with_children("Test.Repo"))
 
       refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
     end
