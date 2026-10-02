@@ -1465,7 +1465,7 @@ config :ex_atlas, :orchestrator,
   tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto,
   repo: MyApp.Repo,
   reap_owner: System.get_env("FLY_MACHINE_ID"),
-  lease_ttl_ms: 90_000   # default; 3 ms to one hour
+  lease_ttl_ms: 90_000   # default; 1 s to one hour
 
 # machine m1 is destroyed while its task pod-abc runs
 # within 90 s, on m2:
@@ -1474,12 +1474,15 @@ ExAtlas.Orchestrator.list_ids()
 ```
 
 - A machine takes over only records its own key verifies: every machine needs
-  the same `config :ex_atlas, :callback, secret:`. An unsigned record (written
-  by 0.8.0 or by a machine with no secret) is logged once and left.
-- A machine that cannot renew its own lease claims nothing. A machine whose
-  renewal comes late, after another claimed its tasks, stops its own trackers
-  of them and leaves the pods to the new owner. Until that renewal both track
-  the pod, for up to `lease_ttl_ms / 3`.
+  the same `config :ex_atlas, :callback, secret:`, and a machine with none
+  runs no lease. An unsigned record (written by 0.8.0 or by a machine with no
+  secret) is logged once and left, as is a record of a newer release.
+- A machine that cannot renew its own lease claims nothing. A machine that
+  just booted, or whose own lease lapsed, waits one `lease_ttl_ms` before it
+  claims, so after a database outage no machine takes the others' tasks.
+- On every renewal a machine stops its trackers of records another machine
+  now owns, and leaves the pods to it. Until then both track the pod: up to
+  `lease_ttl_ms / 3` while the losing machine can renew.
 - Expiry uses each machine's wall clock: keep clock skew well under
   `lease_ttl_ms`.
 - A database that ran step 1 of the migration before this release needs a new

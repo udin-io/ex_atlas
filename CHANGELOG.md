@@ -22,11 +22,15 @@ ExAtlas.Orchestrator.list_ids()
 # => ["pod-abc"]
 ```
 
-- `ExAtlas.Orchestrator.Lease` renews every `lease_ttl_ms / 3` and claims
-  each record with one conditional `UPDATE`, so two live nodes never both
-  adopt it. A node that cannot renew claims nothing.
+- `ExAtlas.Orchestrator.Lease` renews every `lease_ttl_ms / 3` (1 s to one
+  hour) and claims each record with one conditional `UPDATE`, so two live
+  nodes never both adopt it. A node that cannot renew claims nothing, and a
+  node claims only after it held its own lease one full ttl.
 - Only records this node's key verifies are taken over. An unsigned record
-  of a dead owner is logged once and left.
+  of a dead owner is logged once and left. A node with no callback secret
+  runs no lease.
+- A node stops its trackers of records another node took over, and leaves
+  their pods running.
 - `TrackingStore` gains two optional callbacks, `renew_lease/2` and
   `claim_expired/3`. DETS and custom stores keep the old behaviour.
 - **Upgrade:** `Migration` step 2 creates `atlas_owner_leases`. A database

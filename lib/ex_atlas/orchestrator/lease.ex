@@ -5,14 +5,21 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   Started by `ExAtlas.Orchestrator.Supervisor` when the tracking store exports
   `renew_lease/2` and `claim_expired/3` (`ExAtlas.Orchestrator.TrackingStore.Ecto`
-  does) and `:reap_owner` is set. Every `lease_ttl_ms / 3` it:
+  does), `:reap_owner` is set, and the node has a callback secret to verify
+  records with. Every `lease_ttl_ms / 3` it:
 
     1. renews this node's lease until now plus `lease_ttl_ms`;
-    2. only if that renewal succeeded, claims the records of every other
-       owner whose lease expired, and adopts them through
+    2. if that renewal succeeded, releases its trackers of records another
+       node now owns (below);
+    3. if this node has held its lease without a gap for a full
+       `lease_ttl_ms`, claims the records of every other owner whose lease
+       expired, and adopts them in a task through
        `ExAtlas.Orchestrator.Adopter`, as a boot adopts its own.
 
-  A node that cannot renew claims nothing: it may be the one cut off.
+  A node that cannot renew claims nothing: it may be the one cut off. A node
+  that just booted, or whose own lease lapsed, waits a full ttl before it
+  claims: after a database outage every lease reads expired, and by then
+  every live node has renewed. `lease_ttl_ms` runs from 1 s to one hour.
 
       config :ex_atlas, :orchestrator,
         tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto,
@@ -25,8 +32,10 @@ defmodule ExAtlas.Orchestrator.Lease do
   Only records this node's key verifies (`ExAtlas.Orchestrator.TrackingStore.sealed?/1`):
   a node that shares the callback secret signed them. An unsigned record of
   a dead owner is logged once and left: claimed, it could name any pod of the
-  account, and the deadline would delete it. An owner that never renewed a
-  lease (a node on an older release) never expires.
+  account, and the deadline would delete it. So is a signed record this
+  build would not adopt (a newer version, say), and a row whose `owner`
+  column no longer matches the record's signed `:owner`. An owner that never
+  renewed a lease (a node on an older release) never expires.
 
   ## A record lost to another node
 
@@ -36,8 +45,8 @@ defmodule ExAtlas.Orchestrator.Lease do
   each tracker whose record now names another owner. The tracker stops
   without deleting the pod or writing the record, even when it holds a
   finish report: both are the new owner's. Until that renewal, both nodes
-  track the pod, for up to `lease_ttl_ms / 3` while the losing node can
-  renew.
+  track the pod: up to `lease_ttl_ms / 3` while the losing node can renew,
+  and for as long as it cannot.
 
   ## Clocks
 

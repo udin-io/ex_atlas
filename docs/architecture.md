@@ -50,7 +50,7 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.TrackingStore.Ecto` | Functions, no process | Records as `term_to_binary` blobs in the host repo's `atlas_tracking_records`, decoded with `[:safe]`; owner leases in `atlas_owner_leases`. `Ecto.Migration` step 1 creates the records table, step 2 the lease table |
 | `Orchestrator.Supervisor` | `Supervisor` | The orchestrator's tree for a host to start after its repo; `children/0` is the one child list |
 | `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper. `adopt_claimed/3` adopts records a Lease claimed, the same way |
-| `Orchestrator.Lease` | `GenServer`, only with a lease store and `:reap_owner` | Every `lease_ttl_ms / 3`, renews this node's lease, then claims and adopts the signed records of owners whose lease expired |
+| `Orchestrator.Lease` | `GenServer`, only with a lease store, `:reap_owner` and a callback secret | Every `lease_ttl_ms / 3`, renews this node's lease, releases trackers of records another node owns, and, once it held its lease a full ttl, claims and adopts (in a task) the signed records of owners whose lease expired |
 | `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
 | `Orchestrator.Ownership` | Functions | Reads and validates `reap_owner`; stamps it into pod names |
@@ -155,6 +155,8 @@ sequenceDiagram
   L2->>Store: renew_lease(m2, now + ttl), every ttl / 3
   Store->>DB: upsert lease row of m2
   Note over L2: renewal failed, so claim nothing this tick
+  L2->>Store: get(id) of each tracked pod, release trackers whose record names another owner
+  Note over L2: claims only after m2 held its lease a full ttl, one takeover at a time
   L2->>Store: claim_expired(m2, now, rewrite)
   Store->>DB: SELECT records of owners whose expires_at is past
   Store->>L2: rewrite(record), per row
@@ -162,13 +164,15 @@ sequenceDiagram
   Store->>DB: UPDATE row SET owner, record WHERE owner = m1 AND m1 lease expired
   DB-->>Store: 1 row claimed, or 0 when another node won or m1 renewed
   Store-->>L2: claimed records
-  L2->>Adopter: adopt_claimed(records, m2, store)
+  L2->>Adopter: adopt_claimed(records, m2, store), in a task
   Adopter-->>L2: trackers started, or the record deleted when its pod is gone
 ```
 
-A node whose renewal lands after its own lease expired stops its trackers of
-records another node claimed meanwhile, with `:shutdown`, which keeps the pod
-and writes nothing. The Reaper does not change: a claimed pod is in m2's
+On every renewal a node releases its trackers of records another node now
+owns: `ComputeServer.release/1` stops the tracker with `{:shutdown,
+:released}`, which keeps the pod and writes nothing. The claim skips a row
+whose `owner` column differs from the record's signed `:owner`, and a signed
+record this build would not adopt (`Adopter.refusal/1`). The Reaper does not change: a claimed pod is in m2's
 Registry, and pods named with a dead owner are still only logged.
 
 ## The orchestrator at runtime

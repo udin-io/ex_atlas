@@ -223,11 +223,19 @@ names the PR or issue that holds the reasoning.
 | Each record is claimed by its own conditional `UPDATE` that writes owner and signed blob together and re-checks the old owner and its expired lease | One bulk `UPDATE` of the owner column: the blob and its signature would still name the dead owner | #132 |
 | `claim_expired/3` takes a rewrite function; ExAtlas signs, the store writes | The store signs: signing stays in one module | #132 |
 | A takeover claims only records this node's key verifies | Claim any record: an unsigned record can name any pod of the account, and the deadline would delete it (#138) | #132 |
-| `lease_ttl_ms` defaults to 90 s, renewed every third, bounded 3 ms to one hour | A shorter TTL: a GC pause or slow database must not hand a live node's tasks away. No upper bound: a dead node's tasks would wait out any TTL | #132 |
+| `lease_ttl_ms` defaults to 90 s, renewed every third, bounded 1 s to one hour | A shorter TTL: a GC pause or slow database must not hand a live node's tasks away. No upper bound: a dead node's tasks would wait out any TTL | #132 |
 | A node that cannot renew its own lease claims nothing | Claim anyway: the node that cannot renew may be the one cut off | #132 |
 | Expiry uses the renewing node's wall clock | The database clock: `now()` arithmetic differs between Postgres and SQLite | #132 |
 | A node whose renewal comes late stops its trackers of records another node claimed, with `:shutdown` | Leave them: two trackers on one pod both respawn on a preemption | #132 |
 | Only the Ecto store implements leases | A DETS version: DETS is local to one machine | #132 |
+| A node claims only after it held its own lease a full ttl without a gap | Claim on the first renewal: after a database outage the first node back takes every live node's tasks | #132 |
+| Every renewal releases trackers whose record names another owner | Only after a lapse the node's own clock saw: skew, a late write, a forged expiry or a claim before the first renewal go unseen | #132 |
+| A released tracker keeps its pod and record, even holding a finish report | Stop with `:shutdown`: a reported task deletes the pod and the new owner's record | #132 |
+| Claimed records are adopted in a task under the poll `Task.Supervisor`, one takeover at a time | Inline: a slow provider holds back the renewal, and the node's own lease lapses | #132 |
+| A claim requires the record's signed `:owner` to match the `owner` column | Trust the column: a database writer moves one live record to a made-up expired owner | #132 |
+| A claim skips signed records this build would not adopt (`Adopter.refusal/1`) | Claim and skip at adoption: in a rolling deploy the older node owns records nobody tracks | #132 |
+| No Lease on a node with no callback secret | Start it: it verifies no record, and its own records are unsigned | #132 |
+| No `mix ex_atlas.upgrade` notice for migration step 2 | A `"0.9.0"` upgrader: the Ecto store is unreleased, so no Hex host ran step 1 alone; the README and CHANGELOG say what to add | #132 |
 | Optional provider callbacks go through `dispatch_optional/3` | Call the module directly: raises on providers without the callback | #60, `CLAUDE.md` |
 | `hex.audit` stays in CI and suppresses nothing, even though it fails on cowlib | Ignore the advisories | #53, `CLAUDE.md` |
 | `compute_spend/2` with no window covers RunPod's last 30 days | Default to a short window | #58, #62 |

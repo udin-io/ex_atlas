@@ -66,7 +66,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     Migration step 2 adds `atlas_owner_leases`, one row per `:reap_owner`.
     With `:reap_owner` set, `ExAtlas.Orchestrator.Lease` renews this node's
-    row every `lease_ttl_ms / 3` (90 s by default) and takes over the signed
+    row every `lease_ttl_ms / 3` (every 30 s at the default 90 s) and takes over the signed
     records of an owner whose lease expired. Each record is claimed by one
     conditional `UPDATE` that re-checks the old owner and its expired lease,
     so two live nodes never both adopt it. A host that ran step 1 adds a

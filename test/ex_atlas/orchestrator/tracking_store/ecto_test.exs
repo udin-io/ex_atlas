@@ -49,7 +49,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     )
   end
 
-  # A host's migration for each step, as the upgrade notice tells it to write.
+  # A host's migration for each step, as the README tells it to write.
   defmodule StepOne do
     @moduledoc false
     use Ecto.Migration
