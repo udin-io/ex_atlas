@@ -85,9 +85,14 @@ defmodule ExAtlas.Providers.Vast do
   @impl true
   def terminate(id, ctx) do
     case Client.delete(ctx, "/api/v0/instances/#{encode(id)}/") do
-      {:ok, %{"success" => false} = body} -> {:error, refused(body, nil, "destroy")}
-      {:ok, _} -> :ok
-      {:error, _} = err -> err
+      {:ok, %{"success" => false} = body} ->
+        {:error, refused(body, nil, "Vast refused the destroy")}
+
+      {:ok, _} ->
+        :ok
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -210,8 +215,9 @@ defmodule ExAtlas.Providers.Vast do
     end
   end
 
+  # A 408 can come from a proxy after Vast took the rent.
   defp next_offer?(%Error{status: status}),
-    do: is_integer(status) and status in 400..499 and status not in [401, 403, 429]
+    do: is_integer(status) and status in 400..499 and status not in [401, 403, 408, 429]
 
   # Retried on a 429 only: a rent that answered 5xx or timed out may have
   # rented an instance already. A redirect is not followed: Req would send
@@ -224,7 +230,8 @@ defmodule ExAtlas.Providers.Vast do
         {:ok, Integer.to_string(id)}
 
       {:ok, other} ->
-        {:error, refused(other, 200, "rent")}
+        {:error,
+         refused(other, 200, "Vast answered the rent with no instance id, and may have rented")}
 
       {:error, %Error{status: status} = error} when is_integer(status) ->
         {:error, withhold(error)}
@@ -239,27 +246,32 @@ defmodule ExAtlas.Providers.Vast do
   # code. A 401, 403 or 429 keeps its kind; a 404 names the offer, not an
   # instance, so it reads `:provider`.
   defp withhold(%Error{kind: kind} = error) do
-    refused = refused(error.raw, error.status, "rent")
+    refused = refused(error.raw, error.status, "Vast refused the rent")
 
     if kind in [:unauthorized, :forbidden, :rate_limited],
       do: %{refused | kind: kind},
       else: refused
   end
 
-  defp refused(body, status, action) do
+  defp refused(body, status, lead) do
     code = code(body)
 
     Error.new(:provider,
       provider: :vast,
       status: status,
       message:
-        "Vast refused the #{action} (#{code || "no error code"}); ExAtlas withholds " <>
-          "Vast's message, which can echo the request",
+        "#{lead} (#{code || "no error code"}); ExAtlas withholds Vast's message, " <>
+          "which can echo the request",
       raw: code && %{"error" => code}
     )
   end
 
-  defp code(%{"error" => code}) when is_binary(code), do: code
+  # Vast documents `error` as a short code (`invalid_args`, `no_such_ask`).
+  # Anything else is free text, which can echo the request like `msg`.
+  defp code(%{"error" => code}) when is_binary(code) do
+    if Regex.match?(~r/\A[a-z0-9_]{1,64}\z/, code), do: code
+  end
+
   defp code(_body), do: nil
 
   # --- helpers ---

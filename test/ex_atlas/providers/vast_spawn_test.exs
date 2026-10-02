@@ -489,6 +489,19 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       end
     end
 
+    # The `error` field is documented as a code (`invalid_args`), but Vast
+    # writes it; free text there is withheld like `msg`.
+    test "an error field that is not a code is withheld", %{bypass: bypass, opts: opts} do
+      expect_rents(bypass, fn _ -> {500, refused("bad env HF_TOKEN=#{@hf_token}", "x")} end)
+
+      assert {:error, %ExAtlas.Error{} = error} =
+               rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token})
+
+      assert error.message =~ "no error code"
+      refute inspect(error) =~ @hf_token
+      refute Exception.message(error) =~ @hf_token
+    end
+
     # A 307 or 308 re-sends the body, env values included, to its Location.
     test "a redirect is not followed: the env goes to no other host", %{
       bypass: bypass,
@@ -505,6 +518,14 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
       assert {:error, %ExAtlas.Error{status: 307}} =
                rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token})
+    end
+
+    # A proxy in front of Vast can answer 408 after Vast took the rent.
+    test "a 408 stops at the first offer", %{bypass: bypass, opts: opts} do
+      expect_rents(bypass, fn _ -> {408, refused("timeout", "slow")} end)
+
+      assert {:error, %ExAtlas.Error{status: 408}} = rent_spawn(opts)
+      assert rent_ids() == ["1"]
     end
   end
 
