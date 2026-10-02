@@ -569,6 +569,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       |> arm_cost_cap()
 
     register_callback(state)
+    warn_interrupted_respawn(record)
     Events.broadcast(compute.id, {:status, compute.status})
     schedule_heartbeat(state)
     schedule_deadline(remaining_ms)
@@ -666,6 +667,18 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # A record without the field (0.8.0's) or with `nil` started none.
   defp spent_respawns(%{respawning: attempt}) when is_integer(attempt), do: attempt
   defp spent_respawns(record), do: record.respawns
+
+  defp warn_interrupted_respawn(%{respawning: attempt} = record) when is_integer(attempt) do
+    Logger.warning(
+      "[ExAtlas.Orchestrator.ComputeServer] adopting #{record.id}: the node stopped while it " <>
+        "rented the replacement for attempt #{attempt}. A pod named " <>
+        "#{inspect(Keyword.get(record.opts, :name))} that no record names may be running and " <>
+        "billing; its reports get 410. The Reaper deletes it when " <>
+        "#{inspect(record.provider)} is in :reap_providers; otherwise delete it by hand."
+    )
+  end
+
+  defp warn_interrupted_respawn(_record), do: :ok
 
   # What is left of a wall-clock budget, measured from the spawn that started
   # it. `0` means the budget is gone and the deadline fires on the next pass

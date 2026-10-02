@@ -1828,6 +1828,19 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
     end
 
+    # The orphan bills until the Reaper or an operator deletes it, and only
+    # this node knows it may exist.
+    test "the adoption warns, naming the orphan's pod name and attempt" do
+      {pod_a, _pod_b} = died_mid_respawn(2)
+
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+
+      assert log =~ "adopting #{pod_a.id}"
+      assert log =~ "attempt 1"
+      assert log =~ ~s(named "atlas-adoptable")
+      assert log =~ ":reap_providers"
+    end
+
     test "the interrupted attempt counts as spent, so a spent budget rents nothing more" do
       {pod_a, _pod_b} = died_mid_respawn(1)
       old_id = pod_a.id
@@ -1868,8 +1881,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
         old_id = compute.id
         Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
 
-        :ok = Adopter.run(notify: self())
+        log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
         assert_receive :adoption_complete, 2_000
+        refute log =~ "rented the replacement"
 
         assert post(pod_token(compute), "/progress", ~s({"step":1})).status == 202
         assert_receive {:atlas_compute, ^old_id, {:progress, %{"step" => 1}}}, 2_000
