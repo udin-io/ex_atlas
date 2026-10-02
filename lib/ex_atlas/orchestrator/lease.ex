@@ -28,6 +28,14 @@ defmodule ExAtlas.Orchestrator.Lease do
   account, and the deadline would delete it. An owner that never renewed a
   lease (a node on an older release) never expires.
 
+  ## A slow node
+
+  A node whose renewal lands after its own lease expired may have lost
+  records to another node meanwhile. It stops its tracker of each record now
+  owned by someone else, with `:shutdown`, which keeps the pod running and
+  writes nothing the new owner did not. Until that renewal, both nodes can
+  track the same pod for up to `lease_ttl_ms / 3`.
+
   ## Clocks
 
   Expiry is the renewing node's wall clock; a claimer compares it with its
@@ -38,7 +46,8 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   require Logger
 
-  alias ExAtlas.Orchestrator.{Adopter, TrackingStore}
+  alias ExAtlas.Orchestrator
+  alias ExAtlas.Orchestrator.{Adopter, ComputeSupervisor, TrackingStore}
 
   @default_ttl_ms 90_000
   # A dead node's tasks wait out the whole ttl before another node tracks them.
@@ -70,6 +79,7 @@ defmodule ExAtlas.Orchestrator.Lease do
       owner: Keyword.fetch!(opts, :owner),
       ttl_ms: ttl!(Keyword.get_lazy(opts, :ttl_ms, &configured_ttl/0)),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
+      renewed_at: nil,
       unsigned: MapSet.new()
     }
 
@@ -102,8 +112,9 @@ defmodule ExAtlas.Orchestrator.Lease do
   defp renew(state, now) do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
       :ok ->
+        if lapsed?(state, now), do: stop_lost_trackers(state)
         claim(state, now)
-        state
+        %{state | renewed_at: now}
 
       other ->
         Logger.warning(
@@ -114,6 +125,11 @@ defmodule ExAtlas.Orchestrator.Lease do
         state
     end
   end
+
+  # The previous renewal's lease ran out before this one: another node may
+  # have claimed records this node still tracks.
+  defp lapsed?(%{renewed_at: nil}, _now), do: false
+  defp lapsed?(%{renewed_at: at, ttl_ms: ttl}, now), do: now - at >= ttl
 
   defp claim(state, now) do
     lease = self()
@@ -145,6 +161,28 @@ defmodule ExAtlas.Orchestrator.Lease do
     else
       send(lease, {:unsigned, Map.get(record, :id), Map.get(record, :owner)})
       :skip
+    end
+  end
+
+  defp stop_lost_trackers(state) do
+    for id <- Orchestrator.list_ids(),
+        lost?(state, id),
+        {:ok, pid} <- [Orchestrator.lookup(id)] do
+      Logger.warning(
+        "[ExAtlas.Orchestrator.Lease] the lease of #{inspect(state.owner)} lapsed and another " <>
+          "node now owns #{inspect(id)}; stopping this node's tracker and leaving the pod to it."
+      )
+
+      DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+    end
+
+    :ok
+  end
+
+  defp lost?(state, id) do
+    case safely(fn -> state.store.get(id) end) do
+      {:ok, %{owner: owner}} when is_binary(owner) -> owner != state.owner
+      _missing_or_unreadable -> false
     end
   end
 

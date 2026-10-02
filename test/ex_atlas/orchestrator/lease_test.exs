@@ -220,4 +220,56 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       assert pod_status(id) == :running
     end
   end
+
+  describe "a node whose lease lapsed" do
+    # m2 tracks its own task. Its lease lapses (the clock jumps past it), m3
+    # claims the record meanwhile, then m2 renews.
+    defp lapse(claimed_by_m3?) do
+      as_owner("m2")
+
+      {:ok, tracker, %{id: id}} =
+        Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "trainer:latest",
+          name: "atlas-lease",
+          mode: :task,
+          max_runtime_ms: 90 * 60 * 1_000,
+          persist: true
+        )
+
+      {:ok, clock} = Agent.start_link(&now/0)
+      lease = start_lease!("m2", clock: fn -> Agent.get(clock, & &1) end)
+      lapsed_at = Agent.get(clock, & &1) + @ttl + 1
+
+      if claimed_by_m3? do
+        to_m3 = fn record ->
+          {:ok, TrackingStore.rewrite(Map.put(record, :owner, "m3"), true)}
+        end
+
+        assert {:ok, [%{id: ^id}]} = Store.claim_expired("m3", lapsed_at, to_m3)
+      end
+
+      Agent.update(clock, fn _ -> lapsed_at end)
+      capture_log(fn -> tick!(lease) end)
+      {tracker, id}
+    end
+
+    test "stops its tracker of a record another node claimed, and keeps the pod" do
+      {tracker, id} = lapse(true)
+
+      refute Process.alive?(tracker)
+      assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m3"}} = Store.get(id)
+      assert pod_status(id) == :running
+    end
+
+    test "control: keeps its tracker when nobody claimed the record" do
+      {tracker, id} = lapse(false)
+
+      assert Process.alive?(tracker)
+      assert Orchestrator.list_ids() == [id]
+      assert {:ok, %{owner: "m2"}} = Store.get(id)
+    end
+  end
 end
