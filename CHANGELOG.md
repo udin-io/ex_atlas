@@ -65,7 +65,9 @@ key.
   under the default `reap_providers: [:runpod]`, or a name without the prefix
   or this node's owner. The Reaper leaves such a pod
   alone too: terminate it by hand. A `persist: true` spawn on a node with no
-  callback secret warns when its name will not pass.
+  callback secret warns when its task will not pass.
+- A RunPod pod id goes into the URL as one encoded path segment, as Vast and
+  Lambda ids already did: an id from a store writer adds no path.
 
 ### Fixed: an adopted task respawns only from a record this node signed (#131)
 
