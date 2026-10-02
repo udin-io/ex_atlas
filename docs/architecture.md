@@ -45,6 +45,7 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.Events` | Functions | PubSub broadcasts `{:atlas_compute, id, event}` |
 | `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`. Default `TrackingStore.Dets` |
 | `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper |
+| `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
 | `Orchestrator.Ownership` | Functions | Reads and validates `reap_owner`; stamps it into pod names |
 | `Orchestrator.ComputeRegistry`, `ComputeSupervisor` | `Registry`, `DynamicSupervisor` | Look up and supervise trackers |
