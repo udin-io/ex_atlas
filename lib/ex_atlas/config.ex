@@ -19,7 +19,8 @@ defmodule ExAtlas.Config do
 
   `:base_url` and `:req_options` come from opts, else from
   `config :ex_atlas, <provider>, base_url: ..., req_options: [...]`. A
-  per-call `req_options` merges over the configured one, key by key. A task
+  per-call `req_options` merges over the configured one, key by key: a
+  per-call `headers:` replaces a configured `headers:` whole. A task
   adopted after a restart gets them from config alone: its tracking record
   holds neither, so a forged record cannot point the node's key at another
   host.
