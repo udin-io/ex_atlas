@@ -198,9 +198,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     * A record with no owner (version 1, or written by a node with no
       `:reap_owner`) is claimed by the first node that adopts it, which writes
       its own owner into it.
-    * A dead owner's pods and records stay until an operator deletes them. "Node
-      A died, node B takes over" needs leases with expiry and is not solved
-      here.
+    * A dead owner's records stay until another node takes them over. A store
+      that implements `c:renew_lease/2` and `c:claim_expired/3` (the Ecto
+      store does) lets a live node adopt the signed records of an owner whose
+      lease expired; see `ExAtlas.Orchestrator.Lease`. With any other store,
+      a dead owner's pods and records stay until an operator deletes them.
 
   A store that maps record fields to columns needs a nullable `owner` column.
   Without it every record comes back unowned, and every node adopts it. It
@@ -279,6 +281,35 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   @callback all() :: {:ok, [record()]} | {:error, term()}
 
   @callback child_spec(keyword()) :: Supervisor.child_spec()
+
+  @doc """
+  Record that `owner`'s lease runs until `expires_at_ms` (wall clock, ms).
+
+  Optional. A store that implements it and `c:claim_expired/3` lets a live
+  node take over the records of a node whose lease expired; see
+  `ExAtlas.Orchestrator.Lease`.
+  """
+  @callback renew_lease(owner :: String.t(), expires_at_ms :: integer()) ::
+              :ok | {:error, term()}
+
+  @doc """
+  Hand `claimer` the records of every other owner whose lease expired before
+  `now_ms`.
+
+  For each such record the store calls `rewrite`, which returns the record
+  as `claimer` owns it, or `:skip`. The store writes it only if, at the
+  write, the row still names the old owner and that owner's lease is still
+  expired, in one atomic statement, so two claimers never both take a
+  record. Answers the records it wrote. An owner with no lease row is never
+  expired.
+  """
+  @callback claim_expired(
+              claimer :: String.t(),
+              now_ms :: integer(),
+              rewrite :: (record() -> {:ok, record()} | :skip)
+            ) :: {:ok, [record()]} | {:error, term()}
+
+  @optional_callbacks renew_lease: 2, claim_expired: 3
 
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a

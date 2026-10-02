@@ -171,6 +171,7 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Orchestrator.ComputeRegistry,
           ExAtlas.Orchestrator.Reaper,
           ExAtlas.Orchestrator.Adopter,
+          ExAtlas.Orchestrator.Lease,
           ExAtlas.Orchestrator.TrackingStore,
           ExAtlas.Orchestrator.TrackingStore.Dets,
           ExAtlas.Orchestrator.TrackingStore.Ecto,

@@ -61,7 +61,9 @@ defmodule ExAtlas.Orchestrator.Adopter do
       sent to the provider: a node with a wrong key sees 404 for every pod, and
       deleting the record of a live pod would let its owner's Reaper delete the
       pod after that owner's next restart. One info line per other owner lists
-      its ids. A dead owner's pods and records stay until an operator deletes
+      its ids. When that owner's lease expires, `ExAtlas.Orchestrator.Lease`
+      takes its signed records over and adopts them through `adopt_claimed/3`;
+      with a store that has no leases, they stay until an operator deletes
       them.
     * **An unowned record** (version 1, or a node that had no `:reap_owner`) is
       claimed by the first node to adopt it, which writes its own owner into the
@@ -111,6 +113,16 @@ defmodule ExAtlas.Orchestrator.Adopter do
     end
   end
 
+  @doc """
+  Adopt `records` that this node, as `owner`, just claimed from an owner whose
+  lease expired (`ExAtlas.Orchestrator.Lease`), as a boot adopts its own: a
+  record whose pod is gone is deleted, the rest get trackers. Signals no one.
+  """
+  @spec adopt_claimed([TrackingStore.record()], String.t(), module()) :: :ok
+  def adopt_claimed(records, owner, store) do
+    Enum.each(records, &adopt_one(&1, owner, store))
+  end
+
   defp adopt_all(store, notify) do
     case read_all(store) do
       {:ok, records} ->
@@ -148,7 +160,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
     Logger.info(
       "[ExAtlas.Orchestrator.Adopter] leaving #{length(ids)} record(s) of owner #{inspect(owner)} " <>
         "in the store, untracked on this node: #{Enum.map_join(ids, ", ", &inspect/1)}. Their owner adopts them. " <>
-        "If that node is gone, delete the pods and records by hand."
+        "If that node is gone, a node with leases (the Ecto store) takes them over once its " <>
+        "lease expires; otherwise delete the pods and records by hand."
     )
   end
 
@@ -191,26 +204,37 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   defp adopt(record, owner, store) do
-    cond do
-      not TrackingStore.readable?(record.v) ->
-        skip(
-          record,
-          "unknown schema version #{record.v} " <>
-            "(this build understands versions 1 to #{TrackingStore.version()})"
-        )
-
-      record.mode != :task ->
-        skip(record, "mode #{inspect(record.mode)} is not adoptable")
-
-      not declared_provider?(record) ->
-        skip(record, "its provider is neither built in nor a module declaring ExAtlas.Provider")
-
-      true ->
+    case refusal(record) do
+      nil ->
         warn_stored_endpoint(record)
         # Checked on the record as stored, before anything changes it. A
         # tracker respawns only from a record this node signed.
         record = Map.put(TrackingStore.upgrade(record), :sealed, TrackingStore.sealed?(record))
         adopt_by_owner(record, record[:owner], owner, store)
+
+      why ->
+        skip(record, why)
+    end
+  end
+
+  @doc false
+  # Why this build would not adopt `record`, or nil. `ExAtlas.Orchestrator.Lease`
+  # asks before it claims a record, so it never owns one it cannot track.
+  @spec refusal(map()) :: String.t() | nil
+  def refusal(record) do
+    cond do
+      not TrackingStore.readable?(Map.get(record, :v)) ->
+        "unknown schema version #{inspect(Map.get(record, :v))} " <>
+          "(this build understands versions 1 to #{TrackingStore.version()})"
+
+      Map.get(record, :mode) != :task ->
+        "mode #{inspect(Map.get(record, :mode))} is not adoptable"
+
+      not declared_provider?(record) ->
+        "its provider is neither built in nor a module declaring ExAtlas.Provider"
+
+      true ->
+        nil
     end
   end
 

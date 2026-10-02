@@ -522,6 +522,15 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     :exit, _ -> :ok
   end
 
+  @doc false
+  # Stop tracking a resource another node now owns (`ExAtlas.Orchestrator.Lease`):
+  # the pod keeps running and the record is left as that node wrote it.
+  def release(pid) do
+    GenServer.stop(pid, {:shutdown, :released}, @shutdown_timeout_ms)
+  catch
+    :exit, _ -> :ok
+  end
+
   # --- callbacks ---
 
   @impl true
@@ -967,6 +976,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Events.broadcast(state.compute.id, {:terminating, reason})
 
     cond do
+      # Another node took the resource over: its pod and record are theirs.
+      reason == {:shutdown, :released} ->
+        :ok
+
       # A node stop (SIGTERM, `System.stop/0`, `Application.stop(:ex_atlas)`)
       # reaches every tracker as its supervisor's `:shutdown`. A persisted task
       # with no report yet keeps its pod and its record, so the next boot
