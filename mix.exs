@@ -32,6 +32,8 @@ defmodule ExAtlas.MixProject do
 
   defp deps do
     [
+      {:ecto_sqlite3, "~> 0.25", only: [:test]},
+      {:ecto_sql, "~> 3.13", optional: true},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.16", only: [:dev, :test], runtime: false},
       {:req, "~> 0.5"},
