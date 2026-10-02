@@ -73,7 +73,9 @@ e.raw   # before: the whole body   after: %{"detail" => "in use", "conflict" => 
 
 - Every key named `env` (string or atom) goes, at any depth, on any provider
   that shares `HTTP.handle_response/3`. The rest of the body stays; a field
-  named `environment` stays.
+  named `environment` stays. An atom-keyed `errors[].value` goes too, as the
+  string-keyed one already did. Only the key `env` is scrubbed: a body that
+  echoes Vast's `extra_env` or Lambda's `jupyter_token` keeps them.
 - A plain-text error body that echoes the request stays in `Error.message`:
   nothing can tell the secret from the text.
 
