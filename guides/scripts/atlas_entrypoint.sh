@@ -3,7 +3,9 @@
 #
 #   atlas_entrypoint.sh TRAINER [ARGS...]
 #
-# 1. Pulls ATLAS_DATASET_URI into ATLAS_DATASET_DIR (default /data).
+# 1. Pulls ATLAS_DATASET_URI into ATLAS_DATASET_DIR (default /data), or
+#    downloads the tar archive at the presigned ATLAS_DATASET_URL and unpacks
+#    it there. The URI wins when both are set.
 # 2. Runs the trainer, copying stdout and stderr to ATLAS_LOG_FILE
 #    (default /tmp/atlas.log).
 # 3. On exit, INT or TERM, syncs ATLAS_ARTIFACT_DIR (default /artifacts) and
@@ -13,8 +15,9 @@
 # nothing. The script never deletes the pod: the wrapper that ExAtlas puts
 # around the command does that after this script exits.
 #
-# Credentials come from the environment (AWS_ACCESS_KEY_ID and friends). The
-# script never prints them and never runs with `set -x`.
+# Credentials come from the environment (AWS_ACCESS_KEY_ID and friends, or the
+# presigned URLs, which grant access to whoever holds them). The script never
+# prints them and never runs with `set -x`.
 
 DATASET_DIR=${ATLAS_DATASET_DIR:-/data}
 ARTIFACT_DIR=${ATLAS_ARTIFACT_DIR:-/artifacts}
@@ -71,14 +74,42 @@ on_signal() {
 trap finish EXIT
 trap on_signal INT TERM
 
+# `curl -f` prints no response body on an HTTP error. S3's error body for a
+# bad signature echoes the signature it was given.
+download() {
+  archive="$DATASET_DIR/.atlas_dataset_download"
+  tool=curl
+  curl -fsSL -o "$archive" "$ATLAS_DATASET_URL" || { rc=$?; rm -f "$archive"; return "$rc"; }
+  # A file, not a pipe: tar detects gzip, bzip2 or xz only in a file it can
+  # read twice, and a pipe would hide curl's exit code.
+  tool=tar
+  tar -xf "$archive" -C "$DATASET_DIR"
+  rc=$?
+  rm -f "$archive"
+  return "$rc"
+}
+
+pull=
 if [ -n "${ATLAS_DATASET_URI:-}" ]; then
+  [ -n "${ATLAS_DATASET_URL:-}" ] && say "ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set"
+  pull=aws
+elif [ -n "${ATLAS_DATASET_URL:-}" ]; then
+  pull=curl
+fi
+
+if [ -n "$pull" ]; then
   mkdir -p "$DATASET_DIR"
-  s3 sync "$ATLAS_DATASET_URI" "$DATASET_DIR" > "$work/pull" 2>&1
+  if [ "$pull" = aws ]; then
+    tool=aws
+    s3 sync "$ATLAS_DATASET_URI" "$DATASET_DIR" > "$work/pull" 2>&1
+  else
+    download > "$work/pull" 2>&1
+  fi
   rc=$?
   cat "$work/pull"
   cat "$work/pull" >> "$LOG"
   if [ "$rc" -ne 0 ]; then
-    say "dataset pull failed (aws exit $rc); the trainer did not run"
+    say "dataset pull failed ($tool exit $rc); the trainer did not run"
     exit "$rc"
   fi
 fi

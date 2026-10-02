@@ -1,8 +1,8 @@
 defmodule ExAtlas.Guides.AtlasEntrypointTest do
   # Runs the reference entrypoint (guides/scripts/atlas_entrypoint.sh) with
-  # `sh`, a stub `aws` first on PATH, and a trainer that is a few lines of
-  # shell. The stub records its arguments, the way translate_test.exs shims
-  # `curl`.
+  # `sh`, a stub `aws` and a stub `curl` first on PATH, and a trainer that is a
+  # few lines of shell. The stubs record their arguments, the way
+  # translate_test.exs shims `curl`.
   use ExUnit.Case, async: true
 
   @script Path.expand("../../guides/scripts/atlas_entrypoint.sh", __DIR__)
@@ -32,6 +32,29 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
   exit 0
   """
 
+  # Serves $STUB_SERVE for a download and keeps the file of an upload. A
+  # failure prints what curl -fsS prints for an HTTP 403: no URL.
+  @curl_stub """
+  #!/bin/sh
+  echo "$*" >> "$STUB_DIR/curl.log"
+  out=
+  upload=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o) out=$2; shift 2 ;;
+      -T) upload=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ -n "$upload" ]; then
+    [ -n "$STUB_FAIL_PUT" ] && { echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; }
+    cp "$upload" "$STUB_DIR/uploaded.tar.gz"
+    exit 0
+  fi
+  [ -n "$STUB_FAIL_GET" ] && { echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; }
+  if [ -n "$out" ]; then cp "$STUB_SERVE" "$out"; else cat "$STUB_SERVE"; fi
+  """
+
   setup do
     dir = Path.join(System.tmp_dir!(), "atlas_ep_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -40,6 +63,10 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
     stub = Path.join(dir, "aws")
     File.write!(stub, @stub)
     File.chmod!(stub, 0o755)
+
+    curl = Path.join(dir, "curl")
+    File.write!(curl, @curl_stub)
+    File.chmod!(curl, 0o755)
 
     {:ok, dir: dir}
   end
@@ -64,7 +91,9 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       aws: read(Path.join(dir, "aws.log")),
       trainer: read(Path.join(dir, "trainer.log")),
       uploaded_log: read(Path.join(dir, "uploaded.log")),
-      local_log: read(Path.join(dir, "atlas.log"))
+      local_log: read(Path.join(dir, "atlas.log")),
+      curl: read(Path.join(dir, "curl.log")),
+      archive: nil
     }
   end
 
@@ -206,6 +235,90 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       calls = String.split(r.aws, "\n", trim: true)
       assert length(calls) == 3
       refute r.aws =~ "--endpoint-url"
+    end
+  end
+
+  @get_sig "getsig-5d0c91"
+  @get_url "https://bkt.s3.amazonaws.com/d.tar.gz?X-Amz-Signature=#{@get_sig}"
+
+  # A dataset archive in `dir`, built by the system tar; `gzip: false` leaves
+  # it uncompressed.
+  defp dataset_archive(dir, opts \\ []) do
+    src = Path.join(dir, "src")
+    File.mkdir_p!(Path.join(src, "shards"))
+    File.write!(Path.join(src, "train.txt"), "DATASET-ROW-1")
+    File.write!(Path.join([src, "shards", "s0.txt"]), "SHARD-0")
+    archive = Path.join(dir, "dataset.tar")
+    flags = if Keyword.get(opts, :gzip, true), do: "-czf", else: "-cf"
+    {_, 0} = System.cmd("tar", [flags, archive, "-C", src, "."])
+    archive
+  end
+
+  defp reads_dataset,
+    do: [
+      "sh",
+      "-c",
+      "cat \"$ATLAS_DATASET_DIR/train.txt\" \"$ATLAS_DATASET_DIR/shards/s0.txt\" >> \"$ATLAS_TEST_LOG\""
+    ]
+
+  describe "ATLAS_DATASET_URL" do
+    test "downloads the archive and the trainer sees its files", %{dir: dir} do
+      r =
+        run(dir, reads_dataset(), [
+          {"ATLAS_DATASET_URL", @get_url},
+          {"STUB_SERVE", dataset_archive(dir)}
+        ])
+
+      assert r.status == 0
+      assert r.trainer == "DATASET-ROW-1SHARD-0"
+      assert r.curl =~ @get_url
+      assert r.aws == ""
+    end
+
+    test "an uncompressed tar works too", %{dir: dir} do
+      r =
+        run(dir, reads_dataset(), [
+          {"ATLAS_DATASET_URL", @get_url},
+          {"STUB_SERVE", dataset_archive(dir, gzip: false)}
+        ])
+
+      assert r.status == 0
+      assert r.trainer == "DATASET-ROW-1SHARD-0"
+    end
+
+    test "leaves no download file beside the dataset", %{dir: dir} do
+      run(dir, reads_dataset(), [
+        {"ATLAS_DATASET_URL", @get_url},
+        {"STUB_SERVE", dataset_archive(dir)}
+      ])
+
+      assert dir |> Path.join("data") |> File.ls!() |> Enum.sort() == ["shards", "train.txt"]
+    end
+
+    test "a download that is not a tar archive exits non-zero and runs no trainer", %{dir: dir} do
+      junk = Path.join(dir, "junk")
+      File.write!(junk, "<Error><Code>AccessDenied</Code></Error>")
+
+      r = run(dir, marker_trainer(), [{"ATLAS_DATASET_URL", @get_url}, {"STUB_SERVE", junk}])
+
+      assert r.status != 0
+      refute r.trainer =~ "TRAINER-RAN"
+      assert r.output =~ "dataset pull failed (tar exit"
+    end
+
+    test "with ATLAS_DATASET_URI set too, only aws pulls and the URL is ignored", %{dir: dir} do
+      r =
+        run(dir, marker_trainer(), [
+          {"ATLAS_DATASET_URI", "s3://bkt/datasets/abc/"},
+          {"ATLAS_DATASET_URL", @get_url},
+          {"STUB_SERVE", dataset_archive(dir)}
+        ])
+
+      assert r.status == 0
+      assert r.aws =~ "s3 sync s3://bkt/datasets/abc/"
+      assert r.curl == ""
+      assert r.output =~ "ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set"
+      refute r.output =~ @get_sig
     end
   end
 
