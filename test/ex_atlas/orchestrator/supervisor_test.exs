@@ -107,6 +107,32 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
     end)
   end
 
+  # The supervisor stops before the repo, so a tracker can still write as it
+  # stops: a task that reported deletes its row on the way out.
+  test "stopping the supervisor lets a reported task delete its row", %{database: db} do
+    boot(db)
+
+    {:ok, _tracker, compute} =
+      run_task(
+        persist: true,
+        callback: "https://app.example.com/atlas/cb",
+        finish_grace_ms: 60_000
+      )
+
+    id = compute.id
+    Phoenix.PubSub.subscribe(ExAtlas.PubSub, ExAtlas.Orchestrator.Events.topic(id))
+    {:ok, %{callback_task_id: task_id}} = Store.get(id)
+    :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+    assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+    # The PubSub registry links to its subscribers and stops with the tree.
+    Phoenix.PubSub.unsubscribe(ExAtlas.PubSub, ExAtlas.Orchestrator.Events.topic(id))
+
+    shutdown()
+
+    with_repo(db, fn -> assert :error = Store.get(id) end)
+    assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(id, provider: :mock)
+  end
+
   # 0.8.0 wrote no `:respawning` (#115); a later record may hold nil.
   test "adopts a record without :respawning, and one with nil", %{database: db} do
     boot(db)
