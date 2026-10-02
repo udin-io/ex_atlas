@@ -1308,7 +1308,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     if Process.whereis(@task_supervisor) do
       task =
         Task.Supervisor.async_nolink(@task_supervisor, fn ->
-          guarded(fn -> check.(apply(m, f, args ++ [info])) end)
+          guarded(m, f, args ++ [info], check)
         end)
 
       case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
@@ -1324,8 +1324,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
-  defp guarded(fun) do
-    {:returned, fun.()}
+  defp guarded(m, f, args, check) do
+    {:returned, check.(apply(m, f, args))}
   rescue
     exception -> {:raised, exception.__struct__}
   catch
