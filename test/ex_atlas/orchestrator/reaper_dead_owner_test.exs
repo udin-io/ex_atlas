@@ -122,6 +122,20 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
     end
   end
 
+  test "a delete that raises or exits is logged, and the tick goes on", %{lease: lease} do
+    dead!(lease)
+    compute = pod(@name, FaultyProvider)
+
+    for fault <- [:raise, {:exit, :timeout}] do
+      FaultyProvider.arm(:terminate, fault)
+      log = reap([FaultyProvider])
+
+      assert status(compute) == :running
+      assert log =~ "could not delete #{compute.id} (#{@name}) of dead owner \"m1\""
+      refute log =~ "simulated terminate failure"
+    end
+  end
+
   describe "a pod of a dead owner that something else still holds" do
     setup %{lease: lease} do
       dead!(lease)

@@ -349,6 +349,33 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     end
   end
 
+  describe "a delete that raises" do
+    # FaultyProvider lists the Mock's pods, so both providers see one pod.
+    setup do
+      TestOrchestrator.put_env(
+        tracking_store: false,
+        reap_grace_ms: 0,
+        reap_interval_ms: 60_000,
+        reap_providers: [FaultyProvider, :mock],
+        reap_name_prefix: "atlas-"
+      )
+
+      {:ok, reaper: start_supervised!(Reaper)}
+    end
+
+    test "does not stop the tick, and logs the error's kind only", %{reaper: reaper} do
+      {:ok, compute} = spawn_untracked()
+      FaultyProvider.arm(:terminate, :raise)
+
+      log = capture_log(fn -> assert :ticked = surviving_tick(reaper) end)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ "could not delete #{compute.id}"
+      assert log =~ "RuntimeError"
+      refute log =~ "simulated terminate failure"
+    end
+  end
+
   describe "without a tracking store" do
     setup do
       TestOrchestrator.put_env(

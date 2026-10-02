@@ -483,9 +483,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
         {dead_owners, others} = Enum.split_with(others, &dead_owner(&1, prefix, owner, dead))
 
-        Enum.each(ours, fn compute ->
-          _ = ExAtlas.terminate(compute.id, provider: provider)
-        end)
+        Enum.each(ours, &delete_ours(&1, provider))
 
         Enum.each(
           dead_owners,
@@ -507,8 +505,21 @@ defmodule ExAtlas.Orchestrator.Reaper do
     end
   end
 
+  defp delete_ours(compute, provider) do
+    case delete_compute(compute, provider) do
+      :ok ->
+        :ok
+
+      {:error, error} ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] could not delete #{compute.id} (#{compute.name})" <>
+            "#{failure_kind(error)}; the next tick tries again"
+        )
+    end
+  end
+
   defp delete_dead_owners(compute, provider, {other, expired_at}) do
-    case ExAtlas.terminate(compute.id, provider: provider) do
+    case delete_compute(compute, provider) do
       :ok ->
         Logger.warning(
           "[ExAtlas.Orchestrator.Reaper] deleted #{compute.id} (#{compute.name}): owner " <>
@@ -519,10 +530,27 @@ defmodule ExAtlas.Orchestrator.Reaper do
       {:error, error} ->
         Logger.warning(
           "[ExAtlas.Orchestrator.Reaper] could not delete #{compute.id} (#{compute.name}) of " <>
-            "dead owner #{inspect(other)}#{error_kind(error)}; the next tick tries again"
+            "dead owner #{inspect(other)}#{failure_kind(error)}; the next tick tries again"
         )
     end
   end
+
+  # A delete that raises or exits skips that pod, not the tick: the rest of
+  # this provider's orphans, and every later provider's, still go. Only the
+  # error's kind is logged, never its message, which can carry a provider's
+  # response.
+  defp delete_compute(compute, provider) do
+    ExAtlas.terminate(compute.id, provider: provider)
+  rescue
+    error -> {:error, error}
+  catch
+    :exit, _reason -> {:error, :exit}
+  end
+
+  defp failure_kind(%ExAtlas.Error{kind: kind}), do: " (#{inspect(kind)})"
+  defp failure_kind(%{__exception__: true} = error), do: " (#{inspect(error.__struct__)})"
+  defp failure_kind(:exit), do: " (exited)"
+  defp failure_kind(_other), do: ""
 
   defp since(ms) do
     case DateTime.from_unix(ms, :millisecond) do
