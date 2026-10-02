@@ -36,6 +36,11 @@ out sets no variable.
 | `session_token` | `AWS_SESSION_TOKEN` | yes |
 | `dataset_uri` | `ATLAS_DATASET_URI` | no |
 | `artifact_uri` | `ATLAS_ARTIFACT_URI` | no |
+| `dataset_url` | `ATLAS_DATASET_URL` | yes |
+| `artifact_url` | `ATLAS_ARTIFACT_URL` | yes |
+
+`s3:` needs at least one of the last four. The two URLs are the
+[presigned mode](#presigned-mode-no-storage-key-on-the-pod).
 
 The container does three things, in this order:
 
@@ -80,6 +85,9 @@ What it does:
 | Run | Your arguments, with stdout and stderr merged and copied to `ATLAS_LOG_FILE`. |
 | Push | `aws s3 sync "$ATLAS_ARTIFACT_DIR" "$ATLAS_ARTIFACT_URI"` and `aws s3 cp "$ATLAS_LOG_FILE" "${ATLAS_ARTIFACT_URI}atlas.log"`, only when `ATLAS_ARTIFACT_URI` is set. Runs on exit, `INT` and `TERM`. |
 
+With `ATLAS_DATASET_URL` or `ATLAS_ARTIFACT_URL` instead, pull and push use
+`curl`; see [presigned mode](#presigned-mode-no-storage-key-on-the-pod).
+
 It forwards `INT` and `TERM` to the trainer, waits for it, uploads, and exits
 with the trainer's code (143 for a trainer ended by `TERM`). A failed pull
 still uploads the log, which holds aws's error. A failed upload prints
@@ -98,7 +106,8 @@ output goes to the log, so do not print `AWS_SECRET_ACCESS_KEY` from it.
 | `ATLAS_ARTIFACT_DIR` | `/artifacts` | Where the trainer writes results; the script creates it |
 | `ATLAS_LOG_FILE` | `/tmp/atlas.log` | The copy of the trainer's output |
 
-The script needs `sh`, `aws`, `tee`, `mkfifo` and `mktemp`. Debian, Alpine
+The script needs `sh`, `tee`, `mkfifo` and `mktemp`, plus `aws` for the URIs
+or `curl`, `tar` and `gzip` for the URLs. Debian, Alpine
 (busybox) and Ubuntu images have the last three.
 
 Limits:
@@ -170,4 +179,63 @@ them from the provider.
 - Give it read on the dataset prefix and write on the artifact prefix only.
 - Rotate it on a schedule. A key passed to a task lives as long as the pod.
 
-A later slice (#73) adds presigned URLs, which put no storage key on the pod.
+Presigned mode, below, puts no storage key on the pod at all.
+
+## Presigned mode: no storage key on the pod
+
+You presign two URLs on your side: a GET for one dataset archive and a PUT
+for one artifact archive. The pod gets only those. It can read one object and
+write one object, until the URLs expire. ExAtlas never presigns and never
+reads a URL's expiry. `ex_aws_s3` presigns locally, with no request to S3:
+
+```elixir
+config = ExAws.Config.new(:s3)
+
+{:ok, dataset_url} =
+  ExAws.S3.presigned_url(config, :get, "acme-data", "datasets/abc.tar.gz", expires_in: 3_600)
+
+# Longer than max_runtime_ms: the PUT runs when the trainer ends.
+{:ok, artifact_url} =
+  ExAws.S3.presigned_url(config, :put, "acme-data", "artifacts/run-123.tar.gz",
+    expires_in: 6 * 3_600
+  )
+
+ExAtlas.Orchestrator.run_task(
+  provider: :runpod,
+  gpu: :rtx_4090,
+  image: "ghcr.io/acme/trainer:latest",
+  command: ["/atlas_entrypoint.sh", "python", "/train.py"],
+  max_runtime_ms: :timer.hours(4),
+  s3: %{dataset_url: dataset_url, artifact_url: artifact_url}
+)
+# container env: ATLAS_DATASET_URL and ATLAS_ARTIFACT_URL, no AWS_* key
+```
+
+Each URL must be `http://` or `https://` with a host, and carry no user info.
+A URL is a bearer credential until it expires, so ExAtlas treats it like a
+key: `inspect/1`, errors, crash reports and tracking records never show it.
+
+The reference entrypoint:
+
+| Step | Command |
+|---|---|
+| Pull | `curl -fsSL -o <file> "$ATLAS_DATASET_URL"`, then `tar -xf <file> -C "$ATLAS_DATASET_DIR"`. The archive may be a plain tar or compressed with gzip, bzip2 or xz. The file sits in `ATLAS_DATASET_DIR` until it is unpacked, so that disk needs room for both. A failure exits with curl's or tar's code and runs no trainer. |
+| Push | Copies the log to `$ATLAS_ARTIFACT_DIR/atlas.log`, packs the directory with `tar -czf` into a file under `$TMPDIR`, then `curl -fsS -T <file> "$ATLAS_ARTIFACT_URL"`. One object holds the artifacts and the log. |
+
+- **A URI and a URL for the same side:** the URI wins, and the script prints
+  `ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set` (or the artifact
+  equivalent). The two modes mix across sides: a URI for the dataset and a
+  URL for the artifacts works.
+- **Expiry.** A SigV4 presigned URL lives at most 7 days, and no longer than
+  the credentials that signed it: a URL signed with a session token dies with
+  the token. Presign the PUT for longer than `max_runtime_ms`.
+- **Size.** A single PUT holds at most 5 GB. Multipart presigned uploads are
+  not supported.
+- **One file that tar cannot read** is reported (`tar exit N while packing the
+  artifacts`), and whatever tar packed still uploads. GNU tar skips the file;
+  bsdtar stops there.
+- **What prints.** The script never prints a URL. `curl -f` prints no
+  response body on an HTTP error, and S3's error body for a bad signature
+  echoes the signature. curl's own error lines name the host at most, such as
+  `Could not resolve host`. The URL is in the pod's environment and on curl's
+  command line, so any process in the container can read it.
