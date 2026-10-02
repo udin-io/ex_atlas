@@ -139,6 +139,10 @@ defmodule ExAtlas.Orchestrator do
   tracker starts, so the next boot can re-adopt it instead of letting the
   Reaper reclaim it as an orphan. See `ExAtlas.Orchestrator.TrackingStore` for
   what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
+
+  `persist: true` with `s3:` returns `{:error, %NimbleOptions.ValidationError{key:
+  :persist}}` before the provider is called: a record never holds the storage
+  credentials, so an adopted task would respawn without them.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}
