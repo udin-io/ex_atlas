@@ -848,6 +848,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # calls: the web request that carried them must not be able to block on this
   # mailbox, and an untrusted pod must not get a lever on it.
 
+  # A token that signs its attempt arrives with it. A stale attempt is a report
+  # from the pod a respawn replaced: it passed the Registry check in
+  # `ExAtlas.Callback.ingest/3` before `respawn/2` moved the attempt, and
+  # waited in this mailbox behind the poll that respawned. It is dropped.
+  def handle_info({:atlas_callback, kind, payload, attempt}, %{respawns: attempt} = state),
+    do: handle_info({:atlas_callback, kind, payload}, state)
+
+  def handle_info({:atlas_callback, _kind, _payload, _stale_attempt}, state),
+    do: {:noreply, state}
+
   # Relayed verbatim and retained nowhere. `ExAtlas.Callback` has already
   # checked that the payload is a JSON object; what is *in* it is a convention
   # between the container and its subscribers, not something to reinterpret

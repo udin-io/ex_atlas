@@ -241,6 +241,7 @@ defmodule ExAtlas.CallbackTest do
       {:ok, _} = register(task, 1)
 
       assert :ok = Callback.ingest(%{task_id: task, attempt: 1}, :progress, %{"pct" => 1})
+      assert_receive {:atlas_callback, :progress, %{"pct" => 1}, 1}
     end
 
     test "refuses a report from an earlier attempt as untracked" do

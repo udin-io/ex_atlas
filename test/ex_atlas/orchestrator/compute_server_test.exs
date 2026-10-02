@@ -1866,6 +1866,47 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert_receive {:atlas_compute, ^new_id, {:log, %{"lines" => ["fresh"]}}}, 2_000
     end
 
+    # The report passes the Registry check before the tracker learns of the
+    # preemption, and waits in its mailbox behind the poll that respawns.
+    test "a finish from the replaced pod queued behind the respawn is dropped",
+         %{base: base} do
+      {pid, pod_a, _task_id} = start_reporting_task(base, provider: FaultyProvider)
+      old_id = pod_a.id
+      ref = Process.monitor(pid)
+
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      assert_receive {:blocked, :get_compute, poller}, 2_000
+      FaultyProvider.reset()
+      :ok = Mock.forget(old_id)
+
+      :sys.suspend(pid)
+      send(poller, :release)
+      await_mailbox(pid)
+
+      assert post_report("/finish", pod_token(pod_a), ~s({"exit_code":0})).status == 202
+      :sys.resume(pid)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      {:ok, pod_b} = Mock.get_compute(new_id, %{})
+
+      assert post_report("/finish", pod_token(pod_b), ~s({"exit_code":3})).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 3}}}, 2_000
+      refute_received {:atlas_compute, _, {:task, _}}
+      refute_received {:DOWN, ^ref, :process, ^pid, _}
+    end
+
+    defp await_mailbox(pid, tries \\ 2_000) do
+      case Process.info(pid, :message_queue_len) do
+        {:message_queue_len, n} when n > 0 ->
+          :ok
+
+        _ when tries > 0 ->
+          Process.sleep(1)
+          await_mailbox(pid, tries - 1)
+      end
+    end
+
     # 0.8.0 minted no attempt, and a pod it rented may still be running. Its
     # report is accepted unchecked, even after a respawn: see #100.
     test "a token with no attempt, as 0.8.0 minted it, is still accepted after a respawn",

@@ -148,8 +148,9 @@ defmodule ExAtlas.Callback do
           :ok | {:error, :not_tracked | :invalid_payload}
   def ingest(%{task_id: task_id} = claims, kind, payload) when is_binary(task_id) do
     with {:ok, normalized} <- normalize(kind, payload),
-         {:ok, pid} <- lookup(task_id, Map.get(claims, :attempt)) do
-      send(pid, {:atlas_callback, kind, normalized})
+         attempt = Map.get(claims, :attempt),
+         {:ok, pid} <- lookup(task_id, attempt) do
+      send(pid, message(kind, normalized, attempt))
       :ok
     end
   end
@@ -268,6 +269,11 @@ defmodule ExAtlas.Callback do
       end
     end
   end
+
+  # The tracker checks the attempt again: a report can pass `lookup/2` just
+  # before a respawn moves the Registry value, and wait in the mailbox behind it.
+  defp message(kind, payload, nil), do: {:atlas_callback, kind, payload}
+  defp message(kind, payload, attempt), do: {:atlas_callback, kind, payload, attempt}
 
   defp current_attempt?(nil, _current), do: true
   defp current_attempt?(attempt, current), do: attempt === current
