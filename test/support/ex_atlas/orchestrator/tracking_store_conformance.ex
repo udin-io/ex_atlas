@@ -141,6 +141,22 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
           assert {:ok, ^record} = @store.get("compute-s3")
         end
 
+        # `ExAtlas.Orchestrator.TrackingStore.scrub_opts/1` writes env names
+        # with `:not_stored`, or the bare marker. A store that drops either
+        # lets an adopted respawn run with no environment.
+        test "put/1 round-trips a scrubbed env: inside opts" do
+          for {id, env} <- [
+                {"compute-env", %{"HF_TOKEN" => :not_stored, "WANDB_PROJECT" => :not_stored}},
+                {"compute-env-bare", :not_stored},
+                {"compute-env-empty", %{}}
+              ] do
+            record = conformance_record(id, %{opts: [gpu: :h100, mode: :task, env: env]})
+            :ok = @store.put(record)
+
+            assert {:ok, ^record} = @store.get(id)
+          end
+        end
+
         test "put/1 overwrites the record for an id" do
           :ok = @store.put(conformance_record("compute-b"))
           :ok = @store.put(conformance_record("compute-b", %{respawns: 3}))
