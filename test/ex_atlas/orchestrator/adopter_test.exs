@@ -831,7 +831,12 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
                        {:preempted, %ExAtlas.Error{kind: :validation, message: message}}}},
                      2_000
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      # The tracker may be gone before the monitor lands (`:noproc`), so the
+      # `:terminating` event shows how it stopped: normally, not by a crash.
+      assert_receive {:DOWN, ^ref, :process, ^pid, reason} when reason in [:normal, :noproc],
+                     2_000
+
+      assert_received {:atlas_compute, ^id, {:terminating, :normal}}
       refute_received {:atlas_compute, ^id, {:respawned, _}}
       refute image in mock_images()
       assert :error = Memory.get(id)
