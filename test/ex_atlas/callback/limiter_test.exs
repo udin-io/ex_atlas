@@ -10,6 +10,14 @@ defmodule ExAtlas.Callback.LimiterTest do
 
   defp task_id, do: "task-#{System.unique_integer([:positive])}"
 
+  test "with no orchestrator tree, raises naming both ways to start it" do
+    stop_supervised!(Limiter)
+
+    error = assert_raise ArgumentError, fn -> Limiter.take(task_id(), :progress) end
+    assert error.message =~ "start_orchestrator: true"
+    assert error.message =~ "ExAtlas.Orchestrator.Supervisor"
+  end
+
   test "a fresh task may spend its whole burst and no more" do
     task = task_id()
     burst = Limiter.burst(:progress)
