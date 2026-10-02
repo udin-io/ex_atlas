@@ -93,8 +93,24 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       uploaded_log: read(Path.join(dir, "uploaded.log")),
       local_log: read(Path.join(dir, "atlas.log")),
       curl: read(Path.join(dir, "curl.log")),
-      archive: nil
+      archive: unpack(dir, Path.join(dir, "uploaded.tar.gz"))
     }
+  end
+
+  # The files of the archive the stub curl received, by path, or nil.
+  defp unpack(dir, archive) do
+    if File.exists?(archive) do
+      out = Path.join(dir, "unpacked")
+      File.rm_rf!(out)
+      File.mkdir_p!(out)
+      {_, 0} = System.cmd("tar", ["-xzf", archive, "-C", out])
+
+      out
+      |> Path.join("**")
+      |> Path.wildcard(match_dot: true)
+      |> Enum.reject(&File.dir?/1)
+      |> Map.new(&{Path.relative_to(&1, out), File.read!(&1)})
+    end
   end
 
   defp read(path), do: if(File.exists?(path), do: File.read!(path), else: "")
@@ -239,7 +255,9 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
   end
 
   @get_sig "getsig-5d0c91"
+  @put_sig "putsig-a7e3b2"
   @get_url "https://bkt.s3.amazonaws.com/d.tar.gz?X-Amz-Signature=#{@get_sig}"
+  @put_url "https://bkt.s3.amazonaws.com/a.tar.gz?X-Amz-Signature=#{@put_sig}"
 
   # A dataset archive in `dir`, built by the system tar; `gzip: false` leaves
   # it uncompressed.
@@ -260,6 +278,9 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       "-c",
       "cat \"$ATLAS_DATASET_DIR/train.txt\" \"$ATLAS_DATASET_DIR/shards/s0.txt\" >> \"$ATLAS_TEST_LOG\""
     ]
+
+  defp upload_calls(r),
+    do: r.curl |> String.split("\n", trim: true) |> Enum.filter(&(&1 =~ ~r/(^| )-T /))
 
   describe "ATLAS_DATASET_URL" do
     test "downloads the archive and the trainer sees its files", %{dir: dir} do
@@ -295,6 +316,20 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       assert dir |> Path.join("data") |> File.ls!() |> Enum.sort() == ["shards", "train.txt"]
     end
 
+    test "a failed download exits non-zero, runs no trainer and uploads the log", %{dir: dir} do
+      r =
+        run(dir, marker_trainer(), [
+          {"ATLAS_DATASET_URL", @get_url},
+          {"ATLAS_ARTIFACT_URL", @put_url},
+          {"STUB_FAIL_GET", "1"}
+        ])
+
+      assert r.status == 22
+      refute r.trainer =~ "TRAINER-RAN"
+      assert r.output =~ "dataset pull failed (curl exit 22)"
+      assert r.archive["atlas.log"] =~ "returned error: 403"
+    end
+
     test "a download that is not a tar archive exits non-zero and runs no trainer", %{dir: dir} do
       junk = Path.join(dir, "junk")
       File.write!(junk, "<Error><Code>AccessDenied</Code></Error>")
@@ -319,6 +354,151 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       assert r.curl == ""
       assert r.output =~ "ATLAS_DATASET_URL ignored: ATLAS_DATASET_URI is set"
       refute r.output =~ @get_sig
+    end
+  end
+
+  describe "ATLAS_ARTIFACT_URL" do
+    defp writes_artifact(code),
+      do: [
+        "sh",
+        "-c",
+        "mkdir -p \"$ATLAS_ARTIFACT_DIR/ckpt\"; echo WEIGHTS > \"$ATLAS_ARTIFACT_DIR/ckpt/model.bin\"; " <>
+          "echo TRAINER-SAYS-BYE; exit #{code}"
+      ]
+
+    test "one PUT carries the artifacts and atlas.log, and the trainer's code stands", %{dir: dir} do
+      r = run(dir, writes_artifact(2), [{"ATLAS_ARTIFACT_URL", @put_url}])
+
+      assert r.status == 2
+      assert [put] = upload_calls(r)
+      assert put =~ @put_url
+      assert r.archive["ckpt/model.bin"] == "WEIGHTS\n"
+      assert r.archive["atlas.log"] =~ "TRAINER-SAYS-BYE"
+      assert r.aws == ""
+    end
+
+    test "a failed PUT is printed and the trainer's code stands", %{dir: dir} do
+      ok =
+        run(dir, writes_artifact(0), [{"ATLAS_ARTIFACT_URL", @put_url}, {"STUB_FAIL_PUT", "1"}])
+
+      assert ok.status == 0
+      assert ok.output =~ "artifact upload failed (curl exit 22)"
+
+      bad =
+        run(dir, writes_artifact(7), [{"ATLAS_ARTIFACT_URL", @put_url}, {"STUB_FAIL_PUT", "1"}])
+
+      assert bad.status == 7
+    end
+
+    test "a SIGTERM reaches the trainer and the archive still uploads", %{dir: dir} do
+      r =
+        run(dir, ["sh", "-c", "kill -TERM $PPID; exec sleep 30"], [
+          {"ATLAS_ARTIFACT_URL", @put_url}
+        ])
+
+      assert r.status == 143
+      assert [_put] = upload_calls(r)
+      assert Map.has_key?(r.archive, "atlas.log")
+    end
+
+    test "an unreadable file is reported and the rest still uploads", %{dir: dir} do
+      trainer = [
+        "sh",
+        "-c",
+        "echo WEIGHTS > \"$ATLAS_ARTIFACT_DIR/model.bin\"; echo X > \"$ATLAS_ARTIFACT_DIR/locked\"; " <>
+          "chmod 000 \"$ATLAS_ARTIFACT_DIR/locked\""
+      ]
+
+      r = run(dir, trainer, [{"ATLAS_ARTIFACT_URL", @put_url}])
+
+      assert r.status == 0
+      assert r.output =~ "while packing the artifacts"
+      assert [_put] = upload_calls(r)
+      # bsdtar stops at the unreadable file and GNU tar skips it, so only the
+      # file packed before it is certain.
+      assert r.archive["model.bin"] == "WEIGHTS\n"
+    end
+
+    test "with ATLAS_ARTIFACT_URI set too, only aws uploads and the URL is ignored", %{dir: dir} do
+      r =
+        run(dir, writes_artifact(0), [
+          {"ATLAS_ARTIFACT_URI", "s3://bkt/artifacts/run-1/"},
+          {"ATLAS_ARTIFACT_URL", @put_url}
+        ])
+
+      assert r.status == 0
+      assert r.aws =~ "s3 sync #{dir}/artifacts s3://bkt/artifacts/run-1/"
+      assert r.aws =~ "atlas.log"
+      assert upload_calls(r) == []
+      assert r.curl == ""
+      assert r.output =~ "ATLAS_ARTIFACT_URL ignored: ATLAS_ARTIFACT_URI is set"
+    end
+
+    test "a URI on one side and a URL on the other both run", %{dir: dir} do
+      r =
+        run(dir, marker_trainer(), [
+          {"ATLAS_DATASET_URI", "s3://bkt/datasets/abc/"},
+          {"ATLAS_ARTIFACT_URL", @put_url}
+        ])
+
+      assert r.status == 0
+      assert r.aws =~ "s3 sync s3://bkt/datasets/abc/"
+      assert [_put] = upload_calls(r)
+    end
+  end
+
+  describe "presigned URLs stay out of what the script prints" do
+    defp assert_no_signature(r) do
+      for sig <- [@get_sig, @put_sig],
+          {where, text} <- [
+            output: r.output,
+            local_log: r.local_log,
+            uploaded_log: (r.archive || %{})["atlas.log"] || ""
+          ] do
+        refute text =~ sig, "#{where} leaked #{sig}"
+      end
+    end
+
+    defp both_urls(dir),
+      do: [
+        {"ATLAS_DATASET_URL", @get_url},
+        {"ATLAS_ARTIFACT_URL", @put_url},
+        {"STUB_SERVE", dataset_archive(dir)}
+      ]
+
+    test "control: a trainer that prints a URL shows up in every place we search", %{dir: dir} do
+      r = run(dir, ["sh", "-c", "echo $ATLAS_ARTIFACT_URL"], both_urls(dir))
+
+      assert r.output =~ @put_sig
+      assert r.local_log =~ @put_sig
+      assert r.archive["atlas.log"] =~ @put_sig
+    end
+
+    test "on success", %{dir: dir} do
+      r = run(dir, marker_trainer(), both_urls(dir))
+      assert r.status == 0
+      assert [_put] = upload_calls(r)
+      assert_no_signature(r)
+    end
+
+    test "when the download fails", %{dir: dir} do
+      r = run(dir, marker_trainer(), both_urls(dir) ++ [{"STUB_FAIL_GET", "1"}])
+      assert r.status != 0
+      assert r.archive["atlas.log"] =~ "returned error: 403"
+      assert_no_signature(r)
+    end
+
+    test "when the upload fails", %{dir: dir} do
+      r = run(dir, marker_trainer(4), both_urls(dir) ++ [{"STUB_FAIL_PUT", "1"}])
+      assert r.status == 4
+      assert r.output =~ "artifact upload failed"
+      assert_no_signature(r)
+    end
+
+    test "when a URI overrides each URL", %{dir: dir} do
+      r = run(dir, marker_trainer(), both_urls(dir) ++ uris())
+      assert r.output =~ "ignored"
+      assert_no_signature(r)
     end
   end
 

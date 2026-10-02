@@ -9,7 +9,8 @@
 # 2. Runs the trainer, copying stdout and stderr to ATLAS_LOG_FILE
 #    (default /tmp/atlas.log).
 # 3. On exit, INT or TERM, syncs ATLAS_ARTIFACT_DIR (default /artifacts) and
-#    the log to ATLAS_ARTIFACT_URI.
+#    the log to ATLAS_ARTIFACT_URI, or packs them into one .tar.gz and PUTs it
+#    to the presigned ATLAS_ARTIFACT_URL. The URI wins when both are set.
 #
 # The exit code is the trainer's. A failed upload is printed and changes
 # nothing. The script never deletes the pod: the wrapper that ExAtlas puts
@@ -46,11 +47,32 @@ trainer_pid=
 : > "$LOG"
 
 upload() {
-  [ -n "${ATLAS_ARTIFACT_URI:-}" ] || return 0
-  uri=${ATLAS_ARTIFACT_URI%/}
+  if [ -n "${ATLAS_ARTIFACT_URI:-}" ]; then
+    [ -n "${ATLAS_ARTIFACT_URL:-}" ] && say "ATLAS_ARTIFACT_URL ignored: ATLAS_ARTIFACT_URI is set"
+    uri=${ATLAS_ARTIFACT_URI%/}
 
-  s3 sync "$ARTIFACT_DIR" "$uri/" || say "artifact upload failed (aws exit $?)"
-  s3 cp "$LOG" "$uri/atlas.log" || say "artifact upload failed: atlas.log (aws exit $?)"
+    s3 sync "$ARTIFACT_DIR" "$uri/" || say "artifact upload failed (aws exit $?)"
+    s3 cp "$LOG" "$uri/atlas.log" || say "artifact upload failed: atlas.log (aws exit $?)"
+  elif [ -n "${ATLAS_ARTIFACT_URL:-}" ]; then
+    put_archive
+  fi
+}
+
+# One presigned URL writes one object, so the log goes inside the archive. A
+# single PUT holds at most 5 GB.
+put_archive() {
+  archive="$work/artifacts.tar.gz"
+  cp "$LOG" "$ARTIFACT_DIR/atlas.log" || say "could not add atlas.log to the artifacts"
+  # tar exits non-zero on one unreadable file and still packs the rest: send
+  # what it packed.
+  tar -czf "$archive" -C "$ARTIFACT_DIR" . || say "tar exit $? while packing the artifacts"
+  if [ ! -s "$archive" ]; then
+    say "artifact upload failed: no archive to send"
+    return 0
+  fi
+  # `-f`: no response body on an HTTP error, so S3's echo of the signature
+  # never reaches the log.
+  curl -fsS -T "$archive" "$ATLAS_ARTIFACT_URL" || say "artifact upload failed (curl exit $?)"
 }
 
 finish() {
