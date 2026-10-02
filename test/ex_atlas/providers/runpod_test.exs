@@ -1324,7 +1324,7 @@ defmodule ExAtlas.Providers.RunPodTest do
       end)
 
       {:ok, endpoint} = RunPod.get_endpoint("4m7x2k9q", ctx)
-      assert endpoint.raw["env"]["HF_TOKEN"] == "s3cr3t-value"
+      refute Map.has_key?(endpoint.raw, "env")
       refute inspect(endpoint) =~ "s3cr3t-value"
     end
 
@@ -1353,6 +1353,185 @@ defmodule ExAtlas.Providers.RunPodTest do
       end)
 
       assert {:error, %ExAtlas.Error{kind: :not_found}} = RunPod.delete_endpoint("gone", ctx)
+    end
+  end
+
+  describe "endpoint and template env stays out of raw" do
+    alias ExAtlas.Providers.RunPod
+
+    @env_secret "tsec-env-4e7a"
+    @env_leaf %{"HF_TOKEN" => @env_secret, "MODEL" => "llama"}
+    @env_endpoint %{
+      "id" => "ep1",
+      "name" => "gen",
+      "type" => "QUEUE",
+      "env" => @env_leaf,
+      "template" => %{"id" => "t1", "image" => "img", "env" => @env_leaf},
+      "workers" => %{"min" => 0, "max" => 3}
+    }
+    @env_template %{
+      "id" => "t1",
+      "name" => "trainer",
+      "image" => "img",
+      "env" => @env_leaf,
+      "disk" => 80
+    }
+
+    setup %{ctx_opts: opts}, do: {:ok, ctx: ExAtlas.Config.build_ctx(:runpod, opts)}
+
+    # Every print path a crash report or a log line can take.
+    defp prints(term),
+      do: inspect(term, structs: false, limit: :infinity, printable_limit: :infinity)
+
+    defp page(key, entries, next),
+      do: %{key => entries, "pagination" => %{"nextCursor" => next, "hasNextPage" => next != nil}}
+
+    defp serve_pages(bypass, path, key, entry) do
+      test_pid = self()
+
+      Bypass.expect(bypass, "GET", path, fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        send(test_pid, {:served, Jason.encode!(entry)})
+
+        case conn.query_params["cursor"] do
+          nil -> json(conn, 200, page(key, [entry], "c2"))
+          "c2" -> json(conn, 200, page(key, [%{entry | "id" => "b"}], nil))
+        end
+      end)
+    end
+
+    test "get_endpoint drops env and template env from raw", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+        json(conn, 200, @env_endpoint)
+      end)
+
+      assert {:ok, endpoint} = RunPod.get_endpoint("ep1", ctx)
+      refute Map.has_key?(endpoint.raw, "env")
+      refute Map.has_key?(endpoint.raw["template"], "env")
+      refute prints(endpoint) =~ @env_secret
+      refute prints(endpoint) =~ "HF_TOKEN"
+    end
+
+    test "get_endpoint keeps every other key of raw", %{bypass: bypass, ctx: ctx} do
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+        json(conn, 200, @env_endpoint)
+      end)
+
+      assert {:ok, endpoint} = RunPod.get_endpoint("ep1", ctx)
+
+      assert endpoint.raw == %{
+               "id" => "ep1",
+               "name" => "gen",
+               "type" => "QUEUE",
+               "template" => %{"id" => "t1", "image" => "img"},
+               "workers" => %{"min" => 0, "max" => 3}
+             }
+    end
+
+    test "list_endpoints drops env from every page", %{bypass: bypass, ctx: ctx} do
+      serve_pages(bypass, "/serverless", "endpoints", @env_endpoint)
+
+      assert {:ok, [%{id: "ep1"} = first, %{id: "b"} = second]} = RunPod.list_endpoints(ctx)
+      assert_received {:served, served}
+      assert served =~ @env_secret
+
+      for endpoint <- [first, second] do
+        refute prints(endpoint) =~ @env_secret
+        refute Map.has_key?(endpoint.raw, "env")
+      end
+    end
+
+    test "a template, listed, fetched or created, keeps env out of raw", %{
+      bypass: bypass,
+      ctx: ctx
+    } do
+      Bypass.expect_once(bypass, "GET", "/templates/t1", fn conn ->
+        json(conn, 200, @env_template)
+      end)
+
+      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+        json(conn, 201, @env_template)
+      end)
+
+      request =
+        ExAtlas.Spec.TemplateRequest.new!(name: "trainer", image: "img", env: @env_leaf)
+
+      assert {:ok, fetched} = RunPod.get_template("t1", ctx)
+      assert {:ok, created} = RunPod.create_template(request, ctx)
+
+      serve_pages(bypass, "/templates", "templates", @env_template)
+      assert {:ok, [listed, _]} = RunPod.list_templates(ctx)
+
+      for template <- [fetched, created, listed] do
+        refute Map.has_key?(template.raw, "env")
+        refute prints(template.raw) =~ @env_secret
+        # Control: the normalized field still carries the configured env.
+        assert template.env == @env_leaf
+      end
+    end
+
+    test "a response with no env keeps its whole raw", %{bypass: bypass, ctx: ctx} do
+      endpoint = Map.drop(@env_endpoint, ["env"]) |> Map.put("template", %{"id" => "t1"})
+      template = Map.delete(@env_template, "env")
+
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+        json(conn, 200, endpoint)
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/templates/t1", fn conn -> json(conn, 200, template) end)
+
+      assert {:ok, %{raw: ^endpoint}} = RunPod.get_endpoint("ep1", ctx)
+      assert {:ok, %{raw: ^template}} = RunPod.get_template("t1", ctx)
+    end
+
+    test "an error status whose body echoes the resource keeps env out of the error", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      ctx = ExAtlas.Config.build_ctx(:runpod, opts ++ [req_options: [retry: false]])
+
+      for status <- [302, 400, 404, 409, 500, 503] do
+        Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+          json(conn, status, @env_endpoint)
+        end)
+
+        Bypass.expect_once(bypass, "GET", "/templates/t1", fn conn ->
+          json(conn, status, @env_template)
+        end)
+
+        assert {:error, %ExAtlas.Error{status: ^status} = from_endpoint} =
+                 RunPod.get_endpoint("ep1", ctx)
+
+        assert {:error, %ExAtlas.Error{status: ^status} = from_template} =
+                 RunPod.get_template("t1", ctx)
+
+        for error <- [from_endpoint, from_template] do
+          refute prints(error) =~ @env_secret
+          # Control: the rest of the body stays for the caller to read.
+          assert error.raw["id"] in ["ep1", "t1"]
+        end
+      end
+    end
+
+    test "an error body that is plain text still reads as the message", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      ctx = ExAtlas.Config.build_ctx(:runpod, opts ++ [req_options: [retry: false]])
+
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn ->
+        Plug.Conn.resp(conn, 502, "bad gateway")
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 502, message: "bad gateway"}} =
+               RunPod.get_endpoint("ep1", ctx)
+    end
+
+    test "an error body with no env keeps its raw whole", %{bypass: bypass, ctx: ctx} do
+      body = %{"detail" => "no such endpoint", "id" => "ep1"}
+      Bypass.expect_once(bypass, "GET", "/serverless/ep1", fn conn -> json(conn, 404, body) end)
+
+      assert {:error, %ExAtlas.Error{raw: ^body}} = RunPod.get_endpoint("ep1", ctx)
     end
   end
 
