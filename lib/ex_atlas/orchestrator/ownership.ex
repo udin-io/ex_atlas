@@ -52,10 +52,16 @@ defmodule ExAtlas.Orchestrator.Ownership do
   defp validate(nil), do: {:ok, nil}
 
   defp validate(owner) when is_binary(owner) do
-    if Regex.match?(@owner_format, owner), do: {:ok, owner}, else: invalid(owner)
+    if valid?(owner), do: {:ok, owner}, else: invalid(owner)
   end
 
   defp validate(owner), do: invalid(owner)
+
+  @doc false
+  # Whether `owner` is a name `:reap_owner` accepts, and so one a pod name
+  # can carry.
+  @spec valid?(term()) :: boolean()
+  def valid?(owner), do: is_binary(owner) and Regex.match?(@owner_format, owner)
 
   # The value is not echoed: a mistyped env var can hold a secret.
   defp invalid(owner) do
