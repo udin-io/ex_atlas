@@ -55,6 +55,9 @@ defmodule ExAtlas.Orchestrator.Lease do
   @default_ttl_ms 90_000
   # A dead node's tasks wait out the whole ttl before another node tracks them.
   @max_ttl_ms 3_600_000
+  # Under about a database round trip, live nodes read each other's leases as
+  # expired and take each other's tasks.
+  @min_ttl_ms 1_000
 
   @doc false
   def child_spec(opts) do
@@ -209,11 +212,11 @@ defmodule ExAtlas.Orchestrator.Lease do
     |> Keyword.get(:lease_ttl_ms, @default_ttl_ms)
   end
 
-  defp ttl!(ttl) when is_integer(ttl) and ttl >= 3 and ttl <= @max_ttl_ms, do: ttl
+  defp ttl!(ttl) when is_integer(ttl) and ttl >= @min_ttl_ms and ttl <= @max_ttl_ms, do: ttl
 
   defp ttl!(_other) do
     raise ArgumentError,
-          "config :ex_atlas, :orchestrator, lease_ttl_ms: must be an integer from 3 to " <>
+          "config :ex_atlas, :orchestrator, lease_ttl_ms: must be an integer from #{@min_ttl_ms} to " <>
             "#{@max_ttl_ms} (milliseconds); the default is #{@default_ttl_ms}"
   end
 end

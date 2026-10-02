@@ -128,15 +128,15 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
         at
       end
 
-      start_lease!("m2", ttl_ms: 300, clock: clock)
+      start_lease!("m2", ttl_ms: 1_000, clock: clock)
 
       assert_receive {:clock, first}, 1_000
-      assert_receive {:clock, second}, 1_000
+      assert_receive {:clock, second}, 2_000
       :sys.get_state(Lease)
 
-      assert lease_expiry("m2") >= second + 300
-      assert second - first >= 90
-      assert second - first < 300
+      assert lease_expiry("m2") >= second + 1_000
+      assert second - first >= 300
+      assert second - first < 1_000
     end
 
     test "takes lease_ttl_ms from config when no :ttl_ms is given" do
@@ -147,14 +147,16 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       assert_in_delta lease_expiry("m2"), at + 120_000, 5_000
     end
 
-    test "accepts lease_ttl_ms from 3 ms to one hour, and refuses either side" do
-      for ttl <- [3, 3_600_000] do
+    # Under about a database round trip, live nodes would read each other's
+    # leases as expired and take each other's tasks.
+    test "accepts lease_ttl_ms from one second to one hour, and refuses either side" do
+      for ttl <- [1_000, 3_600_000] do
         pid = start_lease!("m2", ttl_ms: ttl)
         assert Process.alive?(pid)
         stop_supervised!(Lease)
       end
 
-      for ttl <- [2, 3_600_001, 0, -90_000, 90.0, "90000"] do
+      for ttl <- [999, 3, 3_600_001, 0, -90_000, 90.0, "90000"] do
         assert {:error, {{%ArgumentError{message: message}, _stack}, _child}} =
                  start_supervised({Lease, store: Store, owner: "m2", ttl_ms: ttl})
 
