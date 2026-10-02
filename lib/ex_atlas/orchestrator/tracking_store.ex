@@ -313,7 +313,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
               rewrite :: (record() -> {:ok, record()} | :skip)
             ) :: {:ok, [record()]} | {:error, term()}
 
-  @optional_callbacks renew_lease: 2, claim_expired: 3
+  @doc """
+  Every owner whose lease expired before `now_ms`, with its expiry in
+  wall-clock ms.
+
+  Optional. With it, `ExAtlas.Orchestrator.Lease` watches each expired
+  owner, and the Reaper deletes the untracked pods of one whose lease stayed
+  expired and unchanged for `:reap_dead_owner_after_ms`.
+  """
+  @callback expired_leases(now_ms :: integer()) ::
+              {:ok, %{optional(String.t()) => integer()}} | {:error, term()}
+
+  @optional_callbacks renew_lease: 2, claim_expired: 3, expired_leases: 1
 
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a

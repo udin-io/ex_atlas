@@ -304,6 +304,18 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     defp usec(ms), do: DateTime.from_unix!(ms * 1_000, :microsecond)
 
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def expired_leases(now_ms) when is_integer(now_ms) do
+      now = usec(now_ms)
+
+      leases =
+        repo!().all(from(l in Lease, where: l.expires_at < ^now, select: {l.owner, l.expires_at}))
+
+      {:ok, Map.new(leases, fn {owner, at} -> {owner, DateTime.to_unix(at, :millisecond)} end)}
+    rescue
+      error -> {:error, error}
+    end
+
     # Each row is claimed by its own conditional UPDATE, which sets the owner
     # column and the record together: the record holds `:owner` too, under
     # its signature. The WHERE re-checks the old owner and its expired lease,

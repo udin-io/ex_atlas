@@ -308,6 +308,45 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     end
   end
 
+  describe "expired_leases/1" do
+    test "answers every owner whose lease expired before now, with its expiry", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Store.renew_lease("m1", 1_000)
+      :ok = Store.renew_lease("m2", 1_999)
+
+      assert {:ok, %{"m1" => 1_000, "m2" => 1_999}} == Store.expired_leases(2_000)
+    end
+
+    test "control: leaves out a lease that runs until now or later", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Store.renew_lease("m1", 1_000)
+      :ok = Store.renew_lease("m2", 2_000)
+      :ok = Store.renew_lease("m3", 9_000)
+
+      assert {:ok, %{"m1" => 1_000}} == Store.expired_leases(2_000)
+    end
+
+    test "answers {:ok, %{}} with no lease rows", %{tmp_dir: dir} do
+      start!(dir)
+
+      assert {:ok, %{}} == Store.expired_leases(2_000)
+    end
+
+    test "answers {:error, _} when the lease table was never migrated", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}], :up, all: true, log: false)
+
+      assert {:error, _reason} = Store.expired_leases(2_000)
+    end
+
+    test "answers {:error, _} when the repo is down", %{tmp_dir: dir} do
+      start!(dir)
+      stop_supervised!(Repo)
+
+      assert {:error, _reason} = Store.expired_leases(2_000)
+    end
+  end
+
   describe "claim_expired/3" do
     # The rewrite ExAtlas passes: the record, owned by the claimer.
     defp to(owner), do: fn record -> {:ok, Map.put(record, :owner, owner)} end
