@@ -472,11 +472,15 @@ second six hours. `:respawns` and any landed `finish` report carry across for
 the same reason, and so does a `max_cost` budget: the record keeps the spend,
 and the time the node was down counts at the last known price.
 
-Five constraints worth knowing before you design around it:
+Six constraints worth knowing before you design around it:
 
 - It is **tasks only**. `persist: true` with `mode: :interactive` is refused —
   the session's bearer token is never written to disk, so an adopted session
   would be a pod nobody can reach that bills for another idle TTL.
+- A task with `s3:` adopts, but cannot respawn after the restart. The record
+  keeps the endpoint, region and URIs, never the keys or presigned URLs, so a
+  preemption after adoption ends the task with `{:respawn_failed, ...}`
+  instead of renting a pod with no storage access.
 - The zero-config DETS store writes to the machine's own filesystem, which on
   Fly **is not preserved across a deploy unless you attach a volume**. Point
   `config :ex_atlas, :orchestrator, storage_path: "/data/ex_atlas"` at a mount,

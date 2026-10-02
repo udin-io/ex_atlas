@@ -7,6 +7,19 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: `persist: true` with `s3:` (#74, slice 4 of #26)
+
+`persist: true` with `s3:` is no longer refused. The tracking record keeps
+`s3:`'s `endpoint`, `region`, `dataset_uri` and `artifact_uri`, plus
+`credentials: :not_stored`; never the keys, the session token or the
+presigned URLs. An adopted task runs on. A respawn after adoption has no
+credentials, so it broadcasts `{:respawn_failed, {reason,
+%ExAtlas.Error{kind: :validation}}}` and ends the task without renting a pod.
+A respawn before any restart still carries the full `s3:`.
+`Spec.Staging.new/1` refuses `credentials: :not_stored`. The record schema
+stays at version 3. Rolling back: a build from #75 to #80 crashes that
+respawn and deletes the pod; a build before #75 respawns with no staging.
+
 ### Added: presigned-URL mode for `s3:` (#73, slice 3 of #26)
 
 `s3:` takes `dataset_url` and `artifact_url`, two URLs you presign on your

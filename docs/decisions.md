@@ -26,7 +26,9 @@ names the PR or issue that holds the reasoning.
 | A crashed poll or billing task exits with `{:crashed, module, stacktrace}`, arities only; the exception struct is dropped | Keep `{exception, stacktrace}`: a frame's arguments and fields like `MatchError.term` can hold the revealed key | #76 review |
 | Every guarded public function ends in a clause that raises `ArgumentError` without its arguments | Let the guard fail: `FunctionClauseError` prints the opts | #76 review |
 | `inspect(%Spec.Compute{})` hides `auth` whole | A hand-written `Inspect` that shows the scheme and hides the token | #76 |
-| `persist: true` with `s3:` is refused until #74 | Store `s3:` like `env:`: a credential on disk | #26, #75 |
+| A record keeps `s3:`'s endpoint, region and URIs and `credentials: :not_stored`; an adopted task refuses to respawn | Store `s3:` like `env:`: a credential on disk. Re-resolve credentials from app config at adoption: no host asked for it | #26, #74 |
+| A record keeps `s3:` fields only from a validated `Spec.Staging`; any other shape keeps the marker alone | Copy the four keys from any map: an unchecked endpoint can carry user info | #74 |
+| An adopted tracker marks any `s3:` as not stored, marker or not | Trust the marker: a host store that drops it would respawn with URIs and no keys | #74 |
 | URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
 | ExAtlas never presigns and never calls S3 | Presign in ExAtlas: needs a SigV4 signer and host credentials | #26 |
 | Presigned URLs may be `http://` or `https://`, need a host, and carry no user info | `https://` only: a local MinIO runs on plain HTTP | #26, #73 |

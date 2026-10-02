@@ -389,8 +389,10 @@ never presigns.
 - The credentials and presigned URLs never appear in `inspect/1` of an
   ExAtlas struct, in a tracker's crash report, or in a tracking record. A
   respawn re-injects them.
-- `persist: true` with `s3:` is refused for now: a tracking record never holds
-  the credentials, so an adopted task would respawn without them.
+- `persist: true` with `s3:` stores the endpoint, region and URIs, never the
+  keys or presigned URLs. An adopted task runs on, but cannot respawn: a
+  preemption after a restart ends it with `{:respawn_failed, {reason,
+  %ExAtlas.Error{kind: :validation}}}`, and no pod is rented.
 
 The [data staging guide](guides/data_staging.md) says what the container does
 with these variables and ships a tested entrypoint,

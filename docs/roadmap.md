@@ -1,29 +1,24 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #80 (slice 3 of
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #81 (slice 4 of
 feature #26). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
 | Item | Ticket | State |
 |---|---|---|
-| Data staging slice 4: `persist: true` with `s3:` | #74 | Open, after #71 |
 | Release 0.8.0 (owner ids, cost caps, `Timer` bound) | none filed | `CHANGELOG.md` lists it as Unreleased; `mix.exs` says 0.7.0 |
 
 ## In progress
 
-| Feature | Slice | PR |
-|---|---|---|
-| S3-compatible data staging (feature #26, milestone Data staging) | Slice 1 (#71): the `s3:` option, `Spec.Staging`, `ComputeRequest.container_env/1`; `inspect(%Compute{})` hides `raw`; `env:` errors carry no values | #75 |
-| | Slice 2 (#72): `guides/data_staging.md` and the tested `guides/scripts/atlas_entrypoint.sh` | #77 |
-| | Slice 3 (#73): presigned-URL mode, `dataset_url` and `artifact_url`, and the entrypoint's `curl` branch | #80 |
-| | Follow-up #76: credentials (`api_key:`, `req_options:` secrets, `s3:` keys, `compute.auth`) print as `#ExAtlas.Secret<redacted>` or not at all in crash reports | #78 |
+Nothing. The next feature is the owner's pick.
 
 ## Shipped
 
 | Feature | PRs | Merged |
 |---|---|---|
+| S3-compatible data staging (feature #26, milestone Data staging) | #75 (slice 1, #71): the `s3:` option and `Spec.Staging`. #77 (slice 2, #72): the guide and the tested entrypoint. #80 (slice 3, #73): presigned-URL mode. #78 (#76): credentials as `ExAtlas.Secret`. #81 (slice 4, #74): `persist: true` with `s3:` | 2026-10-02 (#81 on merge) |
 | Cost caps, `max_cost` (feature #28, milestone Provider resource management) | #67 (slice 1, #64): estimate, timer, events. #69 (slice 2, #65): a cap survives a restart. #70 (slice 3, #66): billing reconciliation every 15 min | 2026-10-01 (#70 on merge) |
 | Provider resources through the public API (feature #27) | #60 network volumes, #61 templates, #62 spend, #63 endpoints | 2026-10-01 |
 | CI hardening | #53 sobelow, #54 credo, #55 mix_audit weekly workflow, #50 flaky tests | 2026-10-01 |
