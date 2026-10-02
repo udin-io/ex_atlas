@@ -28,7 +28,7 @@ serverless, and SSH and Jupyter modes stay out of scope.
 | Feature | Ticket | State |
 |---|---|---|
 | Database tracking store, slice 2: `mix ex_atlas.install --tracking-store ecto`, and both conformance suites in `lib` | #128 | PR #129 open |
-| Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag; no `v0.8.0` tag exists yet, and the Vast.ai entries sit under `CHANGELOG.md`'s Unreleased |
+| Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. Published to Hex on 2026-10-02, from tag `v0.8.0` on `939cf2e` |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.

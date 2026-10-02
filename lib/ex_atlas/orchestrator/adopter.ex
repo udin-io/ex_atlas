@@ -207,7 +207,10 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
       true ->
         warn_stored_endpoint(record)
-        adopt_by_owner(TrackingStore.upgrade(record), record[:owner], owner, store)
+        # Checked on the record as stored, before anything changes it. A
+        # tracker respawns only from a record this node signed.
+        record = Map.put(TrackingStore.upgrade(record), :sealed, TrackingStore.sealed?(record))
+        adopt_by_owner(record, record[:owner], owner, store)
     end
   end
 
@@ -254,8 +257,9 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # tracker's own record updates keep it.
   defp adopt_by_owner(record, nil, owner, store) do
     claimed = Map.put(record, :owner, owner)
+    {sealed?, stored} = Map.pop(claimed, :sealed)
     # The tracker gets the values an older record holds; the store does not.
-    store.put(TrackingStore.scrub_record(claimed))
+    store.put(TrackingStore.rewrite(stored, sealed?))
     reconcile(claimed, store)
   end
 

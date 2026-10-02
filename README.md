@@ -1331,6 +1331,13 @@ cannot send your key to another host. If you pass either per call to a
 `persist: true` spawn, set it in config too before you deploy; otherwise the
 adopted task calls the provider's public URL.
 
+**An adopted task respawns only from a record this node signed.** The node
+signs each record with a key derived from `config :ex_atlas, :callback,
+secret:`, so a store writer without that secret cannot choose what a respawn
+rents. Without a callback secret, or for a record 0.8.0 wrote, an adopted
+task keeps its deadline and cost cap but ends where it would respawn, and a
+`persist: true` spawn that can respawn logs a warning.
+
 Seven things to know before you rely on it:
 
 - **Tasks only.** `persist: true` requires `mode: :task` and is refused

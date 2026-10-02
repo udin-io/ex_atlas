@@ -7,6 +7,32 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed: an adopted task respawns only from a record this node signed (#131)
+
+A tracking record's writer chose what an adopted task's respawn rented: the
+image, command, GPU, env names and the callback descriptor the node minted a
+token over. With `respawn_credentials:`, the host's resolver sent its secrets
+into that image.
+
+```elixir
+# a row edited in atlas_tracking_records: opts[:image] => "attacker/miner"
+# the adopted pod is preempted
+# before: rents attacker/miner, calls the resolver, mints a callback token
+# after:  {:respawn_failed, {:preempted, %ExAtlas.Error{kind: :validation,
+#           message: "cannot respawn: the tracking record is not signed by this node ..."}}}
+```
+
+- The node signs every record it writes, under `:mac`, with a key derived
+  from `config :ex_atlas, :callback, secret:`. Any edit of any field breaks
+  the signature. A rewrite re-signs only a record whose signature checked.
+- **Upgrade:** a task persisted by 0.8.0, or by a node with no callback
+  secret, still adopts and keeps its deadline and cost cap, but cannot
+  respawn after a restart. Neither can a task signed under a callback secret
+  you then rotate. A respawnable `persist: true` spawn on a node with no callback
+  secret logs a warning.
+- A custom tracking store must return each record term for term, `:mac`
+  byte for byte. The conformance suite checks it.
+
 ### Added: `mix ex_atlas.install --tracking-store ecto` (#128)
 
 The installer sets up `ExAtlas.Orchestrator.TrackingStore.Ecto` in one run:

@@ -54,7 +54,11 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
       max_cost: 2.5,
       spent_usd: 0.75,
       cost_rate: 1.5,
-      cost_since_ms: 1_700_000_600_000
+      cost_since_ms: 1_700_000_600_000,
+      # An adopted task respawns only from a record whose `:mac` checks over
+      # every field (issue 131). Every byte value, so a store that keeps it as
+      # text fails "round-trips every field", not a respawn.
+      mac: :binary.list_to_bin(Enum.to_list(0..255))
     }
     |> Map.merge(overrides)
   end
