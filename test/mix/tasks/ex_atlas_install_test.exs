@@ -29,13 +29,35 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
   defp migrations(igniter) do
     igniter.rewrite
     |> Enum.map(&Rewrite.Source.get(&1, :path))
-    |> Enum.filter(&String.starts_with?(&1, "priv/repo/migrations/"))
+    |> Enum.filter(&(&1 =~ ~r|^priv/[^/]+/migrations/|))
   end
 
   defp ex_atlas_config(igniter, file \\ "config/config.exs") do
     file
     |> Config.Reader.eval!(content(igniter, file), env: :dev)
     |> Keyword.get(:ex_atlas, [])
+  end
+
+  # The modules in `children = [...]`, or in the list left of `++`.
+  defp children(igniter) do
+    {:ok, quoted} = igniter |> content("lib/test/application.ex") |> Code.string_to_quoted()
+
+    {_, children} =
+      Macro.prewalk(quoted, nil, fn
+        {:=, _, [{:children, _, _}, value]} = node, nil -> {node, child_modules(value)}
+        node, acc -> {node, acc}
+      end)
+
+    children
+  end
+
+  defp child_modules({:++, _, [list, _]}), do: child_modules(list)
+
+  defp child_modules(list) when is_list(list) do
+    Enum.map(list, fn
+      {module, _opts} -> Macro.to_string(module)
+      module -> Macro.to_string(module)
+    end)
   end
 
   describe ".gitignore" do
@@ -91,6 +113,73 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
       assert config[:orchestrator][:tracking_store] == ExAtlas.Orchestrator.TrackingStore.Ecto
     end
 
+    test "starts ExAtlas.Orchestrator.Supervisor after the repo and keeps every other child" do
+      igniter =
+        install_ecto(host(["TestWeb.Telemetry", "Test.Repo", "TestWeb.Endpoint"]))
+
+      assert children(igniter) == [
+               "TestWeb.Telemetry",
+               "Test.Repo",
+               "ExAtlas.Orchestrator.Supervisor",
+               "TestWeb.Endpoint"
+             ]
+    end
+
+    test "places the child after the repo in the list phx.new generates" do
+      phoenix = [
+        "TestWeb.Telemetry",
+        "Test.Repo",
+        "{DNSCluster, query: Application.get_env(:test, :dns_cluster_query) || :ignore}",
+        "{Phoenix.PubSub, name: Test.PubSub}",
+        "TestWeb.Endpoint"
+      ]
+
+      assert children(install_ecto(host(phoenix))) == [
+               "TestWeb.Telemetry",
+               "Test.Repo",
+               "ExAtlas.Orchestrator.Supervisor",
+               "DNSCluster",
+               "Phoenix.PubSub",
+               "TestWeb.Endpoint"
+             ]
+    end
+
+    test "finds the repo as a {module, opts} child and in a list joined with ++" do
+      files =
+        Map.put(host(), "lib/test/application.ex", """
+        defmodule Test.Application do
+          use Application
+
+          @impl true
+          def start(_type, _args) do
+            children = [{Test.Repo, []}, TestWeb.Endpoint] ++ workers()
+
+            Supervisor.start_link(children, strategy: :one_for_one)
+          end
+
+          defp workers, do: []
+        end
+        """)
+
+      igniter = install_ecto(files)
+
+      assert children(igniter) ==
+               ["Test.Repo", "ExAtlas.Orchestrator.Supervisor", "TestWeb.Endpoint"]
+
+      assert content(igniter, "lib/test/application.ex") =~ "] ++ workers()"
+    end
+
+    test "warns and adds no child when the repo is not in the children" do
+      igniter = install_ecto(host(["TestWeb.Endpoint"]))
+
+      assert_has_warning(
+        igniter,
+        &(&1 =~ "ExAtlas.Orchestrator.Supervisor" and &1 =~ "Test.Repo")
+      )
+
+      assert_unchanged(igniter, "lib/test/application.ex")
+    end
+
     test "turns a config.exs start_orchestrator: true off, since the supervisor refuses it" do
       files =
         Map.put(host(), "config/config.exs", """
@@ -116,6 +205,26 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
       assert content(igniter, "config/runtime.exs") == runtime
     end
 
+    test "tells the host to run the migration and set a reap owner" do
+      igniter = install_ecto(host())
+
+      assert_has_notice(igniter, &(&1 =~ "mix ecto.migrate"))
+      assert_has_notice(igniter, &(&1 =~ ":reap_owner"))
+    end
+
+    test "changes nothing on a second run" do
+      igniter =
+        IgniterProject.in_tmp_dir(fn ->
+          [files: host()]
+          |> test_project()
+          |> Igniter.compose_task("ex_atlas.install", ["--tracking-store", "ecto"])
+          |> apply_igniter!()
+          |> Igniter.compose_task("ex_atlas.install", ["--tracking-store", "ecto"])
+        end)
+
+      assert_unchanged(igniter)
+    end
+
     test "writes no migration when one already calls the store's migration module" do
       files =
         Map.put(host(), "priv/repo/migrations/20260101000000_keep_pods.exs", """
@@ -131,6 +240,20 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
 
       assert migrations(igniter) == ["priv/repo/migrations/20260101000000_keep_pods.exs"]
       assert_unchanged(igniter, "priv/repo/migrations/20260101000000_keep_pods.exs")
+    end
+
+    test "--repo picks one of several repos" do
+      files = host(["Test.Repo", "Test.ReadRepo"], repos: ["Test.Repo", "Test.ReadRepo"])
+
+      igniter = install_ecto(files, ["--repo", "Test.ReadRepo"])
+
+      assert ex_atlas_config(igniter)[:orchestrator][:repo] == Test.ReadRepo
+      assert [path] = migrations(igniter)
+      assert path =~ ~r|^priv/read_repo/migrations/\d{14}_add_atlas_tracking\.exs$|
+      assert content(igniter, path) =~ "Test.ReadRepo.Migrations.AddAtlasTracking"
+
+      assert children(igniter) ==
+               ["Test.Repo", "Test.ReadRepo", "ExAtlas.Orchestrator.Supervisor"]
     end
 
     test "stops and names the repos when there are several and no --repo" do

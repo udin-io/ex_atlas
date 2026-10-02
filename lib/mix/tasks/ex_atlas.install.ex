@@ -28,10 +28,16 @@ if Code.ensure_loaded?(Igniter) do
 
     use Igniter.Mix.Task
 
+    alias Igniter.Code.Common
+    alias Igniter.Code.Function
+    require Function
+    alias Igniter.Code.List, as: IgniterList
     alias Igniter.Project.Config
     alias Mix.ExAtlas.OrchestratorConfig
+    alias Sourceror.Zipper
 
     @ecto_store ExAtlas.Orchestrator.TrackingStore.Ecto
+    @supervisor ExAtlas.Orchestrator.Supervisor
     @other_config_files ["runtime.exs", "prod.exs", "dev.exs", "test.exs"]
 
     @impl Igniter.Mix.Task
@@ -80,6 +86,13 @@ if Code.ensure_loaded?(Igniter) do
           igniter
           |> add_migration(repo)
           |> configure_ecto_store(repo)
+          |> add_supervisor_child(repo)
+          |> OrchestratorConfig.notice_reap_owner()
+          |> Igniter.add_notice("""
+          ExAtlas keeps `persist: true` tasks in #{inspect(repo)}. Run `mix ecto.migrate` \
+          to create the atlas_tracking_records table. ExAtlas.Orchestrator.Supervisor \
+          starts after #{inspect(repo)} in your application's children.
+          """)
 
         {igniter, {:error, message}} ->
           Igniter.add_issue(igniter, message)
@@ -191,6 +204,79 @@ if Code.ensure_loaded?(Igniter) do
         ExAtlas.Orchestrator.Supervisor refuses to start beside it.
         """)
       end)
+    end
+
+    # `Igniter.Project.Application.add_new_child/3` with `after: [repo]`
+    # inserts one place late when another child follows the repo (Igniter
+    # 0.8.4's `skip_after/2`), which would start the supervisor after the
+    # Endpoint. The installer finds the repo in `children` and inserts right
+    # after it.
+    defp add_supervisor_child(igniter, repo) do
+      app =
+        case Igniter.Project.Application.app_module(igniter) do
+          {app, _} -> app
+          app -> app
+        end
+
+      with true <- is_atom(app) and not is_nil(app),
+           {:ok, igniter} <-
+             Igniter.Project.Module.find_and_update_module(igniter, app, &insert_child(&1, repo)) do
+        igniter
+      else
+        _ -> Igniter.add_warning(igniter, add_child_by_hand(repo))
+      end
+    end
+
+    defp insert_child(zipper, repo) do
+      with {:ok, zipper} <- Function.move_to_def(zipper, :start, 2),
+           {:ok, zipper} <-
+             Function.move_to_function_call_in_current_scope(zipper, :=, [2], &children?/1),
+           {:ok, zipper} <- Function.move_to_nth_argument(zipper, 1),
+           {:ok, list} <- children_list(zipper) do
+        cond do
+          match?({:ok, _}, IgniterList.move_to_list_item(list, &child?(&1, @supervisor))) ->
+            {:ok, list}
+
+          match?({:ok, _}, IgniterList.move_to_list_item(list, &child?(&1, repo))) ->
+            {:ok, item} = IgniterList.move_to_list_item(list, &child?(&1, repo))
+            {:ok, Zipper.insert_right(item, @supervisor)}
+
+          true ->
+            {:warning, add_child_by_hand(repo)}
+        end
+      else
+        _ -> {:warning, add_child_by_hand(repo)}
+      end
+    end
+
+    defp children?(call) do
+      Function.argument_matches_pattern?(call, 0, {:children, _, context} when is_atom(context))
+    end
+
+    # `children = [...]` or `children = [...] ++ more`.
+    defp children_list(zipper) do
+      cond do
+        IgniterList.list?(zipper) -> {:ok, zipper}
+        Function.function_call?(zipper, :++, 2) -> Function.move_to_nth_argument(zipper, 0)
+        true -> :error
+      end
+    end
+
+    # A child is `Module` or `{Module, opts}`; `Common.nodes_equal?/2`
+    # expands aliases.
+    defp child?(item, module) do
+      with true <- Igniter.Code.Tuple.tuple?(item),
+           {:ok, first} <- Igniter.Code.Tuple.tuple_elem(item, 0) do
+        Common.nodes_equal?(first, module)
+      else
+        _ -> Common.nodes_equal?(item, module)
+      end
+    end
+
+    defp add_child_by_hand(repo) do
+      "Add ExAtlas.Orchestrator.Supervisor to your application's children, right " <>
+        "after #{inspect(repo)}. The installer found no `children = [...]` list " <>
+        "holding #{inspect(repo)} in your application's start/2."
     end
 
     # A host that followed the README by hand named its migration itself.
