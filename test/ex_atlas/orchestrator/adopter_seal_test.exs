@@ -360,6 +360,22 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
       assert log =~ ":reap_providers"
     end
 
+    # `observe_opts/1` reads `opts[:provider]` before `record.provider`, so the
+    # check reads the provider the calls go to.
+    test "naming a covered provider beside the opts' uncovered one: left alone",
+         %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_providers: [:runpod])
+      pod = rent!("atlas-train")
+      record = forge!(pod)
+      put_row!(%{record | provider: :runpod})
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ ":mock is not in :reap_providers"
+    end
+
     test "of a stopped pod: left alone, not deleted", %{tmp_dir: dir} do
       start_ecto!(dir)
       pod = rent!("atlas-train")
