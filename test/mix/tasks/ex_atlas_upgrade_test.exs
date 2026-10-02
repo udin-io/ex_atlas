@@ -4,24 +4,9 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
 
   import Igniter.Test
 
-  # Igniter's test mode matches `lib/**/*.{ex,exs}` against each test file's
-  # absolute path, and GlobEx's `**` skips a dot directory. A checkout under
-  # `~/.claude_worktrees` finds no module, so the project runs from a temp
-  # directory with no dot segment in its path.
-  defp upgrade(argv \\ [], files \\ %{}) do
-    dir = Path.join(System.tmp_dir!(), "ex_atlas_upgrade_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
+  alias ExAtlas.Test.IgniterProject
 
-    try do
-      File.cd!(dir, fn ->
-        [files: files]
-        |> test_project()
-        |> Igniter.compose_task("ex_atlas.upgrade", argv)
-      end)
-    after
-      File.rm_rf!(dir)
-    end
-  end
+  defp upgrade(argv \\ [], files \\ %{}), do: IgniterProject.run("ex_atlas.upgrade", argv, files)
 
   defp unloaded(fun) do
     :ok = Application.stop(:ex_atlas)

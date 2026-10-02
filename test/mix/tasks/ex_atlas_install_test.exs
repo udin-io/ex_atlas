@@ -5,11 +5,9 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
 
   @entry "priv/ex_atlas_fly/*.dets"
 
-  defp install(files \\ %{}) do
-    [files: files]
-    |> test_project()
-    |> Igniter.compose_task("ex_atlas.install", [])
-  end
+  alias ExAtlas.Test.IgniterProject
+
+  defp install(files \\ %{}), do: IgniterProject.run("ex_atlas.install", [], files)
 
   defp gitignore(igniter) do
     if Rewrite.has_source?(igniter.rewrite, ".gitignore") do
