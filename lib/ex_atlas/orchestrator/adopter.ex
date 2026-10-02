@@ -315,14 +315,18 @@ defmodule ExAtlas.Orchestrator.Adopter do
         store.delete(record.id)
 
       observation ->
-        case unsigned_refusal(record, observation, owner) do
-          nil ->
-            if claim?, do: claim(record, store)
-            start_tracker(record, compute(observation, record))
+        track(record, observation, owner, store, claim?)
+    end
+  end
 
-          why ->
-            skip(record, why)
-        end
+  defp track(record, observation, owner, store, claim?) do
+    case unsigned_refusal(record, observation, owner) do
+      nil ->
+        if claim?, do: claim(record, store)
+        start_tracker(record, compute(observation, record))
+
+      why ->
+        skip(record, why)
     end
   end
 
