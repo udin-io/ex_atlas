@@ -419,7 +419,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
         {ours, others} =
           computes
           |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
-          |> Enum.split_with(&owned?(&1, prefix, owner))
+          |> Enum.split_with(&Ownership.ours?(&1.name, prefix, owner))
 
         Enum.each(ours, fn compute ->
           _ = ExAtlas.terminate(compute.id, provider: provider)
@@ -461,13 +461,6 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   defp error_kind(%ExAtlas.Error{kind: kind}), do: " (#{inspect(kind)})"
   defp error_kind(_error), do: ""
-
-  # With no owner the gate has already checked this node is alone, and every
-  # untracked prefixed pod is its own, as before owners existed.
-  defp owned?(_compute, _prefix, nil), do: true
-
-  defp owned?(compute, prefix, owner),
-    do: Ownership.classify(compute.name, prefix, owner) == :ours
 
   defp leave_alone(compute, prefix, owner, seen) do
     if MapSet.member?(seen, compute.id) do

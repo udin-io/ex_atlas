@@ -115,6 +115,32 @@ defmodule ExAtlas.Orchestrator.Ownership do
   defp stamp_name(name, _prefix, _owner), do: name
 
   @doc """
+  Whether a node whose owner is `owner` may delete the pod named `name`: the
+  name starts with `prefix` and, when `owner` is set, carries it. The Reaper
+  deletes only untracked pods that pass, and the Adopter adopts an unsigned
+  record only for a pod that passes.
+
+      iex> ExAtlas.Orchestrator.Ownership.ours?("atlas-m1-train-42", "atlas-", "m1")
+      true
+      iex> ExAtlas.Orchestrator.Ownership.ours?("atlas-m2-train-42", "atlas-", "m1")
+      false
+      iex> ExAtlas.Orchestrator.Ownership.ours?("atlas-train", "atlas-", "m1")
+      false
+      iex> ExAtlas.Orchestrator.Ownership.ours?("atlas-train", "atlas-", nil)
+      true
+      iex> ExAtlas.Orchestrator.Ownership.ours?("billing-db", "atlas-", nil)
+      false
+      iex> ExAtlas.Orchestrator.Ownership.ours?(nil, "atlas-", nil)
+      false
+  """
+  @spec ours?(String.t() | nil, String.t(), String.t() | nil) :: boolean()
+  def ours?(name, prefix, owner) when is_binary(name) and is_binary(prefix) do
+    String.starts_with?(name, prefix) and (owner == nil or classify(name, prefix, owner) == :ours)
+  end
+
+  def ours?(_name, _prefix, _owner), do: false
+
+  @doc """
   Whose pod `name` is, for a node whose owner is `owner`.
 
   `:unowned` means the name has no owner segment: no dash after the prefix,
