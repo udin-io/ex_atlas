@@ -17,7 +17,11 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 `ATLAS_ARTIFACT_URI`. The new `ExAtlas.Spec.Staging` validates the option, and
 its `inspect/1` shows no credential. Validation errors carry `key: :s3`,
 `value: nil` and no value in the message. An `env:` entry that `s3:` also sets
-is an error. Tracking records and tracker crash reports drop `s3:`, and
+is an error. `Orchestrator.spawn/1` returns an invalid `s3:` as an error and
+keeps a valid one as a `Spec.Staging`, so no tracker stacktrace prints a
+credential; `Config.build_ctx/2` drops `:s3`, so no provider ctx carries it.
+Request opts that are not a keyword list are refused without printing them.
+Tracking records and tracker crash reports drop `s3:`, and
 `persist: true` with `s3:` is refused until slice 4 (#74). A provider builds its
 container env from the new `ComputeRequest.container_env/1`.
 

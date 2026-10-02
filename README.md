@@ -372,8 +372,14 @@ artifacts. ExAtlas makes no S3 call itself.
 
 - A key left out sets no variable. No `endpoint` means AWS S3 itself.
 - An `env:` entry that `s3:` would also set raises, naming the variable.
-- A bad `s3:` raises `NimbleOptions.ValidationError` with `key: :s3` before
-  any provider call. The error names the key and the rule, never a value.
+- A bad `s3:` raises `NimbleOptions.ValidationError` with `key: :s3` from
+  `spawn_compute/1`, and `Orchestrator.spawn/1` and `run_task/1` return it as
+  `{:error, _}`, both before any provider call. The error names the key and
+  the rule, never a value. Buckets take letters, digits, `.`, `_` and `-`; an
+  endpoint with user info (`https://user:pass@host`) and any control character
+  are refused.
+- `s3:` goes to the request only, never to a provider's ctx.
+  `spawn_compute/2`, which takes a built request, raises on an `s3:` option.
 - The credentials never appear in `inspect/1` of an ExAtlas struct, in a
   tracker's crash report, or in a tracking record. A respawn re-injects them.
 - `persist: true` with `s3:` is refused for now: a tracking record never holds
