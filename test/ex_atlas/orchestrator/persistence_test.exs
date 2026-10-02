@@ -107,8 +107,21 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert log =~ "nil will not be adopted after a restart"
     end
 
+    test "with no callback secret and a provider outside :reap_providers, it warns too" do
+      Application.put_env(:ex_atlas, :callback, [])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _, _} = Orchestrator.spawn(task_opts(name: "atlas-covered"))
+        end)
+
+      assert log =~ ~s("atlas-covered" will not be adopted after a restart)
+      assert log =~ ":reap_providers"
+    end
+
     test "control: a prefixed name, a callback secret, or no persist does not warn that" do
       Application.put_env(:ex_atlas, :callback, [])
+      ExAtlas.Test.Orchestrator.put_env(reap_providers: [:mock])
 
       prefixed =
         ExUnit.CaptureLog.capture_log(fn -> {:ok, _, _} = Orchestrator.spawn(task_opts()) end)

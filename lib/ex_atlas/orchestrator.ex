@@ -236,20 +236,22 @@ defmodule ExAtlas.Orchestrator do
   end
 
   # An unsigned record adopts only a pod this node's Reaper would delete
-  # (issue 138). `Ownership.stamp/1` has run, so a prefixed name carries the
-  # owner already.
+  # (issue 138), judged as at a boot that finds the pod running.
+  # `Ownership.stamp/1` has run, so a prefixed name carries the owner already.
   defp warn_unsigned_adoption(opts, tracking) do
     name = Keyword.get(opts, :name)
+    {provider, _opts} = Config.pop_provider!(opts)
+    pod = %ExAtlas.Spec.Compute{id: "", provider: provider, name: name, status: :running}
 
     with true <- tracking[:persist],
          false <- TrackingStore.signs?(),
          {:ok, owner} <- Ownership.owner(),
-         false <- Ownership.ours?(name, Ownership.prefix(), owner) do
+         why when is_binary(why) <- Reaper.refusal(provider, pod, owner) do
       Logger.warning(
         "[ExAtlas.Orchestrator] #{inspect(name)} will not be adopted after a restart: its " <>
-          "tracking record is unsigned, and an unsigned record adopts only a pod named with " <>
-          ":reap_name_prefix #{inspect(Ownership.prefix())}. Name the task with that prefix, or " <>
-          "set config :ex_atlas, :callback, secret: (32 bytes or more)."
+          "tracking record is unsigned, and an unsigned record adopts only a pod this node's " <>
+          "Reaper would delete; #{why}. Set config :ex_atlas, :callback, secret: " <>
+          "(32 bytes or more), or change what the Reaper covers."
       )
     end
 
