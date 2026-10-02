@@ -132,7 +132,9 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Providers.RunPod.Translate,
           ExAtlas.Providers.LambdaLabs.Client,
           ExAtlas.Providers.LambdaLabs.Firewall,
-          ExAtlas.Providers.LambdaLabs.Translate
+          ExAtlas.Providers.LambdaLabs.Translate,
+          ExAtlas.Providers.Vast.Client,
+          ExAtlas.Providers.Vast.Translate
         ],
         "Fly platform ops": [
           ExAtlas.Fly,
