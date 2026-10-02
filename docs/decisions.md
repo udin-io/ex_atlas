@@ -26,6 +26,13 @@ names the PR or issue that holds the reasoning.
 | An image starting with `-` is `:validation` | `--` before the image: docker CLI support unchecked on Lambda's image | #89 |
 | A missing API key raises `:unauthorized`, as RunPod does, through the shared `Providers.HTTP.bearer/3` | Return an error tuple for Lambda only | #89 |
 | `Providers.HTTP` and `ExAtlas.Auth.for_scheme/1` hold what both providers share | Copy `RunPod.Client` and RunPod's auth minting | #84, #89 |
+| One firewall ruleset per instance, attached at launch | Edit the account's global rules: they change every instance on the account, including ones ExAtlas does not own | #86 |
+| Every spawn with `ports:` first deletes `atlas-` rulesets that no instance uses | A periodic sweeper process: a new process, and a ruleset in use cannot be deleted anyway | #86 |
+| The sweep skips rulesets younger than 5 minutes and deletes at most 10 per spawn | Delete every empty one: a second spawn would delete a ruleset created a moment ago and not launched yet, and Lambda allows about one request a second | #86 |
+| Source network `0.0.0.0/0`, or `provider_opts.source_network` | Require `source_network`: RunPod's public ports are open to all today | #86 |
+| Ruleset name `atlas-<instance name>-<8 hex>`, cut to Lambda's 64 characters | `atlas-<instance name>`: Lambda's rule on a duplicate name is unknown, and a respawn reuses the name while the old instance still holds its ruleset | #86 |
+| `terminate/2` finds the ruleset by `instance_ids` before it terminates, and ignores every ruleset error | Fail `terminate/2` on a ruleset error: the instance is gone, and a retry cannot fix the ruleset | #86 |
+| `us-south-1` gets no ruleset | Create one anyway: Lambda's docs say firewall rules do not apply there | #86 |
 
 ## Data staging (feature #26)
 

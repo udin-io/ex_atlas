@@ -11,7 +11,7 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Host Phoenix app | Calls `ExAtlas` and `ExAtlas.Orchestrator`; subscribes to `ExAtlas.PubSub` topics `"compute:<id>"` |
 | RunPod | HTTPS through `Req` (`ExAtlas.Providers.RunPod.Client`): pods, catalog, billing, templates, volumes, endpoints, jobs |
-| Lambda Cloud API v1 | HTTPS through `Req` (`ExAtlas.Providers.LambdaLabs.Client`): instance types, launch, get, list, terminate |
+| Lambda Cloud API v1 | HTTPS through `Req` (`ExAtlas.Providers.LambdaLabs.Client`): instance types, firewall rulesets, launch, get, list, terminate |
 | A Lambda instance | cloud-init runs the `user_data` script ExAtlas wrote; it starts the container with `docker run` |
 | A running pod | POSTs to the host through `ExAtlas.Callback.Plug` (progress, logs, finish) |
 | Fly.io | `ExAtlas.Fly.*`: deploys, log streams, tokens |
@@ -23,7 +23,7 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Facade | `ExAtlas` (`dispatch/3`, `dispatch_optional/3`), `ExAtlas.Config` (its `seal_credentials/1` wraps credentials), `ExAtlas.Secret`, `ExAtlas.Error` |
 | Contract | `ExAtlas.Provider` (behaviour, optional callbacks) |
-| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast` (built with `Providers.Stub`) |
+| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`, `Firewall`), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast` (built with `Providers.Stub`) |
 | Specs | `ExAtlas.Spec.*`: `ComputeRequest` (its `container_env/1` is the env every provider sends), `Staging` (the `s3:` option), `Compute`, `Spend`, `Template`, `NetworkVolume`, `Endpoint`, `Job`, `GpuType` and the request structs |
 | Callback | `ExAtlas.Callback`, `Callback.Plug`, `Callback.Token`, `Callback.Limiter` |
 | Auth | `ExAtlas.Auth` (the env and handle for each `auth:` scheme, shared by providers), `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` |
@@ -140,13 +140,15 @@ same VM reuses them. The next restart calls the resolver again.
 Lambda rents VMs. `Providers.LambdaLabs` reads the catalog for price and
 capacity, then launches with a cloud-init script that runs the container.
 The tags let any node rebuild the `Compute` with no local state. Added in
-#89.
+#89. A spawn with `ports:` also creates a firewall ruleset for the instance
+(#86); `us-south-1` and a spawn with no ports skip it.
 
 ```mermaid
 sequenceDiagram
   participant Host as Host app
   participant LL as Providers.LambdaLabs
   participant T as LambdaLabs.Translate
+  participant FW as LambdaLabs.Firewall
   participant L as Lambda Cloud API v1
   participant VM as Instance, cloud-init
   Host->>LL: ExAtlas.spawn_compute(provider: :lambda_labs, image:, env:, ports:)
@@ -154,8 +156,17 @@ sequenceDiagram
   T-->>LL: user_data as a Secret, atlas tags, auth handle
   LL->>L: GET /instance-types
   L-->>LL: price_cents_per_hour, regions_with_capacity_available
-  LL->>L: POST /instance-operations/launch (retried on 429 only)
+  LL->>FW: open(ctx, request, rules, region)
+  FW->>L: GET /firewall-rulesets
+  FW->>L: DELETE each atlas- ruleset with no instance, 5 minutes old, at most 10
+  FW->>L: POST /firewall-rulesets, one tcp rule per port
+  L-->>FW: ruleset id
+  LL->>L: POST /instance-operations/launch with firewall_rulesets (retried on 429 only)
   L-->>LL: instance_ids
+  alt launch fails
+    LL->>FW: delete(ruleset id)
+    FW->>L: DELETE /firewall-rulesets/id
+  end
   LL-->>Host: Compute provisioning, cost_per_hour, region
   L->>VM: boot, then cloud-init runs user_data as root
   VM->>VM: docker run --gpus all -p 8000:8000 -e NAME image
@@ -164,7 +175,11 @@ sequenceDiagram
   L-->>LL: status, ip, tags
   LL-->>Host: Compute running, ports with ip URLs
   Host->>LL: ExAtlas.terminate(id)
+  LL->>FW: find(ctx, id)
+  FW->>L: GET /firewall-rulesets
   LL->>L: POST /instance-operations/terminate
+  LL->>FW: delete(ruleset id)
+  FW->>L: DELETE /firewall-rulesets/id (the in-use refusal is ignored)
 ```
 
 ```mermaid
@@ -185,11 +200,19 @@ classDiagram
   class LambdaClient["LambdaLabs.Client"] {
     get(ctx, path)
     post(ctx, path, body, opts)
+    delete(ctx, path)
     list_all(ctx, path)
+  }
+  class LambdaFirewall["LambdaLabs.Firewall"] {
+    open(ctx, request, rules, region)
+    attach(body, ruleset_id)
+    find(ctx, instance_id)
+    delete(ctx, ruleset_id)
   }
   class LambdaTranslate["LambdaLabs.Translate"] {
     launch_parts(request, now)
     launch_body(request, parts, type, region, ssh_key)
+    firewall_rules(request)
     instance_type(request, types)
     region(type, entry, hints)
     instance_to_compute(instance, auth)
@@ -202,6 +225,8 @@ classDiagram
   LambdaClient ..> HTTP
   LambdaLabs --> LambdaClient
   LambdaLabs --> LambdaTranslate
+  LambdaLabs --> LambdaFirewall
+  LambdaFirewall --> LambdaClient
   LambdaTranslate ..> Auth
   LambdaTranslate ..> GpuCatalog
   LambdaTranslate ..> ComputeRequest
