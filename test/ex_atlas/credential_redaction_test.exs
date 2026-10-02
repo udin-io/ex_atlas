@@ -146,6 +146,31 @@ defmodule ExAtlas.CredentialRedactionTest do
       refute text =~ @key
     end
 
+    test "prints no env: value a tracker passes with its opts" do
+      text =
+        crash_text(fn ->
+          ExAtlas.get_compute("pod-1",
+            provider: ClauseProvider,
+            env: %{"HF_TOKEN" => "hf-ctx-probe-4e81"}
+          )
+        end)
+
+      assert text =~ "lookup(\"pod-1\""
+      refute text =~ "hf-ctx-probe-4e81"
+    end
+
+    test "a provider ctx holds no env:, and keeps a pass-through option beside it" do
+      ExAtlas.get_compute("echo",
+        provider: ClauseProvider,
+        endpoint: "abc123",
+        env: %{"HF_TOKEN" => "hf-ctx-probe-4e81"}
+      )
+
+      assert_receive {:ctx, ctx}
+      assert ctx.endpoint == "abc123"
+      refute Map.has_key?(ctx, :env)
+    end
+
     test "control: the provider still receives the per-call key" do
       ExAtlas.get_compute("echo", provider: ClauseProvider, api_key: @key)
 
