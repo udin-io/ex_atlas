@@ -9,7 +9,6 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   """
 
   alias ExAtlas.Auth.Token, as: AuthToken
-  alias ExAtlas.Callback
   alias ExAtlas.Providers.RunPod.Client
   alias ExAtlas.Spec
 
@@ -37,11 +36,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   def compute_request_to_pod_create(%Spec.ComputeRequest{} = req) do
     {auth_env, auth_handle} = build_auth(req.auth)
 
-    env =
-      req.env
-      |> Map.merge(auth_env)
-      |> Map.merge(callback_env(req.callback))
-      |> Map.new(fn {k, v} -> {to_string(k), to_string(v)} end)
+    env = req |> Spec.ComputeRequest.container_env() |> Map.merge(auth_env)
 
     body =
       %{
@@ -338,9 +333,6 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   defp job_status("CANCELLED"), do: :cancelled
   defp job_status("TIMED_OUT"), do: :timed_out
   defp job_status(_), do: :in_queue
-
-  defp callback_env(nil), do: %{}
-  defp callback_env(%{} = callback), do: Callback.env(callback)
 
   # --- auth helpers ---
 
