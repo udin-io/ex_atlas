@@ -644,6 +644,43 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert :error = Memory.get(id)
     end
 
+    # The refusal comes before any rent, so it spends no attempt. The record
+    # outlives the task only when the DELETE of the old pod fails, and then the
+    # next boot must not count an attempt that rented nothing.
+    test "a respawn refused before the rent records no attempt" do
+      compute =
+        orphaned_task(
+          provider: ExAtlas.Test.FaultyProvider,
+          image: "trainer-adopted-s3-refused:latest",
+          s3: @s3,
+          spot: true,
+          on_failure: {:respawn, 2},
+          status_poll_ms: 30
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, pid} = Orchestrator.lookup(id)
+      ref = Process.monitor(pid)
+
+      ExAtlas.Test.FaultyProvider.arm(
+        :terminate,
+        {:error, ExAtlas.Error.new(:transport, provider: :mock)}
+      )
+
+      :ok = Mock.set_status(id, :stopped)
+
+      assert_receive {:atlas_compute, ^id, {:respawn_failed, {:preempted, %ExAtlas.Error{}}}},
+                     2_000
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_received {:atlas_compute, ^id, {:terminate_failed, _}}
+      assert {:ok, %{respawns: 0} = record} = Memory.get(id)
+      assert Map.get(record, :respawning) == nil
+    end
+
     test "scrub_keys: [:s3] keeps the marker, so the respawn is still refused" do
       # A host that scrubs `:s3` whole must not lose the refusal with it: a
       # record with no `s3:` would respawn a pod with no staging at all.

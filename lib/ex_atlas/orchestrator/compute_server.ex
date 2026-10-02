@@ -1167,10 +1167,6 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     # From here on, the preempted pod's reports are stale.
     attempt = state.respawns + 1
     advance_callback(state, attempt)
-    # Before the rent: a node that dies before `carry_record/3` leaves the
-    # replacement with no record, and this mark tells the next boot that its
-    # attempt is spent (risk 51).
-    update_record(state, &Map.put(&1, :respawning, attempt))
 
     case spawn_replacement(%{state | opts: next_attempt(state.opts, attempt)}) do
       {:ok, replacement, opts} ->
@@ -1225,17 +1221,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     cond do
       needs == %{s3: false, env: nil} ->
-        spawn_compute(opts)
+        spawn_compute(opts, state)
 
       resolver = resolver(opts) ->
-        with {:ok, opts} <- resolve_credentials(resolver, needs, state), do: spawn_compute(opts)
+        with {:ok, opts} <- resolve_credentials(resolver, needs, state),
+             do: spawn_compute(opts, state)
 
       true ->
         not_stored(opts, needs)
     end
   end
 
-  defp spawn_compute(opts) do
+  # The mark goes in just before the rent, after every check that can refuse
+  # without renting: a node that dies before `carry_record/3` leaves the
+  # replacement with no record, and the mark tells the next boot that its
+  # attempt is spent (risk 51).
+  defp spawn_compute(opts, state) do
+    update_record(state, &Map.put(&1, :respawning, state.respawns + 1))
     with {:ok, replacement} <- ExAtlas.spawn_compute(opts), do: {:ok, replacement, opts}
   end
 
