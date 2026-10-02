@@ -20,7 +20,13 @@ list, raises (or, from `spawn/1`, returns) a `NimbleOptions.ValidationError`
 with `value: nil`. `inspect/1` of a `Spec.Compute` leaves out `auth`, which
 holds the pod's bearer token. `Spec.Staging` holds its three credentials as
 Secrets, so `inspect(staging, structs: false)` and Erlang's `~p` print none of
-them. Tracking records drop `req_options: [aws_sigv4:
+them. Opts that are not a keyword list with atom keys are refused by every public
+function, and a `req_options: [auth: ...]` shape Req does not take is refused,
+without printing them. A crashed status poll or billing read reports
+`{:crashed, exception_module, stacktrace}` in `{:poll_failed, _}` and
+`{:spend_reconcile_failed, _}`, with arities in place of arguments. A tracker
+started with `ComputeServer.child_spec/1` directly is sealed the same way.
+Tracking records drop `req_options: [aws_sigv4:
 ...]` as they already dropped `:auth` and `:headers`.
 
 **Breaking for a host's own provider module:** `ctx.api_key` is an
