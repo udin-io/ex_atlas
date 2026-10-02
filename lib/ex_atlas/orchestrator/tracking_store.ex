@@ -99,22 +99,31 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Never stored: `compute.auth.token` (the raw preshared key — see
   `ExAtlas.Auth.Token`), `:api_key` (re-resolved from config at adoption,
-  exactly as a fresh spawn does), the keys and presigned URLs of `:s3`, and
-  anything else matching `:scrub_keys`. `:s3` keeps its endpoint, region and
+  exactly as a fresh spawn does), the keys and presigned URLs of `:s3`, the
+  values of `:env`, and anything else matching `:scrub_keys`. `:s3` keeps its endpoint, region and
   URIs beside `credentials: :not_stored`, so an adopted task with `s3:` runs
   on, and its tracker refuses a respawn it has no credentials for. `last_activity_ms` is not stored because it is monotonic and
   nobody was touching the session while the node was down.
 
-  ### Container environment is *not* scrubbed
+  ### Container environment: names only
 
-  `:env` is persisted verbatim, because a respawn after adoption without it
-  would silently run broken work. If you inject secrets into containers through
-  `:env`, either extend the scrub list —
+  Any `:env` value can be a token, so a record keeps the names alone, each with
+  the value `:not_stored`. An adopted task runs on, but a respawn after
+  adoption has no values to give the replacement: it broadcasts
+  `{:respawn_failed, {reason, %ExAtlas.Error{kind: :validation}}}` and ends the
+  task. An empty `:env` is stored as `%{}` and respawns as before. With
+  `scrub_keys: [:env]` the record holds `env: :not_stored`, which refuses the
+  same respawn.
 
-      config :ex_atlas, :orchestrator, scrub_keys: [:env]
+  A record written before this rule holds the values: its adopted tracker
+  seals them, and its respawn still sends them. Every rewrite of the record
+  (a claim, a cost update, a respawn) stores the names alone, so the values
+  serve one adoption and no more.
 
-  — and accept that respawn-after-adoption loses them, or supply a store that
-  encrypts at rest.
+  A host store that returns the marker as the string `"not_stored"` refuses
+  the respawn the same way. A host store that drops `:env` from the opts
+  leaves nothing to refuse on, and its adopted respawn runs with no
+  environment.
 
   ## A store shared by several nodes
 
@@ -310,7 +319,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   where a hand-rolled bearer header or AWS signing key would be. `:s3` keeps
   its endpoint, region and URIs, and `credentials: :not_stored` in place of
   the keys and presigned URLs (`ExAtlas.Spec.Staging.scrub/1`); with
-  `scrub_keys: [:s3]` it keeps the marker alone.
+  `scrub_keys: [:s3]` it keeps the marker alone. `:env` keeps its names, each
+  with the value `:not_stored`; with `scrub_keys: [:env]` it is `:not_stored`
+  alone. An empty `:env` stays `%{}`.
   """
   @spec scrub_opts(keyword()) :: keyword()
   def scrub_opts(opts) do
@@ -320,6 +331,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     |> Keyword.drop(@secret_opts ++ scrub_keys)
     |> scrub_req_options()
     |> put_staging(Keyword.get(opts, :s3), :s3 in scrub_keys)
+    |> put_env(Keyword.get(opts, :env), :env in scrub_keys)
+  end
+
+  @doc """
+  `record` with its `:env` values left out, as `scrub_opts/1` leaves them.
+
+  A record written before env values were left out still holds them; every
+  rewrite of it goes through here, so no write lays them down again.
+  """
+  @spec scrub_env(record()) :: record()
+  def scrub_env(%{opts: opts} = record) do
+    %{record | opts: put_env(opts, Keyword.get(opts, :env), :env in configured_scrub_keys())}
   end
 
   @doc """
@@ -350,6 +373,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   defp put_staging(opts, nil, _scrubbed?), do: opts
   defp put_staging(opts, _s3, true), do: Keyword.put(opts, :s3, Spec.Staging.scrub(nil))
   defp put_staging(opts, s3, false), do: Keyword.put(opts, :s3, Spec.Staging.scrub(s3))
+
+  # Any env value can be a token, so none reaches the store. The names stay,
+  # so an operator reading a record sees what an adopted respawn would lack.
+  # The marker survives `scrub_keys: [:env]`, as `s3:`'s does: a record with no
+  # `env:` would respawn a pod with no environment at all.
+  defp put_env(opts, nil, _scrubbed?), do: opts
+  defp put_env(opts, env, _scrubbed?) when env == %{}, do: Keyword.put(opts, :env, %{})
+
+  defp put_env(opts, env, false) when is_map(env),
+    do: Keyword.put(opts, :env, Map.new(env, fn {name, _value} -> {name, :not_stored} end))
+
+  defp put_env(opts, _env, _scrubbed?), do: Keyword.put(opts, :env, :not_stored)
 
   defp configured_scrub_keys do
     orchestrator_config() |> Keyword.get(:scrub_keys, []) |> List.wrap()

@@ -481,6 +481,8 @@ Six constraints worth knowing before you design around it:
   keeps the endpoint, region and URIs, never the keys or presigned URLs, so a
   preemption after adoption ends the task with `{:respawn_failed, ...}`
   instead of renting a pod with no storage access.
+- A task with a non-empty `env:` adopts, but cannot respawn after the
+  restart either. The record keeps the variable names, never the values.
 - The zero-config DETS store writes to the machine's own filesystem, which on
   Fly **is not preserved across a deploy unless you attach a volume**. Point
   `config :ex_atlas, :orchestrator, storage_path: "/data/ex_atlas"` at a mount,

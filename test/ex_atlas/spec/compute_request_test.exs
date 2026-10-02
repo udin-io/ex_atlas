@@ -104,8 +104,8 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
     end
 
     test "a map of strings is accepted as before (control)" do
-      assert {:ok, %ComputeRequest{env: %{"K" => "v-secret-71a4"}}} =
-               ComputeRequest.new(gpu: :h100, env: %{"K" => "v-secret-71a4"})
+      assert {:ok, req} = ComputeRequest.new(gpu: :h100, env: %{"K" => "v-secret-71a4"})
+      assert ComputeRequest.container_env(req) == %{"K" => "v-secret-71a4"}
     end
   end
 
@@ -197,7 +197,43 @@ defmodule ExAtlas.Spec.ComputeRequestTest do
           s3: Map.delete(@s3, :session_token)
         )
 
-      assert req.env == %{"WANDB_PROJECT" => "x", "AWS_SESSION_TOKEN" => "env-token"}
+      assert %{"WANDB_PROJECT" => "x", "AWS_SESSION_TOKEN" => "env-token"} =
+               ComputeRequest.container_env(req)
+    end
+  end
+
+  describe "env: values" do
+    @env_secret "hf-request-probe-3a9c"
+
+    test "print as redacted in the request, with their names" do
+      req = ComputeRequest.new!(gpu: :h100, env: %{"HF_TOKEN" => @env_secret})
+
+      for opts <- [[], [structs: false]] do
+        text = inspect(req, [limit: :infinity, printable_limit: :infinity] ++ opts)
+        assert text =~ "HF_TOKEN"
+        refute text =~ @env_secret
+      end
+
+      # Control: the provider still gets the value.
+      assert ComputeRequest.container_env(req) == %{"HF_TOKEN" => @env_secret}
+    end
+
+    test "already sealed are accepted and sent as their value" do
+      req =
+        ComputeRequest.new!(gpu: :h100, env: %{"HF_TOKEN" => ExAtlas.Secret.wrap(@env_secret)})
+
+      assert ComputeRequest.container_env(req) == %{"HF_TOKEN" => @env_secret}
+    end
+
+    test "a sealed value that is not a string is refused by name, unprinted" do
+      assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+               ComputeRequest.new(
+                 gpu: :h100,
+                 env: %{"HF_TOKEN" => ExAtlas.Secret.wrap(~c"hf-charlist-probe-0b12")}
+               )
+
+      assert Exception.message(error) =~ ~s("HF_TOKEN")
+      refute inspect(error) =~ "hf-charlist-probe-0b12"
     end
   end
 

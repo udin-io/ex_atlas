@@ -50,10 +50,13 @@ defmodule ExAtlas.Spec.ComputeRequest do
   A provider translator calls `container_env/1`. It returns `:env`, the
   callback variables and the staging variables in one map, so no provider can
   forget one of them.
+
+  `new/1` holds each `:env` value as an `ExAtlas.Secret`, since any of them can
+  be a token. `container_env/1` returns the values themselves.
   """
 
-  alias ExAtlas.Callback
-  alias ExAtlas.Spec.Staging
+  alias ExAtlas.{Callback, Secret}
+  alias ExAtlas.Spec.{Env, Staging}
 
   @enforce_keys [:gpu]
   defstruct gpu: nil,
@@ -89,7 +92,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
           spot: boolean(),
           region_hints: [String.t()],
           ports: [port_spec()],
-          env: %{optional(String.t()) => String.t()},
+          env: %{optional(String.t()) => Secret.t()},
           volume_gb: pos_integer() | nil,
           container_disk_gb: pos_integer() | nil,
           network_volume_id: String.t() | nil,
@@ -112,7 +115,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
     spot: [type: :boolean, default: false],
     region_hints: [type: {:list, :string}, default: []],
     ports: [type: {:list, :any}, default: []],
-    # Checked by `validate_env/1`: NimbleOptions puts the env in its error.
+    # Checked by `Env.validate/1`: NimbleOptions puts the env in its error.
     env: [type: :any, default: %{}],
     volume_gb: [type: {:or, [:pos_integer, nil]}, default: nil],
     container_disk_gb: [type: {:or, [:pos_integer, nil]}, default: nil],
@@ -147,10 +150,11 @@ defmodule ExAtlas.Spec.ComputeRequest do
   def new(opts) do
     with {:ok, opts} <- normalize(opts),
          {:ok, opts} <- NimbleOptions.validate(opts, @schema),
-         :ok <- validate_env(opts[:env]),
+         :ok <- Env.validate(opts[:env]),
          {:ok, staging} <- Staging.new(opts[:s3]),
          :ok <- check_env_overlap(opts[:env], staging) do
-      {:ok, struct!(__MODULE__, Keyword.put(opts, :s3, staging))}
+      opts = opts |> Keyword.put(:s3, staging) |> Keyword.update!(:env, &seal_env/1)
+      {:ok, struct!(__MODULE__, opts)}
     end
   end
 
@@ -164,6 +168,7 @@ defmodule ExAtlas.Spec.ComputeRequest do
   @spec container_env(t()) :: %{String.t() => String.t()}
   def container_env(%__MODULE__{} = request) do
     request.env
+    |> Map.new(fn {name, value} -> {name, Secret.reveal(value)} end)
     |> Map.merge(callback_env(request.callback))
     |> Map.merge(Staging.env(request.s3))
     |> Map.new(fn {name, value} -> {to_string(name), to_string(value)} end)
@@ -189,31 +194,9 @@ defmodule ExAtlas.Spec.ComputeRequest do
     end
   end
 
-  defp validate_env(env) when is_map(env) and not is_struct(env) do
-    case Enum.find(env, fn {name, value} -> not (is_binary(name) and is_binary(value)) end) do
-      nil ->
-        :ok
-
-      {name, _value} when is_binary(name) ->
-        env_error("the value of #{inspect(name)} is not a string")
-
-      _not_a_string_name ->
-        env_error("every name must be a string")
-    end
-  end
-
-  defp validate_env(_env), do: env_error("expected a map")
-
-  defp env_error(detail) do
-    {:error,
-     %NimbleOptions.ValidationError{
-       key: :env,
-       value: nil,
-       message:
-         "invalid value for :env option: expected a map of string names to string values; " <>
-           detail
-     }}
-  end
+  # Every value can hold a token, and the request lives in frames a crash
+  # prints. Names stay readable.
+  defp seal_env(env), do: Map.new(env, fn {name, value} -> {name, Secret.wrap(value)} end)
 
   # NimbleOptions raises on a non-keyword list with the offending pair, values
   # included, in its message; a function clause error carries the argument.

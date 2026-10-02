@@ -49,4 +49,44 @@ defmodule ExAtlas.Spec.TemplateRequestTest do
     assert {:error, %NimbleOptions.ValidationError{}} =
              TemplateRequest.new(name: "n", image: "i", bogus: 1)
   end
+
+  describe "env: values" do
+    test "never print through inspect/1" do
+      req =
+        TemplateRequest.new!(
+          name: "t",
+          image: "i",
+          env: %{"HF_TOKEN" => "hf-template-probe-2d6f"}
+        )
+
+      for opts <- [[], [structs: false]] do
+        text = inspect(req, [limit: :infinity, printable_limit: :infinity] ++ opts)
+        assert text =~ "TemplateRequest"
+        refute text =~ "hf-template-probe-2d6f"
+      end
+
+      # Control: the provider still reads the value.
+      assert TemplateRequest.env(req) == %{"HF_TOKEN" => "hf-template-probe-2d6f"}
+    end
+
+    test "an invalid env: names the key and holds no value" do
+      for new <- [&TemplateRequest.new/1, &new_or_error/1] do
+        assert {:error, %NimbleOptions.ValidationError{key: :env, value: nil} = error} =
+                 new.(
+                   name: "t",
+                   image: "i",
+                   env: %{"HF_TOKEN" => "hf-template-probe-2d6f", "N" => 1}
+                 )
+
+        assert Exception.message(error) =~ ~s("N")
+        refute inspect(error) =~ "hf-template-probe-2d6f"
+      end
+    end
+  end
+
+  defp new_or_error(opts) do
+    {:ok, TemplateRequest.new!(opts)}
+  rescue
+    error -> {:error, error}
+  end
 end

@@ -6,7 +6,14 @@ defmodule ExAtlas.Spec.TemplateRequest do
   `:ports` take the same `{port, :http | :tcp}` tuples as
   `ExAtlas.Spec.ComputeRequest`. `:ssh` and `:jupyter` left at `nil` leave the
   provider's own default in force (RunPod turns both on).
+
+  `new/1` holds each `:env` value as an `ExAtlas.Secret`, since any of them can
+  be a token; `env/1` returns the values. An invalid `:env` is an error that
+  names the key and holds no value.
   """
+
+  alias ExAtlas.Secret
+  alias ExAtlas.Spec.Env
 
   @enforce_keys [:name, :image]
   defstruct name: nil,
@@ -25,7 +32,7 @@ defmodule ExAtlas.Spec.TemplateRequest do
           name: String.t(),
           image: String.t(),
           ports: [{:inet.port_number(), :http | :tcp}],
-          env: %{optional(String.t()) => String.t()},
+          env: %{optional(String.t()) => Secret.t()},
           container_disk_gb: pos_integer() | nil,
           volume_gb: pos_integer() | nil,
           command: [String.t()] | nil,
@@ -39,7 +46,8 @@ defmodule ExAtlas.Spec.TemplateRequest do
     name: [type: :string, required: true],
     image: [type: :string, required: true],
     ports: [type: {:list, :any}, default: []],
-    env: [type: {:map, :string, :string}, default: %{}],
+    # Checked by `Env.validate/1`: NimbleOptions puts the env in its error.
+    env: [type: :any, default: %{}],
     container_disk_gb: [type: {:or, [:pos_integer, nil]}, default: nil],
     volume_gb: [type: {:or, [:pos_integer, nil]}, default: nil],
     command: [type: {:or, [{:list, :string}, nil]}, default: nil],
@@ -52,15 +60,24 @@ defmodule ExAtlas.Spec.TemplateRequest do
   @doc "Build a validated `TemplateRequest` from keyword opts. Raises on invalid input."
   @spec new!(keyword()) :: t()
   def new!(opts) when is_list(opts) do
-    opts = NimbleOptions.validate!(opts, @schema)
-    struct!(__MODULE__, opts)
+    case new(opts) do
+      {:ok, request} -> request
+      {:error, error} -> raise error
+    end
   end
 
   @doc "Build a validated `TemplateRequest` from keyword opts."
   @spec new(keyword()) :: {:ok, t()} | {:error, NimbleOptions.ValidationError.t()}
   def new(opts) when is_list(opts) do
-    with {:ok, opts} <- NimbleOptions.validate(opts, @schema) do
-      {:ok, struct!(__MODULE__, opts)}
+    with {:ok, opts} <- NimbleOptions.validate(opts, @schema),
+         :ok <- Env.validate(opts[:env]) do
+      env = Map.new(opts[:env], fn {name, value} -> {name, Secret.wrap(value)} end)
+      {:ok, struct!(__MODULE__, Keyword.put(opts, :env, env))}
     end
   end
+
+  @doc "The container environment of `request`, as strings."
+  @spec env(t()) :: %{String.t() => String.t()}
+  def env(%__MODULE__{env: env}),
+    do: Map.new(env, fn {name, value} -> {name, Secret.reveal(value)} end)
 end

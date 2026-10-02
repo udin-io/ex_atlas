@@ -471,8 +471,61 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       for secret <- ~w(tid-test-4b1e tsec-test-9f2c tses-test-0d7a getsig-5d0c91 putsig-a7e3b2),
           do: refute(text =~ secret)
 
-      # Control: the rest of the opts are kept.
-      assert record.opts[:env] == %{"WANDB_PROJECT" => "x"}
+      # Control: the rest of the opts are kept; `env:` keeps its names.
+      assert record.opts[:image] == "trainer:latest"
+      assert record.opts[:env] == %{"WANDB_PROJECT" => :not_stored}
+    end
+
+    test "env: values never reach the store's bytes on disk, and the names do",
+         %{tmp_dir: dir} do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
+
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(
+                 task_opts(
+                   env: %{
+                     "HF_TOKEN_NAME_c31e" => "hf-disk-probe-8d4b",
+                     "WANDB_NAME_02f9" => "wandb-disk-probe-e6a1"
+                   }
+                 )
+               )
+
+      bytes = File.read!(Path.join(dir, "tracked.dets"))
+
+      # The record landed with its env names, so the refutes are not vacuous.
+      assert bytes =~ compute.id
+      assert bytes =~ "HF_TOKEN_NAME_c31e"
+      assert bytes =~ "WANDB_NAME_02f9"
+      refute bytes =~ "hf-disk-probe-8d4b"
+      refute bytes =~ "wandb-disk-probe-e6a1"
+      # No closure either: an `ExAtlas.Secret` must never reach disk.
+      refute bytes =~ "ExAtlas.Secret"
+
+      assert {:ok, record} = TrackingStore.Dets.get(compute.id)
+
+      assert record.opts[:env] == %{
+               "HF_TOKEN_NAME_c31e" => :not_stored,
+               "WANDB_NAME_02f9" => :not_stored
+             }
+    end
+
+    test "an empty env: is stored as it is, and no env: stores none" do
+      assert TrackingStore.scrub_opts(env: %{}) == [env: %{}]
+      assert TrackingStore.scrub_opts(image: "x") == [image: "x"]
+    end
+
+    test "scrub_keys: [:env] stores the bare marker, never nothing" do
+      # `start!/1` clears the orchestrator config when the test exits.
+      ExAtlas.Test.Orchestrator.start!()
+      ExAtlas.Test.Orchestrator.put_env(scrub_keys: [:env])
+
+      scrubbed = TrackingStore.scrub_opts(env: %{"HF_TOKEN" => "hf-scrub-probe-1a7c"}, image: "x")
+
+      assert scrubbed[:env] == :not_stored
+      assert scrubbed[:image] == "x"
+
+      # An empty env has nothing to lose, so a respawn may still run.
+      assert TrackingStore.scrub_opts(env: %{}) == [env: %{}]
     end
 
     test "presigned URLs alone leave only the marker" do
@@ -515,15 +568,16 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
                      dataset_url: "https://b.example/d.tar.gz?X-Amz-Signature=getsig-5d0c91",
                      artifact_url: "https://b.example/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
                    },
-                   # Control: `:env` is stored verbatim, so a string in a record
+                   # Control: an env name is stored, so a string in a record
                    # shows up in these bytes as written.
-                   env: %{"PROBE" => "env-visible-6e1d"}
+                   env: %{"PROBE_NAME_4f2a" => "env-value-6e1d"}
                  )
                )
 
       bytes = File.read!(Path.join(dir, "tracked.dets"))
 
-      assert bytes =~ "env-visible-6e1d"
+      assert bytes =~ "PROBE_NAME_4f2a"
+      refute bytes =~ "env-value-6e1d"
       assert bytes =~ compute.id
       assert bytes =~ "t3-probe-51c0.storage.dev"
       assert bytes =~ "abc-probe-2e8f"

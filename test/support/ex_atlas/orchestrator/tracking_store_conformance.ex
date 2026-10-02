@@ -33,6 +33,31 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
   """
 
   @doc false
+  # A full current record for `id`. Outside the quote block, which credo
+  # limits in length.
+  def record(id, overrides \\ %{}) do
+    %{
+      v: 3,
+      id: id,
+      owner: "a",
+      provider: :mock,
+      opts: [gpu: :h100, image: "trainer:latest", mode: :task],
+      spawned_at_ms: 1_700_000_000_000,
+      max_runtime_ms: 90 * 60 * 1_000,
+      respawns: 0,
+      callback_task_id: "task-" <> id,
+      report: nil,
+      mode: :task,
+      user_id: nil,
+      max_cost: 2.5,
+      spent_usd: 0.75,
+      cost_rate: 1.5,
+      cost_since_ms: 1_700_000_600_000
+    }
+    |> Map.merge(overrides)
+  end
+
+  @doc false
   def build_setup_call(nil), do: quote(do: _ = var!(context))
 
   def build_setup_call({:{}, _, [mod, fun, args]}) do
@@ -56,27 +81,8 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
         :ok
       end
 
-      defp conformance_record(id, overrides \\ %{}) do
-        %{
-          v: 3,
-          id: id,
-          owner: "a",
-          provider: :mock,
-          opts: [gpu: :h100, image: "trainer:latest", mode: :task],
-          spawned_at_ms: 1_700_000_000_000,
-          max_runtime_ms: 90 * 60 * 1_000,
-          respawns: 0,
-          callback_task_id: "task-" <> id,
-          report: nil,
-          mode: :task,
-          user_id: nil,
-          max_cost: 2.5,
-          spent_usd: 0.75,
-          cost_rate: 1.5,
-          cost_since_ms: 1_700_000_600_000
-        }
-        |> Map.merge(overrides)
-      end
+      defp conformance_record(id, overrides \\ %{}),
+        do: ExAtlas.Orchestrator.TrackingStoreConformance.record(id, overrides)
 
       describe "conformance: put/1, get/1, delete/1" do
         test "get/1 on empty storage returns :error" do
@@ -139,6 +145,22 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
           :ok = @store.put(record)
 
           assert {:ok, ^record} = @store.get("compute-s3")
+        end
+
+        # `ExAtlas.Orchestrator.TrackingStore.scrub_opts/1` writes env names
+        # with `:not_stored`, or the bare marker. A store that drops either
+        # lets an adopted respawn run with no environment.
+        test "put/1 round-trips a scrubbed env: inside opts" do
+          for {id, env} <- [
+                {"compute-env", %{"HF_TOKEN" => :not_stored, "WANDB_PROJECT" => :not_stored}},
+                {"compute-env-bare", :not_stored},
+                {"compute-env-empty", %{}}
+              ] do
+            record = conformance_record(id, %{opts: [gpu: :h100, mode: :task, env: env]})
+            :ok = @store.put(record)
+
+            assert {:ok, ^record} = @store.get(id)
+          end
         end
 
         test "put/1 overwrites the record for an id" do

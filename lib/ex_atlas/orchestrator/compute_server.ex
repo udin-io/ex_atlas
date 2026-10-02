@@ -338,8 +338,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   # `Orchestrator.spawn/1` has sealed these already; a tracker started
-  # directly gets the same, so its state never holds a raw key.
-  defp sealed({:adopted, _record} = arg), do: arg
+  # directly gets the same, so its state never holds a raw key. A record holds
+  # no credential, but one written before env values were left out holds them.
+  defp sealed({:adopted, %{opts: opts} = record}) do
+    case Keyword.fetch(opts, :env) do
+      {:ok, env} -> {:adopted, %{record | opts: Keyword.put(opts, :env, seal_stored_env(env))}}
+      :error -> {:adopted, record}
+    end
+  end
 
   defp sealed({compute, opts}) do
     case ExAtlas.Config.seal_credentials(opts) do
@@ -347,6 +353,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       {:error, error} -> raise error
     end
   end
+
+  defp seal_stored_env(env) when is_map(env),
+    do: Map.new(env, fn {name, value} -> {name, seal_stored_value(value)} end)
+
+  defp seal_stored_env(env), do: env
+
+  defp seal_stored_value(marker) when marker in [:not_stored, "not_stored"], do: marker
+  defp seal_stored_value(value), do: ExAtlas.Secret.wrap(value)
 
   defp tracked_id({:adopted, record}), do: record.id
   defp tracked_id({compute, _opts}), do: compute.id
@@ -1021,23 +1035,47 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
-  # An adopted task's `s3:` came from its record, which never holds the
-  # credentials or presigned URLs. A replacement without them would run blind,
-  # and `ExAtlas.spawn_compute/1` raises on the marker, so the respawn ends
-  # here, before the provider is asked for anything.
+  # An adopted task's `s3:` and `env:` came from its record, which never holds
+  # the credentials, presigned URLs or env values. A replacement without them
+  # would run blind, and `ExAtlas.spawn_compute/1` raises on the markers, so the
+  # respawn ends here, before the provider is asked for anything.
   defp spawn_replacement(opts) do
-    if Spec.Staging.not_stored?(Keyword.get(opts, :s3)) do
-      {:error,
-       ExAtlas.Error.new(:validation,
-         provider: Keyword.get(opts, :provider),
-         message:
-           "cannot respawn: the :s3 staging credentials are not stored in a tracking " <>
-             "record, so a task adopted after a restart has none to give a replacement"
-       )}
-    else
-      ExAtlas.spawn_compute(opts)
+    cond do
+      Spec.Staging.not_stored?(Keyword.get(opts, :s3)) ->
+        not_stored(opts, "the :s3 staging credentials are")
+
+      names = unstored_env(Keyword.get(opts, :env)) ->
+        not_stored(opts, "the :env values#{names} are")
+
+      true ->
+        ExAtlas.spawn_compute(opts)
     end
   end
+
+  defp not_stored(opts, what) do
+    {:error,
+     ExAtlas.Error.new(:validation,
+       provider: Keyword.get(opts, :provider),
+       message:
+         "cannot respawn: #{what} not stored in a tracking record, so a task " <>
+           "adopted after a restart has none to give a replacement"
+     )}
+  end
+
+  # The names of the values a record left out, as a message suffix; `nil` when
+  # the env is whole. `TrackingStore.scrub_opts/1` writes both markers. A host
+  # store that keeps atoms as strings hands back `"not_stored"`, which counts
+  # too: a replacement must never get the marker as a value.
+  defp unstored_env(marker) when marker in [:not_stored, "not_stored"], do: ""
+
+  defp unstored_env(env) when is_map(env) do
+    case for {name, value} <- env, value in [:not_stored, "not_stored"], do: name do
+      [] -> nil
+      names -> " (#{names |> Enum.sort() |> Enum.join(", ")})"
+    end
+  end
+
+  defp unstored_env(_env), do: nil
 
   # A death does not always mean the resource is gone. A reclaimed spot pod
   # reads as `status: EXITED` — dead to us, still present upstream,
@@ -1063,7 +1101,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp update_record(%{store: store} = state, fun) do
     case store.get(state.compute.id) do
-      {:ok, record} -> store.put(fun.(record))
+      {:ok, record} -> store.put(record |> fun.() |> TrackingStore.scrub_env())
       :error -> :ok
     end
   end
@@ -1080,7 +1118,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp carry_record(%{store: store} = state, old_id, new_id) do
     case store.get(old_id) do
       {:ok, record} ->
-        store.put(%{record | id: new_id, respawns: state.respawns + 1})
+        store.put(TrackingStore.scrub_env(%{record | id: new_id, respawns: state.respawns + 1}))
         store.delete(old_id)
 
       :error ->

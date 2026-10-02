@@ -1415,18 +1415,19 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
   each machine away from the others' pods; set it on every machine (see "More
   than one node").
 - **Credentials print as `#ExAtlas.Secret<redacted>`.** ExAtlas wraps
-  `api_key:` and the `:auth`, `:headers` and `:aws_sigv4` entries of
-  `req_options:` in `ExAtlas.Secret` where it first receives them, so a crash
-  in a tracker or a provider prints none of them. `inspect/1` of a
+  `api_key:`, the `:auth`, `:headers` and `:aws_sigv4` entries of
+  `req_options:`, and every `env:` value in `ExAtlas.Secret` where it first
+  receives them, so a crash in a tracker or a provider prints none of them.
+  `env:` names stay readable. `inspect/1` of a
   `Spec.Compute` leaves out `auth`. Your own frames hold what you pass: pass
   `api_key: ExAtlas.Secret.wrap(key)` to cover them too.
 - **The tracking store is on disk.** Records are scrubbed of `:api_key` and
-  friends and never hold `compute.auth.token`, but they do hold your spawn
-  opts — including `:env`, which is persisted verbatim so a respawn after
-  adoption still works. If you inject secrets through `:env`, add it to
-  `config :ex_atlas, :orchestrator, scrub_keys: [:env]` (accepting that a
-  respawn then loses them) or supply a store that encrypts at rest. The DETS
-  default is `0700`/`0600`.
+  friends and never hold `compute.auth.token` or an `env:` value. `env:`
+  keeps its names, each with the value `:not_stored`. An adopted task runs
+  on, but a preemption after adoption ends it with `{:respawn_failed, ...}`:
+  the record has no values to give a replacement. A record written before
+  0.8.0 still holds its values until its task ends. The DETS default is
+  `0700`/`0600`.
 - **`s3:` credentials go to a third-party GPU host.** They sit in the pod's
   environment, where anyone with access to the pod can read them. Give the
   pod keys scoped to the dataset and artifact prefixes, with a short life
