@@ -33,7 +33,8 @@ names the PR or issue that holds the reasoning.
 | A record keeps `env:` names with `:not_stored` values; an adopted task refuses a respawn that would lose them | Store the values as before: respawn after adoption works, tokens sit on disk | #79 |
 | `scrub_keys: [:env]` stores `env: :not_stored`, never nothing | Drop `env:`: an adopted respawn runs with no environment and no error | #79 |
 | No record version bump for the `env:` marker | Version 4: a rollback build skips the record and leaves the pod to the Reaper | #79 |
-| A record written before #79 keeps its plain values; adoption seals them and a respawn sends them | Rewrite it with markers: breaks tasks in flight across the upgrade, and DETS does not zero freed space | #79 |
+| A record written before #79 keeps its plain values for one adoption; adoption seals them, a respawn sends them, and every rewrite (claim, cost update, respawn) stores names only | Rewrite it with markers at once: breaks tasks in flight across the upgrade. Keep copying the values: each respawn writes the token again | #79, review |
+| The string `"not_stored"` counts as the marker | Match the atom only: a store that keeps atoms as strings sends `"not_stored"` to the pod as a value | #79, review |
 | `Config.build_ctx/2` drops `env:` | Pass it through: no provider reads it, and every tracker poll printed it | #79 |
 | URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
 | ExAtlas never presigns and never calls S3 | Presign in ExAtlas: needs a SigV4 signer and host credentials | #26 |

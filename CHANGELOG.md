@@ -24,10 +24,15 @@ wrote them to disk. Now:
 - An adopted task whose record left out values refuses a respawn with
   `{:respawn_failed, {reason, %ExAtlas.Error{kind: :validation}}}`, naming
   the variables, and rents no pod. A respawn before any restart still sends
-  every value. A record written by an earlier build keeps its values: the
-  adopted tracker seals them and its respawn sends them.
-- `inspect/1` of a `Spec.TemplateRequest` leaves out `env`, and an invalid
-  template `env:` is an error with `value: nil`.
+  every value. A record written by an earlier build keeps its values for one
+  adoption: the adopted tracker seals them and its respawn sends them, and
+  every rewrite of the record stores names only. The string `"not_stored"`,
+  as a store that keeps atoms as strings returns it, refuses the respawn too.
+- `Spec.TemplateRequest` holds its `env:` values as Secrets too
+  (`TemplateRequest.env/1` returns them), and an invalid template `env:` is an
+  error with `value: nil`.
+- `provider_opts: %{"env" => ...}` still reaches the RunPod body and the
+  record as given. Put secrets in `env:`.
 
 The record schema stays at version 3. Rolling back: an earlier build reads
 `:not_stored` values, and that task's respawn fails `ComputeRequest`
