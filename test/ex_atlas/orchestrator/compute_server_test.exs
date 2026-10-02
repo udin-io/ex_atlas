@@ -174,6 +174,59 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     end
   end
 
+  describe "s3: credentials beyond the State line" do
+    @s3 %{
+      access_key_id: "tid-test-4b1e",
+      secret_access_key: "tsec-test-9f2c",
+      session_token: "tses-test-0d7a",
+      dataset_uri: "s3://bucket/datasets/abc/"
+    }
+
+    defp refute_s3_secrets(text) do
+      for secret <- ["tid-test-4b1e", "tsec-test-9f2c", "tses-test-0d7a"],
+          do: refute(text =~ secret)
+    end
+
+    test "a function clause crash prints no credential in its stacktrace" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          s3: @s3
+        )
+
+      ref = Process.monitor(pid)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+        end)
+
+      # The crash and its stacktrace were logged, so the refutes are not vacuous.
+      assert log =~ "terminating"
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute_s3_secrets(log)
+    end
+
+    test "an invalid s3: is an error from spawn/1, before the provider is called" do
+      assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x-s3-invalid",
+                 s3: Map.delete(@s3, :secret_access_key)
+               )
+
+      refute_s3_secrets(inspect(error))
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      refute Enum.any?(computes, &(&1.image == "x-s3-invalid"))
+    end
+  end
+
   describe "upstream status polling" do
     setup do
       # Idle TTL and heartbeat are pushed far out so nothing but the status
