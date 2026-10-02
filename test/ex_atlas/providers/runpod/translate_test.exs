@@ -4,6 +4,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
   alias ExAtlas.Callback
   alias ExAtlas.Providers.RunPod.Translate
   alias ExAtlas.Spec
+  alias ExAtlas.Test.CurlShim
 
   describe "compute_request_to_pod_create/1" do
     test "maps canonical GPU to RunPod id" do
@@ -65,7 +66,10 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert File.read!(Path.join(tmp, "ran")) == "ran\n"
       assert log =~ "-X DELETE"
       assert log =~ "https://api.runpod.io/v2/pods/pod_abc"
-      assert log =~ "Authorization: Bearer pod-scoped-key"
+      # The key reaches curl on stdin: argv shows in `ps` to every process
+      # in the container.
+      refute log =~ "pod-scoped-key"
+      assert curl_config(tmp) =~ ~s(header = "Authorization: Bearer pod-scoped-key")
       # A hung DELETE must not hold the pod, and its bill, open for ever.
       assert log =~ "-m 30"
     end
@@ -97,34 +101,16 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       assert File.read!(Path.join(tmp, "arg")) == "it's a $PATH; rm -rf /"
     end
 
-    # Run a generated `dockerStartCmd` for real, with a `curl` shim ahead of
-    # everything else on PATH so the self-termination request is recorded
-    # rather than sent. Returns `{exit_status, curl_log}`.
-    defp run_start_cmd(cmd, tmp, extra_env \\ [])
-
-    defp run_start_cmd(["sh", "-c", script], tmp, extra_env) do
-      shim = Path.join(tmp, "curl")
-      log = Path.join(tmp, "curl.log")
-
-      # A test that wrote its own shim (`failing_curl/1`) keeps it.
-      unless File.exists?(shim) do
-        File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\n")
-        File.chmod!(shim, 0o755)
-      end
-
-      {_out, status} =
-        System.cmd("sh", ["-c", script],
-          stderr_to_stdout: true,
-          env:
-            [
-              {"PATH", tmp <> ":" <> System.get_env("PATH", "/usr/bin:/bin")},
-              {"RUNPOD_POD_ID", "pod_abc"},
-              {"RUNPOD_API_KEY", "pod-scoped-key"}
-            ] ++ extra_env
-        )
-
-      {status, File.read!(log)}
+    # Run a generated `dockerStartCmd` for real (see `CurlShim`). Returns
+    # `{exit_status, curl_argv_log}`; `curl_config/1` reads what curl took on
+    # stdin.
+    defp run_start_cmd(cmd, tmp, extra_env \\ []) do
+      env = [{"RUNPOD_POD_ID", "pod_abc"}, {"RUNPOD_API_KEY", "pod-scoped-key"}] ++ extra_env
+      {status, log, _config} = CurlShim.run(cmd, tmp, env)
+      {status, log}
     end
+
+    defp curl_config(tmp), do: File.read!(Path.join(tmp, "curl.config"))
 
     test "mints a bearer token when auth: :bearer" do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", auth: :bearer)
@@ -529,12 +515,11 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
     defp env_value(body, key), do: body["env"][key]
 
-    defp callback_env(tmp) do
+    defp callback_env do
       [
         {"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"},
         {"ATLAS_CALLBACK_TOKEN", "a-token"},
-        {"ATLAS_TASK_ID", "a-task"},
-        {"CURL_LOG", Path.join(tmp, "curl.log")}
+        {"ATLAS_TASK_ID", "a-task"}
       ]
     end
 
@@ -624,11 +609,13 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env())
 
       assert log =~ ~s({"exit_code":0})
       assert log =~ "https://app.example.com/atlas/cb/finish"
       assert log =~ "-X DELETE"
+      refute log =~ "a-token"
+      assert curl_config(tmp) =~ ~s(header = "Authorization: Bearer a-token")
 
       # The marker is written before the pod goes, which is the whole point:
       # a later disappearance is no longer ambiguous.
@@ -650,7 +637,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {3, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
+      assert {3, log} = run_start_cmd(body["cmd"], tmp, callback_env())
       assert log =~ ~s({"exit_code":3})
     end
 
@@ -670,7 +657,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
 
       {body, _} = Translate.compute_request_to_pod_create(req)
 
-      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env())
       assert log =~ ~s({"exit_code":0})
       refute log =~ "-X DELETE"
     end
@@ -691,17 +678,12 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       {body, _} = Translate.compute_request_to_pod_create(req)
       failing_curl(tmp)
 
-      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env(tmp))
+      assert {0, log} = run_start_cmd(body["cmd"], tmp, callback_env())
       assert log =~ "-X DELETE"
     end
 
-    # A curl shim that logs and then fails, the way an unreachable host looks.
-    defp failing_curl(tmp) do
-      shim = Path.join(tmp, "curl")
-      log = Path.join(tmp, "curl.log")
-      File.write!(shim, "#!/bin/sh\necho \"$@\" >> #{log}\nexit 7\n")
-      File.chmod!(shim, 0o755)
-    end
+    # A curl that fails, the way an unreachable host looks.
+    defp failing_curl(tmp), do: CurlShim.install(tmp, 7)
   end
 
   describe "network_volume_request_to_body/1" do

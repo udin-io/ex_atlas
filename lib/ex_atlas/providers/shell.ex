@@ -78,7 +78,15 @@ defmodule ExAtlas.Providers.Shell do
   """
   @spec delete_request(String.t(), String.t()) :: String.t()
   def delete_request(url, key_var),
-    do: "curl -sS -m 30 -X DELETE -H \"Authorization: Bearer $#{key_var}\" \"#{url}\";"
+    do: "#{bearer_config(key_var)} | curl -sS -m 30 -K - -X DELETE \"#{url}\";"
+
+  # The header goes to curl as a `-K -` config line on stdin, written by the
+  # `printf` builtin, so no argv carries the key: every process in the
+  # container reads every other's argv in `ps`. A key holding `"` or `\` would
+  # break the config line; RunPod's, Vast's and the callback's tokens hold
+  # neither.
+  defp bearer_config(key_var),
+    do: ~s(printf 'header = "Authorization: Bearer %s"\\n' "$#{key_var}")
 
   defp finish_report(nil), do: nil
 
@@ -86,8 +94,8 @@ defmodule ExAtlas.Providers.Shell do
   # being interpolated into the script, so a callback URL can never be read as
   # shell syntax.
   defp finish_report(%{}) do
-    ~s(curl -sS -m 10 -X POST ) <>
-      ~s(-H "Authorization: Bearer $ATLAS_CALLBACK_TOKEN" ) <>
+    bearer_config("ATLAS_CALLBACK_TOKEN") <>
+      ~s( | curl -sS -m 10 -K - -X POST ) <>
       ~s(-H "Content-Type: application/json" ) <>
       ~s(-d "{\\"exit_code\\":$atlas_code}" ) <>
       ~s("$ATLAS_CALLBACK_URL/finish" || true;)
