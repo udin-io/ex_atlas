@@ -233,6 +233,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # it those tasks can only ever end at `:max_runtime_ms`.
   @default_finish_grace_ms 60 * 1_000
 
+  # How long a respawn waits on a host's `respawn_credentials:` resolver. It
+  # holds this mailbox while it waits, as the provider call after it does.
+  @default_respawn_credentials_timeout_ms 30_000
+  @max_resolver_timeout_ms Timer.max_ms()
+
+  @not_stored [:not_stored, "not_stored"]
+
   # Teardown does one `DELETE` against the provider and must be allowed to
   # finish it: the DynamicSupervisor default of 5s brutal-kills the tracker
   # first, and a resource nobody deleted bills until the Reaper notices.
@@ -1053,8 +1060,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp respawn(state, reason) do
     old_id = state.compute.id
 
-    case spawn_replacement(state.opts) do
-      {:ok, replacement} ->
+    case spawn_replacement(state) do
+      {:ok, replacement, opts} ->
         # Before `release_old/1`, which deletes the old record along with the
         # old resource. The replacement inherits the original `spawned_at_ms`
         # so an adopted deadline still measures from the *first* spawn — a
@@ -1074,6 +1081,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
           reprice(%{
             state
             | compute: replacement,
+              opts: opts,
               cost_meter: new_pod(state.cost_meter),
               respawns: state.respawns + 1,
               poll_failures: 0,
@@ -1095,45 +1103,288 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # An adopted task's `s3:` and `env:` came from its record, which never holds
   # the credentials, presigned URLs or env values. A replacement without them
-  # would run blind, and `ExAtlas.spawn_compute/1` raises on the markers, so the
-  # respawn ends here, before the provider is asked for anything.
-  defp spawn_replacement(opts) do
-    cond do
-      Spec.Staging.not_stored?(Keyword.get(opts, :s3)) ->
-        not_stored(opts, "the :s3 staging credentials are")
+  # would run blind, and `ExAtlas.spawn_compute/1` raises on the markers. So a
+  # host resolver re-supplies them, or the respawn ends here, before the
+  # provider is asked for anything. The resolved values live in this tracker's
+  # opts alone: `carry_record/3` copies the old record, markers included.
+  defp spawn_replacement(%{opts: opts} = state) do
+    needs = unstored(opts)
 
-      names = unstored_env(Keyword.get(opts, :env)) ->
-        not_stored(opts, "the :env values#{names} are")
+    cond do
+      needs == %{s3: false, env: nil} ->
+        spawn_compute(opts)
+
+      resolver = resolver(opts) ->
+        with {:ok, opts} <- resolve_credentials(resolver, needs, state), do: spawn_compute(opts)
 
       true ->
-        ExAtlas.spawn_compute(opts)
+        not_stored(opts, needs)
     end
   end
 
-  defp not_stored(opts, what) do
+  defp spawn_compute(opts) do
+    with {:ok, replacement} <- ExAtlas.spawn_compute(opts), do: {:ok, replacement, opts}
+  end
+
+  defp unstored(opts) do
+    %{
+      s3: Spec.Staging.not_stored?(Keyword.get(opts, :s3)),
+      env: unstored_env(Keyword.get(opts, :env))
+    }
+  end
+
+  defp not_stored(opts, %{s3: true}),
+    do: not_stored_error(opts, "the :s3 staging credentials are")
+
+  defp not_stored(opts, %{env: names}),
+    do: not_stored_error(opts, "the :env values#{names_suffix(names)} are")
+
+  defp not_stored_error(opts, what) do
+    respawn_error(
+      opts,
+      "#{what} not stored in a tracking record, so a task adopted after a restart has " <>
+        "none to give a replacement. Set respawn_credentials: to re-supply them"
+    )
+  end
+
+  defp respawn_error(opts, detail) do
     {:error,
      ExAtlas.Error.new(:validation,
        provider: Keyword.get(opts, :provider),
-       message:
-         "cannot respawn: #{what} not stored in a tracking record, so a task " <>
-           "adopted after a restart has none to give a replacement"
+       message: "cannot respawn: " <> detail
      )}
   end
 
-  # The names of the values a record left out, as a message suffix; `nil` when
-  # the env is whole. `TrackingStore.scrub_opts/1` writes both markers. A host
-  # store that keeps atoms as strings hands back `"not_stored"`, which counts
-  # too: a replacement must never get the marker as a value.
-  defp unstored_env(marker) when marker in [:not_stored, "not_stored"], do: ""
+  defp names_suffix(:unknown), do: ""
+  defp names_suffix(names), do: " (#{Enum.join(names, ", ")})"
+
+  # The names of the values a record left out, sorted; `:unknown` when the
+  # record kept no names (`scrub_keys: [:env]`); `nil` when the env is whole.
+  # `TrackingStore.scrub_opts/1` writes both markers. A host store that keeps
+  # atoms as strings hands back `"not_stored"`, which counts too: a
+  # replacement must never get the marker as a value.
+  defp unstored_env(marker) when marker in @not_stored, do: :unknown
 
   defp unstored_env(env) when is_map(env) do
-    case for {name, value} <- env, value in [:not_stored, "not_stored"], do: name do
+    case for {name, value} <- env, value in @not_stored, do: name do
       [] -> nil
-      names -> " (#{names |> Enum.sort() |> Enum.join(", ")})"
+      names -> Enum.sort(names)
     end
   end
 
   defp unstored_env(_env), do: nil
+
+  # --- respawn credentials ---
+  #
+  # The per-task tuple, else the app config. Each is data, never a closure, so
+  # it survives a record's round trip through DETS and a restart.
+
+  defp resolver(opts) do
+    case Keyword.fetch(opts, :respawn_credentials) do
+      {:ok, mfa} -> {:task, mfa}
+      :error -> configured(:respawn_credentials)
+    end
+  end
+
+  defp configured(key) do
+    case Keyword.get(orchestrator_config(), key) do
+      nil -> nil
+      mfa -> {:config, mfa}
+    end
+  end
+
+  defp resolve_credentials({source, mfa}, needs, state) do
+    with {:ok, mfa} <- checked_resolver(source, mfa, state.opts),
+         {:ok, timeout} <- resolver_timeout(state.opts) do
+      result =
+        with {:ok, returned} <- call_resolver(mfa, resolver_info(state), timeout),
+             do: apply_resolved(returned, needs, state.opts)
+
+      case result do
+        {:ok, opts} ->
+          {:ok, opts}
+
+        {:error, detail} ->
+          respawn_error(state.opts, "respawn_credentials #{format_resolver(mfa)} #{detail}")
+      end
+    end
+  end
+
+  defp format_resolver({m, f, args}), do: Exception.format_mfa(m, f, length(args) + 1)
+
+  defp checked_resolver(:task, mfa, _opts), do: {:ok, mfa}
+
+  defp checked_resolver(:config, mfa, opts) do
+    case validate_respawn_credentials(mfa) do
+      {:ok, mfa} ->
+        {:ok, mfa}
+
+      {:error, message} ->
+        respawn_error(
+          opts,
+          "config :ex_atlas, :orchestrator, respawn_credentials is invalid: #{message}"
+        )
+    end
+  end
+
+  defp resolver_timeout(opts) do
+    case Keyword.get(orchestrator_config(), :respawn_credentials_timeout_ms) do
+      nil ->
+        {:ok, @default_respawn_credentials_timeout_ms}
+
+      ms when is_integer(ms) and ms > 0 and ms <= @max_resolver_timeout_ms ->
+        {:ok, ms}
+
+      _invalid ->
+        respawn_error(
+          opts,
+          "config :ex_atlas, :orchestrator, respawn_credentials_timeout_ms must be an " <>
+            "integer from 1 to #{@max_resolver_timeout_ms} milliseconds"
+        )
+    end
+  end
+
+  # What the record keeps, and no value: the resolver tells the staging mode
+  # from `s3` and which values to send from `env_names`.
+  defp resolver_info(%{opts: opts, compute: compute, user_id: user_id}) do
+    %{
+      id: compute.id,
+      name: Keyword.get(opts, :name),
+      user_id: user_id,
+      provider: Keyword.get(opts, :provider, compute.provider),
+      s3: stored_s3(Keyword.get(opts, :s3)),
+      env_names: unstored_env(Keyword.get(opts, :env)) || []
+    }
+  end
+
+  # Without the marker, so a resolver can merge its credentials onto it and
+  # hand back a value `Spec.Staging.new/1` accepts.
+  defp stored_s3(nil), do: nil
+  defp stored_s3(%Spec.Staging{} = staging), do: stored_s3(Spec.Staging.scrub(staging))
+  defp stored_s3(s3) when is_map(s3), do: Map.delete(s3, :credentials)
+  defp stored_s3(_unvalidated), do: %{}
+
+  # Bounded, and off this mailbox's callback stack: a hung resolver must not
+  # hold the tracker past the bound, and a raise must not crash it, since a
+  # crash deletes the old pod with no replacement. Its return, raise or exit
+  # value can hold a credential, so none leaves the task: a raise becomes its
+  # exception's module, a throw or exit its kind, and the task exits normally,
+  # so OTP logs no crash report.
+  defp call_resolver({m, f, args}, info, timeout) do
+    if Process.whereis(@task_supervisor) do
+      task =
+        Task.Supervisor.async_nolink(@task_supervisor, fn -> guarded(m, f, args ++ [info]) end)
+
+      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {:returned, result}} -> {:ok, result}
+        {:ok, {:raised, module}} -> {:error, "raised #{inspect(module)}"}
+        {:ok, {:caught, :throw}} -> {:error, "threw"}
+        {:ok, {:caught, _exit}} -> {:error, "exited"}
+        {:exit, _reason} -> {:error, "exited"}
+        nil -> {:error, "did not answer within #{timeout} ms"}
+      end
+    else
+      {:error, "could not run: #{inspect(@task_supervisor)} is not running"}
+    end
+  end
+
+  defp guarded(m, f, args) do
+    {:returned, apply(m, f, args)}
+  rescue
+    exception -> {:raised, exception.__struct__}
+  catch
+    kind, _value -> {:caught, kind}
+  end
+
+  # The resolved values, checked as `ExAtlas.Spec.ComputeRequest.new/1` checks
+  # a fresh spawn's, merged into the opts and sealed. A returned key replaces
+  # the stored one; a value the record left out must come back. No message
+  # holds a value: `Env` and `Staging` errors name keys only.
+  defp apply_resolved({:ok, resolved}, needs, opts) do
+    with :ok <- check_keyword(resolved),
+         {:ok, s3} <- resolved_s3(resolved, needs, opts),
+         {:ok, env} <- resolved_env(resolved, needs, opts),
+         {:ok, staging} <- validated(env, s3) do
+      {:ok, opts |> Keyword.put(:s3, staging) |> put_env(env)}
+    end
+  end
+
+  defp apply_resolved({:error, _reason}, _needs, _opts), do: {:error, "returned an error"}
+
+  defp apply_resolved(_other, _needs, _opts),
+    do: {:error, "returned something other than {:ok, keyword} or {:error, reason}"}
+
+  defp check_keyword(resolved) do
+    cond do
+      not (is_list(resolved) and Keyword.keyword?(resolved)) ->
+        {:error, "returned {:ok, value} with a value that is not a keyword list"}
+
+      unknown = Enum.find(Keyword.keys(resolved), &(&1 not in [:s3, :env])) ->
+        {:error, "returned the key #{inspect(unknown)}; it may return :s3 and :env"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp resolved_s3(resolved, needs, opts) do
+    case {Keyword.fetch(resolved, :s3), needs.s3} do
+      {{:ok, nil}, true} -> {:error, "returned s3: nil for a task rented with s3:"}
+      {{:ok, s3}, _needed?} -> {:ok, s3}
+      {:error, true} -> {:error, "returned no :s3, and the record holds no s3: credentials"}
+      {:error, false} -> {:ok, Keyword.get(opts, :s3)}
+    end
+  end
+
+  defp resolved_env(resolved, needs, opts) do
+    stored = Keyword.get(opts, :env)
+
+    case {Keyword.fetch(resolved, :env), needs.env} do
+      {:error, nil} ->
+        {:ok, stored}
+
+      {:error, _names} ->
+        {:error, "returned no :env, and the record holds no env: values"}
+
+      {{:ok, env}, names} when is_map(env) ->
+        missing = if is_list(names), do: Enum.reject(names, &Map.has_key?(env, &1)), else: []
+
+        if missing == [],
+          do: {:ok, Map.merge(kept_env(stored), env)},
+          else: {:error, "left out the :env values for #{Enum.join(missing, ", ")}"}
+
+      {{:ok, _env}, _names} ->
+        {:error, "returned an :env that is not a map"}
+    end
+  end
+
+  # The values a record written before env names-only still holds, sealed.
+  defp kept_env(env) when is_map(env),
+    do: Map.reject(env, fn {_name, value} -> value in @not_stored end)
+
+  defp kept_env(_marker_or_nil), do: %{}
+
+  defp validated(env, s3) do
+    case Spec.ComputeRequest.validate_env_and_s3(env || %{}, s3) do
+      {:ok, staging} ->
+        {:ok, staging}
+
+      {:error, error} ->
+        {:error, "returned a value the request refuses: #{Exception.message(error)}"}
+    end
+  end
+
+  defp put_env(opts, nil), do: opts
+
+  defp put_env(opts, env),
+    do:
+      Keyword.put(
+        opts,
+        :env,
+        Map.new(env, fn {name, value} -> {name, ExAtlas.Secret.wrap(value)} end)
+      )
+
+  defp orchestrator_config, do: Application.get_env(:ex_atlas, :orchestrator, [])
 
   # A death does not always mean the resource is gone. A reclaimed spot pod
   # reads as `status: EXITED` — dead to us, still present upstream,

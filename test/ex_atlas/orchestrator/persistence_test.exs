@@ -670,5 +670,70 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert id == compute.id
       assert bytes =~ compute.id
     end
+
+    test "a task adopted from DETS respawns through its record's tuple, and no resolved value reaches the disk",
+         %{tmp_dir: dir} do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
+
+      # `:fixed` returns `CredentialResolver.credentials/0` and `env/0`, values
+      # the record's args never hold.
+      resolver = {ExAtlas.Test.CredentialResolver, :resolve, [:fixed]}
+
+      {:ok, pid, compute} =
+        Orchestrator.run_task(
+          task_opts(
+            image: "trainer-dets-resolver:latest",
+            s3: %{
+              access_key_id: "tid-dets-orig-91aa",
+              secret_access_key: "tsec-dets-orig-5e37",
+              dataset_uri: "s3://bucket/datasets/dets-probe-6a0d/"
+            },
+            env: %{"HF_TOKEN" => "hf-dets-orig-d81b", "WANDB_PROJECT" => "wandb-dets-orig-a3c2"},
+            spot: true,
+            on_failure: {:respawn, 1},
+            status_poll_ms: 30,
+            respawn_credentials: resolver
+          )
+        )
+
+      # A deploy: the tracker dies without `terminate/2`, the store reopens
+      # its file, and the next boot adopts from what DETS kept.
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      ExAtlas.Test.Orchestrator.sync_registry()
+      stop_supervised!(TrackingStore.Dets)
+      start_supervised!({TrackingStore.Dets, [storage_path: dir]})
+
+      id = compute.id
+      assert {:ok, %{opts: opts}} = TrackingStore.Dets.get(id)
+      assert opts[:respawn_credentials] == resolver
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = ExAtlas.Orchestrator.Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      {:ok, %{compute: replacement}} = Orchestrator.info(new_id)
+      env = ExAtlas.Spec.ComputeRequest.container_env(replacement.raw.request)
+      assert env["AWS_SECRET_ACCESS_KEY"] == "tsec-resolved-0e58"
+      assert env["ATLAS_DATASET_URI"] == "s3://bucket/datasets/dets-probe-6a0d/"
+      assert env["WANDB_PROJECT"] == "wandb-resolved-5c07"
+
+      bytes = File.read!(Path.join(dir, "tracked.dets"))
+
+      # The replacement's record landed, with its names and URIs.
+      assert bytes =~ new_id
+      assert bytes =~ "WANDB_PROJECT"
+      assert bytes =~ "dets-probe-6a0d"
+
+      for secret <-
+            ~w(tid-resolved-7a41 tsec-resolved-0e58 hf-resolved-91d2 wandb-resolved-5c07) ++
+              ~w(tid-dets-orig-91aa tsec-dets-orig-5e37 hf-dets-orig-d81b wandb-dets-orig-a3c2),
+          do: refute(bytes =~ secret, "#{secret} reached the DETS file")
+
+      refute bytes =~ "ExAtlas.Secret"
+    end
   end
 end

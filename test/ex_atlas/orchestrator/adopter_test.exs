@@ -771,6 +771,476 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a task with respawn_credentials:" do
+    alias ExAtlas.Spec.ComputeRequest
+    alias ExAtlas.Test.CredentialResolver
+
+    # Each value is distinctive, so a refute on any printout or byte string
+    # can only pass because the value is not there.
+    @orig_s3 %{
+      access_key_id: "tid-orig-1f3a",
+      secret_access_key: "tsec-orig-6b2d",
+      dataset_uri: "s3://bucket/datasets/resolver/",
+      region: "auto"
+    }
+    @orig_env %{"HF_TOKEN" => "hf-orig-3c9e", "WANDB_PROJECT" => "wandb-orig-8f11"}
+    @creds %{access_key_id: "tid-resolved-7a41", secret_access_key: "tsec-resolved-0e58"}
+    @resolved_env %{"HF_TOKEN" => "hf-resolved-91d2", "WANDB_PROJECT" => "wandb-resolved-5c07"}
+    @resolved_values ~w(tid-resolved-7a41 tsec-resolved-0e58 hf-resolved-91d2 wandb-resolved-5c07)
+    @ok_both :fixed
+
+    defp resolver(script), do: {CredentialResolver, :resolve, [script]}
+
+    defp orphaned_resolved_task(image, script, overrides \\ []) do
+      orphaned_task(
+        Keyword.merge(
+          [
+            image: image,
+            s3: @orig_s3,
+            env: @orig_env,
+            spot: true,
+            on_failure: {:respawn, 1},
+            status_poll_ms: 30,
+            user_id: "user-42",
+            respawn_credentials: resolver({:report, self(), script})
+          ],
+          overrides
+        )
+        # `respawn_credentials: nil` stands for a task spawned without one.
+        |> Enum.reject(&(&1 == {:respawn_credentials, nil}))
+      )
+    end
+
+    defp mock_images do
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      Enum.map(computes, & &1.image)
+    end
+
+    defp container_env_of(id) do
+      {:ok, %{compute: compute}} = Orchestrator.info(id)
+      ComputeRequest.container_env(compute.raw.request)
+    end
+
+    # The respawn ended the task: a validation error naming the resolver, the
+    # tracker gone, nothing rented, the record removed. Returns the message.
+    defp assert_refused(id, pid, image) do
+      ref = Process.monitor(pid)
+
+      assert_receive {:atlas_compute, ^id,
+                      {:respawn_failed,
+                       {:preempted, %ExAtlas.Error{kind: :validation, message: message}}}},
+                     2_000
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute image in mock_images()
+      assert :error = Memory.get(id)
+      message
+    end
+
+    test "an adopted s3: and env: task respawns with the resolved values" do
+      compute = orphaned_resolved_task("trainer-resolved:latest", @ok_both)
+      id = compute.id
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      env = container_env_of(new_id)
+
+      assert env["AWS_ACCESS_KEY_ID"] == "tid-resolved-7a41"
+      assert env["AWS_SECRET_ACCESS_KEY"] == "tsec-resolved-0e58"
+      assert env["ATLAS_DATASET_URI"] == "s3://bucket/datasets/resolver/"
+      assert env["AWS_REGION"] == "auto"
+      assert env["HF_TOKEN"] == "hf-resolved-91d2"
+      assert env["WANDB_PROJECT"] == "wandb-resolved-5c07"
+    end
+
+    test "the resolver gets what the record keeps, and no value" do
+      compute = orphaned_resolved_task("trainer-resolved-info:latest", @ok_both)
+      id = compute.id
+
+      adopt_and_preempt(id)
+
+      assert_receive {:resolver_called, info}, 2_000
+
+      assert info == %{
+               id: id,
+               name: "atlas-adoptable",
+               user_id: "user-42",
+               provider: :mock,
+               s3: %{dataset_uri: "s3://bucket/datasets/resolver/", region: "auto"},
+               env_names: ["HF_TOKEN", "WANDB_PROJECT"]
+             }
+    end
+
+    test "an adopted s3:-only task respawns with the resolved credentials" do
+      compute =
+        orphaned_resolved_task("trainer-resolved-s3:latest", :fixed_s3, env: %{})
+
+      id = compute.id
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      env = container_env_of(new_id)
+      assert env["AWS_ACCESS_KEY_ID"] == "tid-resolved-7a41"
+      assert env["AWS_SECRET_ACCESS_KEY"] == "tsec-resolved-0e58"
+      refute Map.has_key?(env, "HF_TOKEN")
+    end
+
+    test "an adopted env:-only task respawns with a value for every stored name" do
+      compute =
+        orphaned_resolved_task(
+          "trainer-resolved-env:latest",
+          {:return, {:ok, env: Map.put(@resolved_env, "EXTRA", "extra-ok")}},
+          s3: nil
+        )
+
+      id = compute.id
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert container_env_of(new_id) == Map.put(@resolved_env, "EXTRA", "extra-ok")
+    end
+
+    test "the replacement's record keeps the markers and the tuple, never a resolved value" do
+      compute = orphaned_resolved_task("trainer-resolved-record:latest", @ok_both)
+      id = compute.id
+
+      adopt_and_preempt(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert {:ok, record} = Memory.get(new_id)
+
+      assert record.opts[:s3] == %{
+               dataset_uri: "s3://bucket/datasets/resolver/",
+               region: "auto",
+               credentials: :not_stored
+             }
+
+      assert record.opts[:env] == %{"HF_TOKEN" => :not_stored, "WANDB_PROJECT" => :not_stored}
+      assert record.opts[:respawn_credentials] == resolver({:report, self(), @ok_both})
+
+      printed = inspect(record, limit: :infinity, structs: false)
+      for value <- @resolved_values, do: refute(printed =~ value, "#{value} reached the record")
+    end
+
+    test "the resolved values reach no event, log line or crash report" do
+      compute = orphaned_resolved_task("trainer-resolved-print:latest", @ok_both)
+      id = compute.id
+
+      log =
+        capture_log(fn ->
+          pid = adopt_and_preempt(id)
+          assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+          Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+          status = inspect(:sys.get_status(pid), limit: :infinity, structs: false)
+          # Control: the state holds the env names, so the status printed opts.
+          assert status =~ "HF_TOKEN"
+          for value <- @resolved_values, do: refute(status =~ value)
+
+          ref = Process.monitor(pid)
+          catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+        end)
+
+      # Control: the crash report printed the tracker's opts.
+      assert log =~ "handle_call"
+      assert log =~ "WANDB_PROJECT"
+      for value <- @resolved_values, do: refute(log =~ value, "#{value} reached the log")
+
+      # Control: the crash's `{:terminating, reason}` event carries the state.
+      events = inspect(drain_events(), limit: :infinity, structs: false)
+      assert events =~ "WANDB_PROJECT"
+      for value <- @resolved_values, do: refute(events =~ value, "#{value} reached an event")
+    end
+
+    test "a second respawn in the same VM reuses the resolved values" do
+      compute =
+        orphaned_resolved_task("trainer-resolved-twice:latest", @ok_both,
+          on_failure: {:respawn, 2}
+        )
+
+      id = compute.id
+      adopt_and_preempt(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert_receive {:resolver_called, _info}, 2_000
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+      :ok = Mock.forget(new_id)
+      assert_receive {:atlas_compute, ^new_id, {:respawned, third_id}}, 2_000
+
+      assert container_env_of(third_id)["HF_TOKEN"] == "hf-resolved-91d2"
+      refute_received {:resolver_called, _info}
+    end
+
+    test "an error return ends the task, naming the resolver and no value" do
+      compute =
+        orphaned_resolved_task(
+          "trainer-resolver-error:latest",
+          {:return, {:error, :vault_down_4e2a}}
+        )
+
+      id = compute.id
+      pid = adopt_and_preempt(id)
+      message = assert_refused(id, pid, "trainer-resolver-error:latest")
+
+      assert message =~ "ExAtlas.Test.CredentialResolver.resolve/2"
+      assert message =~ "returned an error"
+      refute message =~ "vault_down_4e2a"
+    end
+
+    test "a raise, throw or exit ends the task, and nothing prints its value" do
+      for {script, n} <-
+            Enum.with_index([
+              {:raise, "tsec-raise-leak-44ab"},
+              {:throw, "tsec-throw-leak-19cd"},
+              {:exit, "tsec-exit-leak-7be0"}
+            ]) do
+        image = "trainer-resolver-crash-#{n}:latest"
+
+        log =
+          capture_log(fn ->
+            compute = orphaned_resolved_task(image, script, name: "atlas-crash-#{n}")
+            id = compute.id
+            pid = adopt_and_preempt(id)
+            message = assert_refused(id, pid, image)
+            send(self(), {:message, message})
+          end)
+
+        assert_received {:message, message}
+        assert message =~ "ExAtlas.Test.CredentialResolver.resolve/2"
+        assert message =~ ~r/raised RuntimeError|threw|exited/
+
+        for printed <- [message, log],
+            leak <- ~w(tsec-raise-leak-44ab tsec-throw-leak-19cd tsec-exit-leak-7be0),
+            do: refute(printed =~ leak, "#{leak} was printed")
+      end
+    end
+
+    test "a result missing a stored env name ends the task, naming the name" do
+      compute =
+        orphaned_resolved_task(
+          "trainer-resolver-partial:latest",
+          {:merge_s3, @creds, [env: %{"HF_TOKEN" => "hf-resolved-91d2"}]}
+        )
+
+      id = compute.id
+      pid = adopt_and_preempt(id)
+      message = assert_refused(id, pid, "trainer-resolver-partial:latest")
+
+      assert message =~ "WANDB_PROJECT"
+      refute message =~ "HF_TOKEN,"
+      refute message =~ "hf-resolved-91d2"
+    end
+
+    test "a result the replacement could not use ends the task without a crash" do
+      bad_results = [
+        # No `:s3`, which the record left without credentials.
+        {:return, {:ok, env: @resolved_env}},
+        # `s3: nil` drops the staging the task was rented with.
+        {:return, {:ok, s3: nil, env: @resolved_env}},
+        # The stored marker passed back, as a careless merge would.
+        {:return, {:ok, s3: Map.put(@creds, :credentials, :not_stored), env: @resolved_env}},
+        # An `env:` that sets a variable `s3:` sets: `spawn_compute/1` raises on it.
+        {:merge_s3, @creds, [env: Map.put(@resolved_env, "AWS_REGION", "us-east-1")]},
+        # A value that is not a string.
+        {:merge_s3, @creds, [env: %{@resolved_env | "HF_TOKEN" => 42}]},
+        {:merge_s3, @creds, [env: @resolved_env, api_key: "sk-not-mine"]},
+        {:return, {:ok, %{s3: @creds}}},
+        {:return, :ok}
+      ]
+
+      for {script, n} <- Enum.with_index(bad_results) do
+        image = "trainer-resolver-bad-#{n}:latest"
+        compute = orphaned_resolved_task(image, script, name: "atlas-bad-#{n}")
+        id = compute.id
+        pid = adopt_and_preempt(id)
+        message = assert_refused(id, pid, image)
+
+        assert message =~ "ExAtlas.Test.CredentialResolver.resolve/2", "case #{n}: #{message}"
+        for value <- @resolved_values, do: refute(message =~ value, "case #{n} printed a value")
+      end
+    end
+
+    test "a resolver that never answers ends the task at the configured bound" do
+      TestOrchestrator.put_env(respawn_credentials_timeout_ms: 50)
+      compute = orphaned_resolved_task("trainer-resolver-hang:latest", {:hang, self()})
+      id = compute.id
+
+      pid = adopt_and_preempt(id)
+      assert_receive {:resolver_started, resolver_pid}, 2_000
+      message = assert_refused(id, pid, "trainer-resolver-hang:latest")
+
+      assert message =~ "did not answer within 50 ms"
+      refute Process.alive?(resolver_pid)
+    end
+
+    test "an answer after the bound is dropped, not used" do
+      TestOrchestrator.put_env(respawn_credentials_timeout_ms: 50)
+
+      compute =
+        orphaned_resolved_task(
+          "trainer-resolver-late:latest",
+          {:sleep, 300, {:ok, s3: Map.merge(@creds, %{dataset_uri: "s3://b/d/"})}},
+          env: %{}
+        )
+
+      id = compute.id
+      pid = adopt_and_preempt(id)
+      assert_refused(id, pid, "trainer-resolver-late:latest")
+
+      Process.sleep(400)
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+      refute "trainer-resolver-late:latest" in mock_images()
+    end
+
+    test "an answer inside the bound respawns" do
+      TestOrchestrator.put_env(respawn_credentials_timeout_ms: 1_000)
+
+      compute =
+        orphaned_resolved_task(
+          "trainer-resolver-slow:latest",
+          {:sleep, 100, {:ok, s3: Map.merge(@creds, %{dataset_uri: "s3://b/d/"})}},
+          env: %{}
+        )
+
+      id = compute.id
+      adopt_and_preempt(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, _new_id}}, 2_000
+    end
+
+    test "the default bound and the largest bound let a prompt answer through" do
+      for {bound, n} <- Enum.with_index([nil, ExAtlas.Orchestrator.Timer.max_ms()]) do
+        TestOrchestrator.put_env(respawn_credentials_timeout_ms: bound)
+        image = "trainer-resolver-bound-#{n}:latest"
+
+        compute =
+          orphaned_resolved_task(image, {:sleep, 100, {:ok, env: @resolved_env}},
+            s3: nil,
+            name: "atlas-bound-#{n}"
+          )
+
+        id = compute.id
+        adopt_and_preempt(id)
+        assert_receive {:atlas_compute, ^id, {:respawned, _new_id}}, 2_000
+      end
+    end
+
+    test "an invalid bound ends the task, naming the setting" do
+      for {bound, n} <-
+            Enum.with_index([0, -1, "30s", 1.5, ExAtlas.Orchestrator.Timer.max_ms() + 1]) do
+        TestOrchestrator.put_env(respawn_credentials_timeout_ms: bound)
+        image = "trainer-resolver-badbound-#{n}:latest"
+
+        compute =
+          orphaned_resolved_task(image, {:return, {:ok, env: @resolved_env}},
+            s3: nil,
+            name: "atlas-badbound-#{n}"
+          )
+
+        id = compute.id
+        pid = adopt_and_preempt(id)
+        message = assert_refused(id, pid, image)
+        assert message =~ "respawn_credentials_timeout_ms", "bound #{inspect(bound)}"
+      end
+    end
+
+    test "a record with no tuple uses the app config's resolver" do
+      TestOrchestrator.put_env(respawn_credentials: resolver({:report, self(), @ok_both}))
+
+      compute =
+        orphaned_resolved_task("trainer-resolver-config:latest", @ok_both,
+          respawn_credentials: nil
+        )
+
+      id = compute.id
+      {:ok, record} = Memory.get(id)
+      refute Keyword.has_key?(record.opts, :respawn_credentials)
+
+      adopt_and_preempt(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert container_env_of(new_id)["HF_TOKEN"] == "hf-resolved-91d2"
+    end
+
+    test "the record's tuple wins over the app config's" do
+      TestOrchestrator.put_env(
+        respawn_credentials: resolver({:return, {:error, :the_config_resolver_ran}})
+      )
+
+      compute = orphaned_resolved_task("trainer-resolver-precedence:latest", @ok_both)
+      id = compute.id
+
+      adopt_and_preempt(id)
+      assert_receive {:atlas_compute, ^id, {:respawned, _new_id}}, 2_000
+    end
+
+    test "a malformed app config resolver ends the task, naming the setting" do
+      TestOrchestrator.put_env(respawn_credentials: {CredentialResolver, "resolve", []})
+
+      compute =
+        orphaned_resolved_task("trainer-resolver-badconfig:latest", @ok_both,
+          respawn_credentials: nil
+        )
+
+      id = compute.id
+      pid = adopt_and_preempt(id)
+      message = assert_refused(id, pid, "trainer-resolver-badconfig:latest")
+      assert message =~ "config :ex_atlas, :orchestrator, respawn_credentials"
+    end
+
+    test "scrub_keys: [:env] gives no names, and the result must hold env:" do
+      TestOrchestrator.put_env(scrub_keys: [:env])
+
+      compute =
+        orphaned_resolved_task(
+          "trainer-resolver-bare:latest",
+          {:return, {:ok, env: @resolved_env}},
+          s3: nil
+        )
+
+      id = compute.id
+      adopt_and_preempt(id)
+
+      assert_receive {:resolver_called, %{env_names: :unknown}}, 2_000
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      assert container_env_of(new_id) == @resolved_env
+    end
+
+    test "a task that never restarted respawns with its own values, not the resolver's" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            image: "trainer-resolver-unadopted:latest",
+            s3: @orig_s3,
+            env: @orig_env,
+            spot: true,
+            on_failure: {:respawn, 1},
+            status_poll_ms: 30,
+            respawn_credentials: resolver({:report, self(), @ok_both})
+          )
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Mock.forget(id)
+
+      assert_receive {:atlas_compute, ^id, {:respawned, new_id}}, 2_000
+      env = container_env_of(new_id)
+      assert env["AWS_ACCESS_KEY_ID"] == "tid-orig-1f3a"
+      assert env["HF_TOKEN"] == "hf-orig-3c9e"
+      refute_received {:resolver_called, _info}
+    end
+  end
+
+  defp drain_events(acc \\ []) do
+    receive do
+      {:atlas_compute, _id, _event} = message -> drain_events([message | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   describe "a record whose respawn_credentials: no longer validates" do
     test "still adopts, and logs the dropped resolver" do
       for {bad, n} <-
