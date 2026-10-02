@@ -24,8 +24,13 @@ DATASET_DIR=${ATLAS_DATASET_DIR:-/data}
 ARTIFACT_DIR=${ATLAS_ARTIFACT_DIR:-/artifacts}
 LOG=${ATLAS_LOG_FILE:-/tmp/atlas.log}
 
+# The presigned URLs move to unexported variables, so the trainer's
+# environment holds neither and a trainer or library that dumps its environment
+# prints neither. A process running as the same user can still read this
+# script's /proc/<pid>/environ.
 dataset_url=${ATLAS_DATASET_URL:-}
 artifact_url=${ATLAS_ARTIFACT_URL:-}
+unset ATLAS_DATASET_URL ATLAS_ARTIFACT_URL
 
 say() { printf 'atlas_entrypoint: %s\n' "$*" >&2; }
 

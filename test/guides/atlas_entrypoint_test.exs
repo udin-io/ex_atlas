@@ -504,6 +504,16 @@ defmodule ExAtlas.Guides.AtlasEntrypointTest do
       assert r.archive["atlas.log"] =~ @put_sig
     end
 
+    test "the trainer's environment holds neither URL", %{dir: dir} do
+      r = run(dir, ["sh", "-c", "env; echo ENV-DUMPED"], both_urls(dir))
+
+      assert r.status == 0
+      # Control: the dump ran and reached every place we search.
+      assert r.archive["atlas.log"] =~ "ENV-DUMPED"
+      assert r.output =~ "STUB_DIR="
+      assert_no_signature(r)
+    end
+
     test "a URL curl would read as a glob", %{dir: dir} do
       env = [
         {"ATLAS_DATASET_URL", @get_url <> "[1-2]"},
