@@ -149,6 +149,31 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
   end
 
+  describe "a crash report of the tracker" do
+    test "holds no s3: credential and still holds the compute id" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          s3: %{
+            access_key_id: "tid-test-4b1e",
+            secret_access_key: "tsec-test-9f2c",
+            session_token: "tses-test-0d7a",
+            dataset_uri: "s3://bucket/datasets/abc/"
+          }
+        )
+
+      text = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+
+      assert text =~ compute.id
+      refute text =~ "tid-test-4b1e"
+      refute text =~ "tsec-test-9f2c"
+      refute text =~ "tses-test-0d7a"
+    end
+  end
+
   describe "upstream status polling" do
     setup do
       # Idle TTL and heartbeat are pushed far out so nothing but the status

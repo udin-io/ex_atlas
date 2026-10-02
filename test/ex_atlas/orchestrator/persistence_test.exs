@@ -378,6 +378,27 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
   describe "secrets" do
     @describetag :tmp_dir
 
+    test "a record built from spawn opts drops s3:" do
+      compute = %ExAtlas.Spec.Compute{id: "mock-s3", provider: :mock, status: :running}
+
+      opts =
+        task_opts(
+          s3: %{
+            access_key_id: "tid-test-4b1e",
+            secret_access_key: "tsec-test-9f2c",
+            artifact_uri: "s3://b/a"
+          },
+          env: %{"WANDB_PROJECT" => "x"}
+        )
+
+      record = TrackingStore.new(compute, opts, mode: :task)
+
+      refute Keyword.has_key?(record.opts, :s3)
+      refute inspect(record) =~ "tsec-test-9f2c"
+      # Control: the rest of the opts are kept.
+      assert record.opts[:env] == %{"WANDB_PROJECT" => "x"}
+    end
+
     test "never reach the store's bytes on disk", %{tmp_dir: dir} do
       ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
 

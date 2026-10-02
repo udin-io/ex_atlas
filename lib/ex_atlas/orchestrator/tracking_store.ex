@@ -99,7 +99,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Never stored: `compute.auth.token` (the raw preshared key — see
   `ExAtlas.Auth.Token`), `:api_key` (re-resolved from config at adoption,
-  exactly as a fresh spawn does), and anything else matching
+  exactly as a fresh spawn does), `:s3` (storage credentials; `persist: true`
+  with `s3:` is refused for now), and anything else matching
   `:scrub_keys`. `last_activity_ms` is not stored because it is monotonic and
   nobody was touching the session while the node was down.
 
@@ -219,8 +220,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   }
 
   # Opts that are credentials, or that could carry one. `:req_options` gets its
-  # own treatment below because the secret is nested inside it.
-  @secret_opts [:api_key, :api_secret, :secret, :token, :password]
+  # own treatment below because the secret is nested inside it. `:s3` holds
+  # storage keys beside its URIs and goes whole.
+  @secret_opts [:api_key, :api_secret, :secret, :token, :password, :s3]
 
   @doc "The current record schema version."
   @spec version() :: version()
