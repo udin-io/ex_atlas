@@ -179,6 +179,20 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
       assert_adopted_against_configured()
     end
 
+    # A key of the writer's own account would point every call, and a
+    # respawn's rent, at that account (review finding on PR 130).
+    test "beside a forged api_key: every call carries the node's key", %{tmp_dir: dir} do
+      store = start_ecto!(dir)
+      TestOrchestrator.put_env(reap_owner: "m1")
+      insert_row!(record(%{opts: [api_key: "attacker-key-0b7e"]}))
+
+      adopt!()
+
+      assert_adopted_against_configured()
+      assert {:ok, %{opts: opts}} = store.get(@pod_id)
+      refute Keyword.has_key?(opts, :api_key)
+    end
+
     test "the delete at a spent deadline goes to the configured host", %{
       tmp_dir: dir,
       forged: forged

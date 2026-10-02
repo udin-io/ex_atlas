@@ -233,7 +233,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   # Names the keys alone: their values came from the store's writer.
   defp warn_stored_endpoint(record) do
-    case TrackingStore.stored_endpoint_opts(record) do
+    case TrackingStore.ignored_opts(record) do
       [] ->
         :ok
 
