@@ -60,7 +60,7 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Orchestrator: polling, task mode, callbacks, adoption, multi-node | Shipped |
 | Cost caps with billing reconciliation (feature #28) | Shipped in #70 (slices #67, #69, #70) |
 | S3-compatible data staging (#26) | Shipped in four slices: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods (#75); a guide and a tested entrypoint script say what the container does with them (PR #77); credentials print redacted in crash reports (#78); presigned URLs put no storage key on the pod (#80); `persist: true` with `s3:` stores no credential, and an adopted task cannot respawn (#81); `env:` values print redacted and records keep names only (#82) |
-| Lambda Labs provider (feature #83) | Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 2 (#85, PR #90): `command:`, `run_task/1` ended by the host's finish report, the Reaper. Next: firewall ports (#86) |
+| Lambda Labs provider (feature #83) | Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 3 (#86, PR #91): one firewall ruleset per instance opens its `ports:`. Slice 2 (#85, PR #90): `command:`, `run_task/1` ended by the host's finish report, the Reaper |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages

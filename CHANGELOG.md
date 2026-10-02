@@ -25,8 +25,7 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
   `get_compute/2` and `list_compute/1` rebuild `ports`, URLs and
   `created_at` on any node.
 - `stop/2`, `start/2`, `spot: true`, `template_id:` and
-  `network_volume_id:` return `:unsupported`. Open `ports:` in Lambda's
-  firewall yourself for now.
+  `network_volume_id:` return `:unsupported`.
 - `raw` leaves out `jupyter_token` and `jupyter_url`. A refused launch keeps
   its status and Lambda's error code, and withholds Lambda's message, which
   can echo `user_data`.
@@ -65,6 +64,28 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
 fragment swallowed, so the report never arrived; userinfo showed in `ps`
 wherever curl ran.
 
+### Added: Lambda opens an instance's `ports:` in its firewall (#86)
+
+A spawn with `ports:` creates one Lambda firewall ruleset for the instance
+and launches the instance with it attached.
+
+- The ruleset is `atlas-<instance name>-<8 hex>` and holds one TCP rule per
+  distinct port, from `provider_opts: %{source_network: cidr}` or
+  `0.0.0.0/0`. A `source_network` that is not a string is `:validation`.
+  `ports: []` creates no ruleset, and neither does `us-south-1`, where Lambda
+  applies no firewall rules.
+- A refused ruleset create fails the spawn before the launch. A launch
+  Lambda refuses with a 4xx deletes the ruleset it created; after a 5xx or a
+  timeout the ruleset stays, since the instance may hold it.
+- `terminate/2` deletes the instance, then its ruleset. Lambda refuses while
+  the instance still uses the ruleset (`firewall-rulesets/firewall-ruleset-in-use`);
+  `terminate/2` still returns `:ok`. Every spawn with `ports:` first deletes
+  rulesets named `atlas-...-<8 hex>` that no instance uses and that are 5
+  minutes old or more, at most 10 a spawn. A ruleset you name `atlas-prod` is
+  yours.
+- `terminate/2` makes one more call, `GET /firewall-rulesets`, to find the
+  instance's ruleset.
+
 ### Changed: spawn POSTs retry on a 429 only (#84)
 
 `RunPod.Pods.create/2` never retried; it now retries a 429, which means
@@ -76,6 +97,31 @@ pod may exist. Lambda's launch follows the same rule
 
 `:rtx_6000` is `gpu_1x_rtx6000` and `:a100_80g` is `gpu_1x_a100_80gb_sxm4`,
 as Lambda names them. `:gh200` maps to `gpu_1x_gh200`.
+### Added: `respawn_credentials:`, a respawn after a deploy (#87)
+
+A `persist: true` task with `s3:` or `env:` that was preempted after a
+restart ended with `{:respawn_failed, ...}`, since its record holds no
+secret. Now:
+
+- `Orchestrator.spawn/1` and `run_task/1` take `respawn_credentials: {m, f,
+  args}`. It needs `persist: true`, a module that declares `@behaviour
+  ExAtlas.Orchestrator.RespawnCredentials`, a function exported with arity
+  `length(args) + 1`, and args with no closure or `ExAtlas.Secret`;
+  otherwise the spawn is a
+  `NimbleOptions.ValidationError` on `:respawn_credentials`, before any rent.
+- The record keeps the tuple. `config :ex_atlas, :orchestrator,
+  respawn_credentials:` serves records without one.
+- An adopted task's respawn calls `apply(m, f, args ++ [info])`, where
+  `info` is `%{id:, name:, user_id:, provider:, s3:, env_names:}`, and
+  rents the replacement with the `s3:` and `env:` it returns. The record
+  keeps its markers. A task that never restarted does not call it.
+- A missing, failing, raising or slow resolver (bound:
+  `respawn_credentials_timeout_ms`, default 30,000) ends the task as before,
+  with a message that names the resolver and no value.
+- An adopted record whose tuple no longer validates adopts without it and
+  logs a warning.
+- `Spec.Staging.new/1` refuses a value that is not valid UTF-8, naming the
+  key. It raised before, with the value in the stacktrace.
 
 ### Changed: `env:` values print redacted and stay off disk (#79)
 

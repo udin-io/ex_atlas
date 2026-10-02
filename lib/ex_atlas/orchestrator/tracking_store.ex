@@ -102,16 +102,26 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   exactly as a fresh spawn does), the keys and presigned URLs of `:s3`, the
   values of `:env`, and anything else matching `:scrub_keys`. `:s3` keeps its endpoint, region and
   URIs beside `credentials: :not_stored`, so an adopted task with `s3:` runs
-  on, and its tracker refuses a respawn it has no credentials for. `last_activity_ms` is not stored because it is monotonic and
+  on, and its respawn asks the `respawn_credentials:` resolver for the
+  credentials, or fails without one. `last_activity_ms` is not stored because it is monotonic and
   nobody was touching the session while the node was down.
 
   ### Container environment: names only
 
   Any `:env` value can be a token, so a record keeps the names alone, each with
-  the value `:not_stored`. An adopted task runs on, but a respawn after
-  adoption has no values to give the replacement: it broadcasts
-  `{:respawn_failed, {reason, %ExAtlas.Error{kind: :validation}}}` and ends the
-  task. An empty `:env` is stored as `%{}` and respawns as before. With
+  the value `:not_stored`. An adopted task runs on, and a respawn after
+  adoption asks the `respawn_credentials:` resolver for the values. With no
+  resolver it broadcasts `{:respawn_failed, {reason, %ExAtlas.Error{kind:
+  :validation}}}` and ends the task. An empty `:env` is stored as `%{}` and
+  respawns as before.
+
+  ### The resolver tuple
+
+  `opts[:respawn_credentials]` is an `{module, function, args}` and is stored
+  as given. Keep it whole: a store that drops it, or turns its atoms into
+  strings, adopts the task without it, logs a warning, and the respawn falls
+  back to `config :ex_atlas, :orchestrator, respawn_credentials:`. Its args
+  are written to the store, so they must hold no secret. With
   `scrub_keys: [:env]` the record holds `env: :not_stored`, which refuses the
   same respawn.
 

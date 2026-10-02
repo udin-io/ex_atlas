@@ -135,6 +135,7 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
       end)
 
       test_pid = self()
+      no_rulesets(bypass)
 
       Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
         {body, conn} = read_json(conn)
@@ -187,6 +188,7 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
       end)
 
       test_pid = self()
+      no_rulesets(bypass)
 
       Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
         {body, conn} = read_json(conn)
@@ -205,6 +207,7 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
     test "a $36/hour type and a 1-cent cap terminates the instance, with no billing read" do
       bypass = Bypass.open()
       test_pid = self()
+      no_rulesets(bypass)
 
       types = %{
         "gpu_8x_h100_sxm5" =>
@@ -257,4 +260,8 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
   end
 
   defp created_at(at), do: [%{"key" => "atlas-created-at", "value" => at}]
+
+  # `terminate/2` looks up the instance's firewall ruleset first (#86).
+  defp no_rulesets(bypass),
+    do: Bypass.stub(bypass, "GET", "/firewall-rulesets", &json(&1, 200, %{"data" => []}))
 end

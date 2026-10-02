@@ -206,14 +206,194 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
   end
 
   describe "terminate/2" do
-    test "posts the instance id and returns :ok", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
+    @terminate "/instance-operations/terminate"
+
+    defp expect_terminate(bypass, log) do
+      Bypass.expect_once(bypass, "POST", @terminate, fn conn ->
         {body, conn} = read_json(conn)
         assert body == %{"instance_ids" => ["inst-1"]}
+        Agent.update(log, &[:terminate | &1])
         json(conn, 200, %{"data" => %{"terminated_instances" => [instance(%{"id" => "inst-1"})]}})
+      end)
+    end
+
+    defp expect_list(bypass, rulesets) do
+      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+        json(conn, 200, %{"data" => rulesets})
+      end)
+    end
+
+    defp expect_delete(bypass, log, id, status \\ 200, body \\ %{"data" => %{}}) do
+      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/#{id}", fn conn ->
+        Agent.update(log, &[{:delete, id} | &1])
+        json(conn, status, body)
+      end)
+    end
+
+    setup do
+      {:ok, log: start_supervised!({Agent, fn -> [] end})}
+    end
+
+    test "posts the instance id and returns :ok", %{bypass: bypass, opts: opts, log: log} do
+      expect_list(bypass, [])
+      expect_terminate(bypass, log)
+
+      assert :ok = ExAtlas.terminate("inst-1", opts)
+    end
+
+    test "deletes the instance's ruleset after the instance", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_list(bypass, [
+        ruleset(%{
+          "id" => "rs-other",
+          "name" => "atlas-other-0a0a0a0a",
+          "instance_ids" => ["inst-2"]
+        }),
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
+      ])
+
+      expect_terminate(bypass, log)
+      expect_delete(bypass, log, "rs-mine")
+
+      assert :ok = ExAtlas.terminate("inst-1", opts)
+      assert Agent.get(log, &Enum.reverse/1) == [:terminate, {:delete, "rs-mine"}]
+    end
+
+    test "keeps a ruleset the caller made that names the instance", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      # No DELETE route: a delete fails the test.
+      expect_list(bypass, [
+        ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "instance_ids" => ["inst-1"]}),
+        # Prefixed like ours but without the 8-hex suffix ExAtlas appends.
+        ruleset(%{
+          "id" => "rs-handmade",
+          "name" => "atlas-handmade",
+          "instance_ids" => ["inst-1"]
+        })
+      ])
+
+      expect_terminate(bypass, log)
+      assert :ok = ExAtlas.terminate("inst-1", opts)
+    end
+
+    test "returns :ok when Lambda refuses the delete as in use", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_list(bypass, [
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
+      ])
+
+      expect_terminate(bypass, log)
+      expect_delete(bypass, log, "rs-mine", 400, ruleset_in_use())
+
+      # The refusal is expected, so it logs nothing.
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               assert :ok = ExAtlas.terminate("inst-1", opts)
+             end) == ""
+
+      assert {:delete, "rs-mine"} in Agent.get(log, & &1)
+    end
+
+    test "returns :ok when the delete fails for another reason", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_list(bypass, [
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
+      ])
+
+      expect_terminate(bypass, log)
+
+      expect_delete(bypass, log, "rs-mine", 500, %{
+        "error" => %{"code" => "global/internal-error"}
+      })
+
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               assert :ok = ExAtlas.terminate("inst-1", opts)
+             end) =~ "rs-mine"
+    end
+
+    test "a ruleset delete answered 429 then 200 deletes the ruleset", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_list(bypass, [
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
+      ])
+
+      expect_terminate(bypass, log)
+      calls = :counters.new(1, [])
+
+      Bypass.expect(bypass, "DELETE", "/firewall-rulesets/rs-mine", fn conn ->
+        :counters.add(calls, 1, 1)
+
+        if :counters.get(calls, 1) == 1 do
+          conn
+          |> Plug.Conn.put_resp_header("retry-after", "0")
+          |> json(429, %{"error" => %{"code" => "global/rate-limited", "message" => "slow"}})
+        else
+          Agent.update(log, &[{:delete, "rs-mine"} | &1])
+          json(conn, 200, %{"data" => %{}})
+        end
       end)
 
       assert :ok = ExAtlas.terminate("inst-1", opts)
+      assert {:delete, "rs-mine"} in Agent.get(log, & &1)
+    end
+
+    test "still terminates when the ruleset list fails", %{bypass: bypass, opts: opts, log: log} do
+      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+        json(conn, 403, %{"error" => %{"code" => "global/account-inactive"}})
+      end)
+
+      expect_terminate(bypass, log)
+
+      assert :ok = ExAtlas.terminate("inst-1", opts)
+    end
+
+    test "a refused terminate returns its error and deletes no ruleset", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_list(bypass, [
+        ruleset(%{
+          "id" => "rs-mine",
+          "name" => "atlas-mine-1a2b3c4d",
+          "instance_ids" => ["inst-1"]
+        })
+      ])
+
+      Bypass.expect_once(bypass, "POST", @terminate, fn conn ->
+        json(conn, 404, not_found())
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.terminate("inst-1", opts)
     end
   end
 

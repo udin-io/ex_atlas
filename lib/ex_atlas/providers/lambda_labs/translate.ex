@@ -33,6 +33,8 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   # Lambda caps `user_data` at "1MB"; we take the smaller reading.
   @max_user_data_bytes 1_000_000
 
+  @any_source "0.0.0.0/0"
+
   @shell_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
 
   # Names bash keeps for itself. `export` of a readonly one stops the script
@@ -112,6 +114,37 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       "tags" => parts.tags
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  @doc """
+  The firewall rules that open the request's `:ports`: one `tcp` rule per
+  distinct port, from `provider_opts.source_network` (default `0.0.0.0/0`).
+  Both `:http` and `:tcp` ports are TCP. `[]` for a request with no ports.
+
+  Call it after `launch_parts/2`, which validates the ports.
+  """
+  @spec firewall_rules(Spec.ComputeRequest.t()) :: {:ok, [map()]} | {:error, Error.t()}
+  def firewall_rules(%Spec.ComputeRequest{} = request) do
+    case provider_opt(request, :source_network) do
+      source when is_nil(source) or (is_binary(source) and source != "") ->
+        source = source || @any_source
+
+        {:ok,
+         request.ports
+         |> Enum.map(fn {port, _protocol} -> port end)
+         |> Enum.uniq()
+         |> Enum.map(fn port ->
+           %{
+             "protocol" => "tcp",
+             "port_range" => [port, port],
+             "source_network" => source,
+             "description" => "ExAtlas port #{port}"
+           }
+         end)}
+
+      _other ->
+        validation("provider_opts.source_network must be a CIDR string such as 203.0.113.0/24")
+    end
   end
 
   @doc """

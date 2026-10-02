@@ -225,7 +225,11 @@ defmodule ExAtlas.Spec.StagingTest do
       {"newline in a URI path", %{@full | dataset_uri: "s3://bucket/d/\nX=1"},
        ":dataset_uri must not hold control characters"},
       {"space in the endpoint", %{@full | endpoint: "https://t3 storage.dev"},
-       ":endpoint must be an http:// or https:// URL"}
+       ":endpoint must be an http:// or https:// URL"},
+      {"invalid UTF-8 in a key", %{@full | secret_access_key: @secret <> <<0xFF>>},
+       ":secret_access_key must be valid UTF-8"},
+      {"invalid UTF-8 in a URI", %{@full | dataset_uri: "s3://bucket/" <> <<0xC3>>},
+       ":dataset_uri must be valid UTF-8"}
     ]
 
     for {name, input, expected} <- @refusals do

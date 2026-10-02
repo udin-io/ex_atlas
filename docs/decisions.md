@@ -42,6 +42,15 @@ names the PR or issue that holds the reasoning.
 | The unit deletes its script as it starts | Keep it until reboot: it holds the token | #85 |
 | A callback URL with userinfo, a query or a fragment is refused, for every provider | Keep accepting it: `/finish` appended after a query never reached the plug, and userinfo shows in `ps` | #85 |
 | `Orchestrator.spawn/1` in interactive mode with Lambda `command:` and `callback:` is allowed; the idle TTL ends it | Refuse it in the orchestrator for every provider without `:self_terminate`: the Mock lacks it too, and interactive Mock sessions with a command would break | #85 |
+| One firewall ruleset per instance, attached at launch | Edit the account's global rules: they change every instance on the account, including ones ExAtlas does not own | #86 |
+| Every spawn with `ports:` first deletes `atlas-` rulesets that no instance uses | A periodic sweeper process: a new process, and a ruleset in use cannot be deleted anyway | #86 |
+| The sweep skips rulesets younger than 5 minutes and deletes at most 10 per spawn | Delete every empty one: a second spawn would delete a ruleset created a moment ago and not launched yet, and Lambda allows about one request a second | #86 |
+| Source network `0.0.0.0/0`, or `provider_opts.source_network` | Require `source_network`: RunPod's public ports are open to all today | #86 |
+| Ruleset name `atlas-<instance name>-<8 hex>`, cut to Lambda's 64 characters | `atlas-<instance name>`: Lambda's rule on a duplicate name is unknown, and a respawn reuses the name while the old instance still holds its ruleset | #86 |
+| `terminate/2` finds the ruleset by `instance_ids` before it terminates, and ignores every ruleset error | Fail `terminate/2` on a ruleset error: the instance is gone, and a retry cannot fix the ruleset | #86 |
+| The sweep and `terminate/2` touch only names that match `atlas-...-<8 hex>` | Any `atlas-` prefix: a ruleset you named `atlas-prod` would go (the fresh review's finding) | #86 |
+| A launch refused with a 4xx deletes the ruleset; a 5xx or a timeout keeps it | Delete after every error: the delete can land before Lambda attaches the ruleset to an instance it did rent, which then runs with its ports closed | #86 |
+| `us-south-1` gets no ruleset | Create one anyway: Lambda's docs say firewall rules do not apply there | #86 |
 
 ## Data staging (feature #26)
 
@@ -127,3 +136,13 @@ names the PR or issue that holds the reasoning.
 | Optional provider callbacks go through `dispatch_optional/3` | Call the module directly: raises on providers without the callback | #60, `CLAUDE.md` |
 | `hex.audit` stays in CI and suppresses nothing, even though it fails on cowlib | Ignore the advisories | #53, `CLAUDE.md` |
 | `compute_spend/2` with no window covers RunPod's last 30 days | Default to a short window | #58, #62 |
+| A respawn after adoption asks a host resolver, an `{m, f, args}`, for `s3:` and `env:` | A function capture: a record must survive DETS and a restart | #87 |
+| The per-task tuple wins; `config :ex_atlas, :orchestrator, respawn_credentials:` is the fallback | App config only: credentials are often per user or per task | #87 |
+| Resolve at respawn, not at adoption | Resolve when adopting: most adopted tasks never respawn | #87 |
+| The resolver returns `s3:` whole; `info.s3` gives the stored parts without the marker | ExAtlas merges keys onto the stored parts: presigned mode stores no URL | #87 |
+| `env:` must cover every stored name and replaces the stored env whole | Run with the names it returns: a container would miss a value it was rented with | #87 |
+| The resolver runs in a task under the poll `Task.Supervisor`, bounded at 30 s; a raise, throw or exit is caught inside it, so no crash report prints its value | Call inline: a hung resolver would hold the tracker forever | #87 |
+| Resolved values stay in the tracker's opts, so a second respawn in the same VM reuses them | Call the resolver on every respawn | #87 |
+| The spawn checks that the resolver function is exported | Check the shape only: a typo would surface hours later, at the respawn | #87 |
+| Only a module that declares `ExAtlas.Orchestrator.RespawnCredentials` is called, on the spawn option, an adopted record and the app config | Call any exported function: write access to the store would run `{:os, :cmd, [...]}` on the node | #87 |
+| The resolver's result is checked inside its task | Check in the tracker: a check that raises on a value would crash it and print the value | #87 |

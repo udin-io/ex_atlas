@@ -62,6 +62,32 @@ defmodule ExAtlas.Test.FakeLambda do
     )
   end
 
+  @doc "A Lambda `FirewallRuleset`, with every field the spec marks required."
+  def ruleset(attrs \\ %{}) do
+    Map.merge(
+      %{
+        "id" => "rs-0001",
+        "name" => "atlas-test",
+        "region" => %{"name" => "us-east-1", "description" => "Virginia, USA"},
+        "rules" => [],
+        "created" => "2026-10-02T09:30:00Z",
+        "instance_ids" => []
+      },
+      attrs
+    )
+  end
+
+  @doc "Lambda's refusal to delete a ruleset an instance still uses."
+  def ruleset_in_use do
+    %{
+      "error" => %{
+        "code" => "firewall-rulesets/firewall-ruleset-in-use",
+        "message" => "Firewall ruleset is in use by one or more instances.",
+        "suggestion" => "Terminate all instances that are using the ruleset before deleting it."
+      }
+    }
+  end
+
   def json(conn, status, body) do
     conn
     |> Plug.Conn.put_resp_header("content-type", "application/json")
@@ -74,29 +100,47 @@ defmodule ExAtlas.Test.FakeLambda do
   end
 
   @doc """
-  Start a fake Lambda on Bypass that keeps launched instances in an Agent.
-  Returns the opts every conformance call needs.
+  Start a fake Lambda on Bypass that keeps launched instances and firewall
+  rulesets in Agents. Returns the opts every conformance call needs.
   """
   def start do
     bypass = Bypass.open()
     {:ok, store} = Agent.start_link(fn -> %{} end)
+    {:ok, rulesets} = Agent.start_link(fn -> %{} end)
 
     Bypass.stub(bypass, "GET", "/instance-types", &json(&1, 200, %{"data" => instance_types()}))
+    stub_instances(bypass, store, rulesets)
+    stub_rulesets(bypass, store, rulesets)
 
+    [
+      base_url: "http://localhost:#{bypass.port}",
+      api_key: "lambda-test-key",
+      provider_opts: %{ssh_key_name: "deploy"}
+    ]
+  end
+
+  defp stub_instances(bypass, store, rulesets) do
     Bypass.stub(bypass, "POST", "/instance-operations/launch", fn conn ->
       {body, conn} = read_json(conn)
-      id = "inst#{System.unique_integer([:positive])}"
+      attached = Enum.map(body["firewall_rulesets"] || [], & &1["id"])
 
-      launched =
-        instance(%{
-          "id" => id,
-          "name" => body["name"],
-          "status" => "booting",
-          "tags" => body["tags"] || []
-        })
+      if attached -- Agent.get(rulesets, &Map.keys/1) == [] do
+        id = "inst#{System.unique_integer([:positive])}"
 
-      Agent.update(store, &Map.put(&1, id, launched))
-      json(conn, 200, %{"data" => %{"instance_ids" => [id]}})
+        launched =
+          instance(%{
+            "id" => id,
+            "name" => body["name"],
+            "status" => "booting",
+            "tags" => body["tags"] || [],
+            "firewall_ruleset_ids" => attached
+          })
+
+        Agent.update(store, &Map.put(&1, id, launched))
+        json(conn, 200, %{"data" => %{"instance_ids" => [id]}})
+      else
+        json(conn, 404, not_found())
+      end
     end)
 
     Bypass.stub(bypass, "GET", "/instances/:id", fn conn ->
@@ -115,12 +159,66 @@ defmodule ExAtlas.Test.FakeLambda do
       Agent.update(store, &Map.drop(&1, ids))
       json(conn, 200, %{"data" => %{"terminated_instances" => []}})
     end)
+  end
 
-    [
-      base_url: "http://localhost:#{bypass.port}",
-      api_key: "lambda-test-key",
-      provider_opts: %{ssh_key_name: "deploy"}
-    ]
+  # Lambda refuses to delete a ruleset an instance still uses.
+  defp stub_rulesets(bypass, store, rulesets) do
+    Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
+      {body, conn} = read_json(conn)
+      id = "rs#{System.unique_integer([:positive])}"
+
+      created =
+        ruleset(%{
+          "id" => id,
+          "name" => body["name"],
+          "region" => %{"name" => body["region"], "description" => body["region"]},
+          "rules" => body["rules"],
+          "created" => DateTime.to_iso8601(DateTime.utc_now())
+        })
+
+      Agent.update(rulesets, &Map.put(&1, id, created))
+      json(conn, 200, %{"data" => created})
+    end)
+
+    Bypass.stub(bypass, "GET", "/firewall-rulesets", fn conn ->
+      listed =
+        rulesets
+        |> Agent.get(&Map.values/1)
+        |> Enum.map(&Map.put(&1, "instance_ids", instances_using(store, &1["id"])))
+
+      json(conn, 200, %{"data" => listed})
+    end)
+
+    Bypass.stub(bypass, "DELETE", "/firewall-rulesets/:id", fn conn ->
+      id = List.last(conn.path_info)
+
+      cond do
+        not Agent.get(rulesets, &Map.has_key?(&1, id)) ->
+          json(conn, 404, not_found())
+
+        instances_using(store, id) != [] ->
+          json(conn, 400, ruleset_in_use())
+
+        true ->
+          Agent.update(rulesets, &Map.delete(&1, id))
+          json(conn, 200, %{"data" => %{}})
+      end
+    end)
+  end
+
+  defp instances_using(store, ruleset_id) do
+    store
+    |> Agent.get(&Map.values/1)
+    |> Enum.filter(&(ruleset_id in Map.get(&1, "firewall_ruleset_ids", [])))
+    |> Enum.map(& &1["id"])
+  end
+
+  @doc "The rulesets the fake server holds, read through its API like a caller would."
+  def rulesets(opts) do
+    %{status: 200, body: %{"data" => data}} =
+      Req.get!(opts[:base_url] <> "/firewall-rulesets", auth: {:bearer, opts[:api_key]})
+
+    data
   end
 
   def not_found do
