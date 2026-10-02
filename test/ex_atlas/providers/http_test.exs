@@ -29,6 +29,41 @@ defmodule ExAtlas.Providers.HTTPTest do
     end
   end
 
+  describe "handle_response/3 with an env deeper in the error body" do
+    defp error_raw(body, status \\ 409) do
+      {:error, %ExAtlas.Error{} = error} =
+        HTTP.handle_response({:ok, %Req.Response{status: status, body: body}}, 200..299, :runpod)
+
+      refute inspect(error, structs: false, limit: :infinity) =~ @secret
+      error.raw
+    end
+
+    test "a wrapper map, a list of maps and three levels deep" do
+      assert error_raw(%{"conflict" => %{"env" => %{"K" => @secret}, "id" => "e1"}}) ==
+               %{"conflict" => %{"id" => "e1"}}
+
+      assert error_raw(%{"errors" => [%{"resource" => %{"env" => @secret, "n" => 1}}, "text"]}) ==
+               %{"errors" => [%{"resource" => %{"n" => 1}}, "text"]}
+
+      assert error_raw(%{"a" => %{"b" => %{"c" => %{"env" => @secret, "keep" => true}}}}) ==
+               %{"a" => %{"b" => %{"c" => %{"keep" => true}}}}
+    end
+
+    test "an atom-keyed body (decode_json keys: :atoms)" do
+      assert error_raw(%{endpoint: %{env: %{K: @secret}, id: "e1"}}, 500) ==
+               %{endpoint: %{id: "e1"}}
+    end
+
+    test "a body with no env keeps its raw whole, and a field named environment stays" do
+      body = %{"detail" => "no", "nested" => [%{"environment" => "prod", "id" => 1}]}
+      assert error_raw(body, 404) == body
+    end
+
+    test "a body that is not a map or list passes through" do
+      assert error_raw("bad gateway", 502) == "bad gateway"
+    end
+  end
+
   describe "drop_env/1" do
     test "drops env and the env of an embedded template, and nothing else" do
       assert HTTP.drop_env(@body) == %{"id" => "x", "template" => %{}}
