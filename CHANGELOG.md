@@ -60,6 +60,23 @@ one only when the config set `start_orchestrator: true`. It now also fires
 when a module names `ExAtlas.Orchestrator.Supervisor`, and the installer shows
 the same notice.
 
+### Fixed: `Error.raw` keeps no `env` at any depth (#136)
+
+An error body that wraps the resource it refuses, or that arrives atom-keyed
+(`req_options: [decode_json: [keys: :atoms]]`), still carried `env` after #133.
+
+```elixir
+# RunPod answers 409 {"detail": "in use", "conflict": {"id": "ep1", "env": {"HF_TOKEN": "..."}}}
+{:error, e} = ExAtlas.get_endpoint("ep1", provider: :runpod)
+e.raw   # before: the whole body   after: %{"detail" => "in use", "conflict" => %{"id" => "ep1"}}
+```
+
+- Every key named `env` (string or atom) goes, at any depth, on any provider
+  that shares `HTTP.handle_response/3`. The rest of the body stays; a field
+  named `environment` stays.
+- A plain-text error body that echoes the request stays in `Error.message`:
+  nothing can tell the secret from the text.
+
 ### Fixed: `Endpoint.raw` and `Template.raw` no longer hold RunPod's `env` (#133)
 
 RunPod echoes an endpoint's or template's `env` (a Hugging Face token, a
