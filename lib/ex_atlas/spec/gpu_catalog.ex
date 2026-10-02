@@ -10,6 +10,9 @@ defmodule ExAtlas.Spec.GpuCatalog do
 
   Lambda Labs names encode the GPU count, so its entries are the one-GPU
   names (`gpu_1x_h100_pcie`); the provider swaps `1x` for `:gpu_count`.
+
+  Vast.ai entries are lists of Vast's GPU names, one per variant Vast sells
+  (`:h100` is `H100 SXM`, `H100 PCIE` and `H100 NVL`).
   """
 
   @type canonical :: atom()
@@ -55,14 +58,26 @@ defmodule ExAtlas.Spec.GpuCatalog do
     a10: "a10"
   }
 
+  # Vast's own `gpu_name` values, read from its offer search on 2026-10-02.
+  # Vast sells several variants of one family under separate names, so each
+  # entry is a list. The A100 40 GB and 80 GB share names; the Vast provider
+  # tells them apart by `gpu_ram`. `vast-cli` documents underscores
+  # (`RTX_4090`), but it swaps them for spaces before it sends a query: the
+  # API matches no offer for `RTX_4090`.
   @canonical_to_vast %{
-    h200: "H200",
-    h100: "H100",
-    a100_80g: "A100_80GB",
-    a100_40g: "A100",
-    rtx_4090: "RTX_4090",
-    rtx_3090: "RTX_3090",
-    a6000: "RTX_A6000"
+    h200: ["H200", "H200 NVL"],
+    h100: ["H100 SXM", "H100 PCIE", "H100 NVL"],
+    a100_80g: ["A100 SXM4", "A100 PCIE"],
+    a100_40g: ["A100 SXM4", "A100 PCIE"],
+    l40s: ["L40S"],
+    l4: ["L4"],
+    a10: ["A10"],
+    a6000: ["RTX A6000"],
+    a5000: ["RTX A5000"],
+    a4000: ["RTX A4000"],
+    rtx_6000_ada: ["RTX 6000Ada"],
+    rtx_4090: ["RTX 4090"],
+    rtx_3090: ["RTX 3090"]
   }
 
   @providers %{
@@ -75,7 +90,8 @@ defmodule ExAtlas.Spec.GpuCatalog do
   @doc """
   Translate a canonical GPU atom to the provider-specific identifier.
 
-  Returns `{:ok, id}` when the mapping exists, or `{:error, {:unsupported_gpu, gpu, provider}}`.
+  Returns `{:ok, id}` when the mapping exists (a list of names on Vast), or
+  `{:error, {:unsupported_gpu, gpu, provider}}`.
 
   ## Examples
 
@@ -85,10 +101,14 @@ defmodule ExAtlas.Spec.GpuCatalog do
       iex> ExAtlas.Spec.GpuCatalog.for_provider(:h100, :lambda_labs)
       {:ok, "gpu_1x_h100_pcie"}
 
+      iex> ExAtlas.Spec.GpuCatalog.for_provider(:rtx_4090, :vast)
+      {:ok, ["RTX 4090"]}
+
       iex> ExAtlas.Spec.GpuCatalog.for_provider(:nonexistent, :runpod)
       {:error, {:unsupported_gpu, :nonexistent, :runpod}}
   """
-  @spec for_provider(canonical(), provider()) :: {:ok, String.t()} | {:error, term()}
+  @spec for_provider(canonical(), provider()) ::
+          {:ok, String.t() | [String.t()]} | {:error, term()}
   def for_provider(canonical, provider) when is_atom(canonical) and is_atom(provider) do
     with {:ok, map} <- Map.fetch(@providers, provider),
          {:ok, id} <- Map.fetch(map, canonical) do

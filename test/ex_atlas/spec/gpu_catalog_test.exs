@@ -18,6 +18,20 @@ defmodule ExAtlas.Spec.GpuCatalogTest do
     assert GpuCatalog.for_provider(:gh200, :lambda_labs) == {:ok, "gpu_1x_gh200"}
   end
 
+  # Vast's API takes its spaced names. `RTX_4090`, the form vast-cli's help
+  # shows, matches no offer.
+  test "maps Vast GPUs to Vast's spaced names, one per variant" do
+    assert GpuCatalog.for_provider(:rtx_4090, :vast) == {:ok, ["RTX 4090"]}
+    assert GpuCatalog.for_provider(:h100, :vast) == {:ok, ["H100 SXM", "H100 PCIE", "H100 NVL"]}
+    assert GpuCatalog.for_provider(:a6000, :vast) == {:ok, ["RTX A6000"]}
+
+    for gpu <- GpuCatalog.supported_gpus(:vast),
+        {:ok, names} = GpuCatalog.for_provider(gpu, :vast),
+        name <- names do
+      refute name =~ "_", "#{inspect(gpu)} maps to #{inspect(name)}"
+    end
+  end
+
   test "unknown providers return empty supported list" do
     assert GpuCatalog.supported_gpus(:bogus) == []
   end
