@@ -13,7 +13,8 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   | `atlas-image` | the image, when 128 characters or fewer | `image` |
 
   Every function here is pure, except `launch_parts/2`, which mints the
-  `:auth` credential.
+  `:auth` credential, and `instance_to_compute/2`, which reads an
+  `atlas-created-at` more than ten minutes ahead of the clock as absent.
   """
 
   alias ExAtlas.{Error, Secret, Spec}
@@ -25,6 +26,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   # Lambda's tag values hold at most 128 characters.
   @max_tag_value 128
+
+  # How far ahead of this node's clock an `atlas-created-at` tag may read.
+  @max_clock_skew_s 10 * 60
 
   # Lambda caps `user_data` at "1MB"; we take the smaller reading.
   @max_user_data_bytes 1_000_000
@@ -160,7 +164,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       image: tags[@tag_image],
       name: instance["name"],
       auth: auth,
-      created_at: parse_time(tags[@tag_created_at]),
+      created_at: tags[@tag_created_at] |> parse_time() |> drop_far_future(),
       # `jupyter_token`, and the URL that carries it, open the instance's
       # Jupyter.
       raw: Map.drop(instance, ["jupyter_token", "jupyter_url"])
@@ -570,6 +574,18 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
       _ -> nil
     end
   end
+
+  # Anyone on the Lambda account can edit a tag. One far in the future would
+  # keep an orphan inside the Reaper's grace window for ever, so it reads as
+  # absent, which gets no grace. Clamping it to now would not help: every
+  # read would see a new instance. A launching node's clock may run ahead of
+  # this one, hence the allowance.
+  defp drop_far_future(%DateTime{} = at) do
+    limit = DateTime.add(DateTime.utc_now(), @max_clock_skew_s, :second)
+    if DateTime.compare(at, limit) == :gt, do: nil, else: at
+  end
+
+  defp drop_far_future(nil), do: nil
 
   defp gpu_count(type) do
     case map_or_empty(type["specs"])["gpus"] do

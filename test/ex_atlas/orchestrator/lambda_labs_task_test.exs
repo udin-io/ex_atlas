@@ -149,6 +149,58 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
     end
   end
 
+  describe "Reaper and a created-at tag in the future" do
+    setup do
+      bypass = Bypass.open()
+      previous = Application.get_env(:ex_atlas, :lambda_labs)
+
+      Application.put_env(:ex_atlas, :lambda_labs,
+        api_key: "lambda-test-key",
+        base_url: "http://localhost:#{bypass.port}"
+      )
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ex_atlas, :lambda_labs, previous),
+          else: Application.delete_env(:ex_atlas, :lambda_labs)
+      end)
+
+      {:ok, bypass: bypass}
+    end
+
+    # Anyone on the Lambda account can edit a tag. A far-future one must not
+    # keep an orphan "young", and so billing, for ever.
+    test "reaps an instance tagged a year ahead, leaves one a minute ahead", %{bypass: bypass} do
+      TestOrchestrator.put_env(reap_grace_ms: 60 * 60 * 1_000)
+      now = DateTime.utc_now()
+      year = now |> DateTime.add(365, :day) |> DateTime.to_iso8601()
+      # A launching node's clock a minute ahead of this one.
+      skewed = now |> DateTime.add(1, :minute) |> DateTime.to_iso8601()
+
+      instances = [
+        instance(%{"id" => "future1", "name" => "atlas-future", "tags" => created_at(year)}),
+        instance(%{"id" => "skewed1", "name" => "atlas-skewed", "tags" => created_at(skewed)})
+      ]
+
+      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+        json(conn, 200, %{"data" => instances, "page_token" => nil})
+      end)
+
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:terminated, body["instance_ids"]})
+        json(conn, 200, %{"data" => %{"terminated_instances" => []}})
+      end)
+
+      :ok = Reaper.reap_now("atlas-", [:lambda_labs])
+
+      assert_received {:terminated, ["future1"]}
+      refute_received {:terminated, _}
+    end
+  end
+
   describe "max_cost" do
     test "a $36/hour type and a 1-cent cap terminates the instance, with no billing read" do
       bypass = Bypass.open()
