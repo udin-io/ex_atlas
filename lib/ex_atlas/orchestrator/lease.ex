@@ -68,6 +68,10 @@ defmodule ExAtlas.Orchestrator.Lease do
   # expired and take each other's tasks.
   @min_ttl_ms 1_000
 
+  @default_window_ms 900_000
+  # An orphan of a dead owner bills for the whole window.
+  @max_window_ms 86_400_000
+
   @doc false
   def child_spec(opts) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
@@ -89,10 +93,13 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   @impl GenServer
   def init(opts) do
+    ttl = ttl!(Keyword.get_lazy(opts, :ttl_ms, &configured_ttl/0))
+
     state = %{
       store: Keyword.fetch!(opts, :store),
       owner: Keyword.fetch!(opts, :owner),
-      ttl_ms: ttl!(Keyword.get_lazy(opts, :ttl_ms, &configured_ttl/0)),
+      ttl_ms: ttl,
+      window_ms: window!(configured_window(ttl), ttl),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
       renewed_at: nil,
       held_since: nil,
@@ -258,6 +265,24 @@ defmodule ExAtlas.Orchestrator.Lease do
     :ex_atlas
     |> Application.get_env(:orchestrator, [])
     |> Keyword.get(:lease_ttl_ms, @default_ttl_ms)
+  end
+
+  # Under two ttls, one late renewal of a live owner reads as death.
+  defp configured_window(ttl) do
+    :ex_atlas
+    |> Application.get_env(:orchestrator, [])
+    |> Keyword.get_lazy(:reap_dead_owner_after_ms, fn -> max(@default_window_ms, 2 * ttl) end)
+  end
+
+  defp window!(window, ttl)
+       when is_integer(window) and window >= 2 * ttl and window <= @max_window_ms,
+       do: window
+
+  defp window!(_other, ttl) do
+    raise ArgumentError,
+          "config :ex_atlas, :orchestrator, reap_dead_owner_after_ms: must be an integer from " <>
+            "#{2 * ttl} to #{@max_window_ms} (milliseconds: two lease_ttl_ms to 24 hours); " <>
+            "the default is #{max(@default_window_ms, 2 * ttl)}"
   end
 
   defp ttl!(ttl) when is_integer(ttl) and ttl >= @min_ttl_ms and ttl <= @max_ttl_ms, do: ttl

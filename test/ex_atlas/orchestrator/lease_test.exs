@@ -205,6 +205,45 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     end
   end
 
+  describe ":reap_dead_owner_after_ms" do
+    # A window under two ttls reads a live owner's 90 s database blip as death;
+    # one over a day lets an orphan bill for a day.
+    test "accepts two lease ttls and 24 hours, and refuses either side, 0 and non-integers" do
+      for window <- [2 * @ttl, 86_400_000] do
+        TestOrchestrator.put_env(reap_dead_owner_after_ms: window)
+        pid = start_lease!("m2")
+        assert Process.alive?(pid)
+        stop_supervised!(Lease)
+      end
+
+      for window <- [2 * @ttl - 1, 86_400_001, 0, -900_000, 900_000.0, "900000"] do
+        TestOrchestrator.put_env(reap_dead_owner_after_ms: window)
+
+        assert {:error, {{%ArgumentError{message: message}, _stack}, _child}} =
+                 start_supervised({Lease, store: Store, owner: "m2", ttl_ms: @ttl})
+
+        assert message =~ "reap_dead_owner_after_ms"
+        assert message =~ "from #{2 * @ttl} to 86400000"
+      end
+    end
+
+    test "the bounds follow lease_ttl_ms: 2 x 1 s is accepted at a 1 s ttl" do
+      TestOrchestrator.put_env(reap_dead_owner_after_ms: 2_000)
+      pid = start_lease!("m2", ttl_ms: 1_000)
+
+      assert Process.alive?(pid)
+    end
+
+    # At a ttl over 7.5 minutes, 15 minutes is under two ttls.
+    test "with no window set, starts at any lease_ttl_ms, the one-hour maximum included" do
+      for ttl <- [1_000, @ttl, 3_600_000] do
+        pid = start_lease!("m2", ttl_ms: ttl)
+        assert Process.alive?(pid)
+        stop_supervised!(Lease)
+      end
+    end
+  end
+
   describe "takeover" do
     test "claims and adopts an expired owner's signed record: list_ids names it" do
       %{id: id} = orphaned_task("m1")
