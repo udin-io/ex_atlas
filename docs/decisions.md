@@ -187,6 +187,12 @@ names the PR or issue that holds the reasoning.
 | A token with no attempt is accepted only while the tracker's current pod holds such a token too: the Registry value is `:claimless` until the first respawn this version makes | Reject it always (every running 0.8.0 pod loses its reports); accept it for a deprecation window with a warning (leaves the hole open); read it as attempt 0 (refuses a pod 0.8.0 itself respawned) | #110 |
 | A respawn writes the replacement's attempt into the stored record's callback descriptor | Read `respawns` at adoption: it cannot tell a pod 0.8.0 respawned from one this version did | #110 |
 | A bare `task_id` passed to `ingest/3` stays unchecked, whatever the current pod holds | Refuse it once a pod signs an attempt: it breaks every hand-rolled controller that passes `claims.task_id` | #110 |
+| `:vast` stays out of the default `reap_providers` | Add it: the `atlas-` prefix and owner segment are text a user can type into a Vast label, so a default Vast Reaper can delete an instance ExAtlas never rented. A marker no user types by accident would make it safe | #118 |
+| `spawn/1` warns, on every spawn, when `on_failure` allows a respawn and the provider is outside `reap_providers`, for any provider | Warn for `:vast` alone; warn once per boot (needs global state) | #118 |
+| The tracker checks reports against the attempt in its opts' callback descriptor; `respawns` counts the budget | Keep comparing with `respawns`: after an interrupted adoption the record's pod holds `respawns - 1` | #118 |
+| An interrupted adoption accepts the record's pod once a poll reads it alive | Refuse every token until the next respawn or the deadline | #118 |
+| A provider list that raises or exits skips that provider for the tick and logs only the error's kind | Let the tick crash: the restarted Reaper stays gated for the boot (#122) | #118 |
+| A host-prepared callback descriptor starts at attempt 0 | Keep its attempt: the first respawn would issue it again | #118 |
 | The resolver returns `s3:` whole; `info.s3` gives the stored parts without the marker | ExAtlas merges keys onto the stored parts: presigned mode stores no URL | #87 |
 | `env:` must cover every stored name and replaces the stored env whole | Run with the names it returns: a container would miss a value it was rented with | #87 |
 | The resolver runs in a task under the poll `Task.Supervisor`, bounded at 30 s; a raise, throw or exit is caught inside it, so no crash report prints its value | Call inline: a hung resolver would hold the tracker forever | #87 |

@@ -883,24 +883,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # calls: the web request that carried them must not be able to block on this
   # mailbox, and an untrusted pod must not get a lever on it.
 
-  # A token that signs its attempt arrives with it. A stale attempt is a report
-  # from the pod a respawn replaced: it passed the Registry check in
-  # `ExAtlas.Callback.ingest/3` before `respawn/2` moved the attempt, and
-  # waited in this mailbox behind the poll that respawned. It is dropped.
-  def handle_info({:atlas_callback, kind, payload, attempt}, %{respawns: attempt} = state),
-    do: handle_info({:atlas_callback, kind, payload}, state)
-
-  # A claim-less token (0.8.0's) is the current pod's only while the current
-  # pod holds none: the same test `Callback.ingest/3` made against the Registry,
-  # made again against the state a respawn may have moved since.
-  def handle_info({:atlas_callback, kind, payload, nil}, state) do
-    if callback_value(state) == :claimless,
+  # A token that signs its attempt arrives with it, and a claim-less one
+  # (0.8.0's) with `nil`. The same test `Callback.ingest/3` made against the
+  # Registry, made again against the state a respawn may have moved since: a
+  # stale attempt is a report from the pod a respawn replaced, which waited in
+  # this mailbox behind the poll that respawned. It is dropped.
+  def handle_info({:atlas_callback, kind, payload, attempt}, state) do
+    if callback_value(state) === (attempt || :claimless),
       do: handle_info({:atlas_callback, kind, payload}, state),
       else: {:noreply, state}
   end
-
-  def handle_info({:atlas_callback, _kind, _payload, _stale_attempt}, state),
-    do: {:noreply, state}
 
   # Relayed verbatim and retained nowhere. `ExAtlas.Callback` has already
   # checked that the payload is a JSON object; what is *in* it is a convention
@@ -993,7 +985,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # --- observations ---
 
   defp apply_observation({:alive, upstream}, state) do
-    state = state |> refresh_compute(upstream) |> Map.put(:poll_failures, 0)
+    state =
+      state
+      |> refresh_compute(upstream)
+      |> Map.put(:poll_failures, 0)
+      |> revive()
+
     schedule_status_poll(state)
     {:noreply, state}
   end
@@ -1018,6 +1015,18 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       end
     end
   end
+
+  # An adopted task whose node died mid-respawn refuses every token until a
+  # poll reads the record's pod alive: then that pod runs again (a spot pod
+  # whose bid won back its capacity) and its own token is the task's. The
+  # budget stays spent, so the orphan's attempt is never issued again.
+  defp revive(%{interrupted_respawn?: true} = state) do
+    state = %{state | interrupted_respawn?: false}
+    set_callback_value(state, callback_value(state))
+    state
+  end
+
+  defp revive(state), do: state
 
   # --- task outcomes ---
 
@@ -1803,21 +1812,28 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   #
   # An adopted task whose node died mid-respawn has no current pod: its record
   # names the preempted pod, and the orphan holds the spent attempt's token.
-  # `:none` matches no token until the next respawn registers its attempt.
+  # `:none` matches no token until the next respawn registers its attempt, or
+  # a poll reads the record's pod alive (`revive/1`).
   defp callback_value(%{interrupted_respawn?: true}), do: :none
 
-  defp callback_value(%{opts: opts, respawns: respawns}) do
+  # The attempt the current pod's token signs. A respawn writes it into the
+  # opts it rents with (`next_attempt/2`), and `respawns` counts the budget:
+  # the two differ only after an interrupted respawn, whose attempt is spent
+  # while the record's pod still holds the one before.
+  defp callback_value(%{opts: opts}) do
     case Keyword.get(opts, :callback) do
-      %{attempt: attempt} when is_integer(attempt) -> respawns
+      %{attempt: attempt} when is_integer(attempt) -> attempt
       _no_attempt -> :claimless
     end
   end
 
-  defp advance_callback(%{callback_task_id: nil}, _attempt), do: :ok
+  defp advance_callback(state, attempt), do: set_callback_value(state, attempt)
 
-  defp advance_callback(%{callback_task_id: task_id}, attempt) do
-    {^attempt, _old} =
-      Registry.update_value(ComputeRegistry, {:callback, task_id}, fn _ -> attempt end)
+  defp set_callback_value(%{callback_task_id: nil}, _value), do: :ok
+
+  defp set_callback_value(%{callback_task_id: task_id}, value) do
+    {^value, _old} =
+      Registry.update_value(ComputeRegistry, {:callback, task_id}, fn _ -> value end)
 
     :ok
   end

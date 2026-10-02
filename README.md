@@ -669,7 +669,12 @@ compute.ports
     )
   ```
 - The Reaper covers Vast with `reap_providers: [:vast]`. It lists with no
-  per-call options, so set `config :ex_atlas, :vast, api_key:`.
+  per-call options, so set `config :ex_atlas, :vast, api_key:`. `:vast` is not
+  in the default: a Vast label is free text, so the Reaper's `atlas-` prefix
+  can match an instance you made yourself. Name your own instances without
+  the prefix before you opt in. Without it, a spot task that respawns logs a
+  warning at spawn: a node that dies mid-respawn leaves the replacement
+  billing with no tracker.
 - `spot: true` rents the cheapest interruptible offer, bidding exactly its
   `min_bid`; `cost_per_hour` is the bid plus the disk. An outbid instance reads
   `exited`, so `on_failure: {:respawn, n}` rents a replacement. Pass a

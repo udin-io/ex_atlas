@@ -213,8 +213,10 @@ defmodule ExAtlas.Callback do
           {:ok, Keyword.put(opts, :callback, build(url, opts))}
         end
 
+      # A spawn starts the task, so its pod is attempt 0. A carried attempt
+      # would be the one the first respawn issues again.
       %{task_id: _} = already_prepared ->
-        {:ok, Keyword.put(opts, :callback, Map.put_new(already_prepared, :attempt, 0))}
+        {:ok, Keyword.put(opts, :callback, Map.put(already_prepared, :attempt, 0))}
 
       other ->
         {:error, {:invalid_callback, other}}
@@ -265,7 +267,7 @@ defmodule ExAtlas.Callback do
   # it before it rents a replacement. It is `:claimless` while the current
   # pod's own token signs no attempt (a task adopted from 0.8.0), and `:none`,
   # which no token matches, while an adopted task's interrupted respawn left
-  # it no current pod.
+  # it no current pod, until a poll reads the record's pod alive again.
   defp lookup(task_id, presented) do
     with {pid, current} <- owner(task_id),
          true <- current_attempt?(presented, current),
