@@ -45,6 +45,7 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
       spawned_at_ms: 1_700_000_000_000,
       max_runtime_ms: 90 * 60 * 1_000,
       respawns: 0,
+      respawning: nil,
       callback_task_id: "task-" <> id,
       report: nil,
       mode: :task,
@@ -102,6 +103,17 @@ defmodule ExAtlas.Orchestrator.TrackingStoreConformance do
 
           assert {:ok, %{owner: "b"}} = @store.get("compute-o1")
           assert {:ok, %{owner: nil}} = @store.get("compute-o2")
+        end
+
+        # A respawn writes the attempt it starts before it rents. A store that
+        # drops it adopts a task interrupted mid-respawn as if it never started
+        # one, and the orphan's reports pass (risk 51).
+        test "put/1 round-trips a respawn in progress, including none" do
+          :ok = @store.put(conformance_record("compute-r1", %{respawns: 1, respawning: 2}))
+          :ok = @store.put(conformance_record("compute-r2"))
+
+          assert {:ok, %{respawns: 1, respawning: 2}} = @store.get("compute-r1")
+          assert {:ok, %{respawning: nil}} = @store.get("compute-r2")
         end
 
         test "put/1 round-trips the cost fields, including no cap" do

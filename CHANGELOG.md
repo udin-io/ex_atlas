@@ -7,6 +7,38 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed: an orphan of a node that died mid-respawn gets 410 (#114)
+
+A respawn writes `respawning: n` into the tracking record before it rents the
+replacement. Before, a node that died between the rent and the record update
+left the replacement running with no record and a token for attempt `n`. The
+next boot adopted the preempted pod's record, respawned, and gave its own
+replacement attempt `n` again, so the orphan's `finish` ended the task.
+
+```elixir
+# on_failure: {:respawn, 2}. Pod A preempted, node dies after renting B.
+POST /atlas/cb/finish  Bearer <B's token, attempt 1>
+# before: 202 once the next boot respawns, and the task ends on B's report
+# after:  410; the next boot's replacement holds attempt 2
+```
+
+- The adopted task counts attempt `n` as spent. With `{:respawn, 1}` it rents
+  nothing more and ends.
+- Until its next respawn, it accepts no token: the record's pod was preempted.
+- It logs a warning naming the pod name. The orphan bills until the Reaper
+  deletes it; add the provider to `reap_providers` (`:vast` is not there by
+  default), or delete it by hand.
+- The record schema stays at version 3. A record without `:respawning`
+  (0.8.0's) or with `nil` adopts as before. A host store that maps fields to
+  columns needs a nullable integer `respawning` column; without one the
+  orphan's token passes as before. Only a value past `respawns` counts, so a
+  column default of 0 reads as no respawn.
+- Rolling back: an earlier build ignores the field, and its respawn copies it
+  onto the replacement's record. This build reads that stale value as no
+  respawn, since it is not past `respawns`.
+- A respawn refused before the rent (no `respawn_credentials:` resolver)
+  records no attempt.
+
 ### Added: Vast.ai `spot: true` rents interruptible offers (#112)
 
 `spot: true` on `provider: :vast` searches `type: "bid"` offers and rents the

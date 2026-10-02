@@ -186,6 +186,40 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
       assert :error = Memory.get(old_id)
     end
 
+    # Risk 51: a node that dies while the provider rents the replacement leaves
+    # the record on the preempted pod. The record says which attempt started,
+    # so the next boot can refuse a replacement it never heard of.
+    test "a respawn records its attempt before it rents, and the replacement's record drops it" do
+      on_exit(&ExAtlas.Test.FaultyProvider.reset/0)
+
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: ExAtlas.Test.FaultyProvider,
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 2}
+          )
+        )
+
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+      assert {:ok, %{respawning: nil}} = Memory.get(old_id)
+
+      ExAtlas.Test.FaultyProvider.arm(:spawn_compute, {:block, self()})
+      :ok = Mock.set_status(old_id, :stopped)
+      assert_receive {:blocked, :spawn_compute, tracker}, 2_000
+
+      assert {:ok, %{respawns: 0, respawning: 1}} = Memory.get(old_id)
+
+      ExAtlas.Test.FaultyProvider.reset()
+      send(tracker, :release)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{respawns: 1, respawning: nil}} = Memory.get(new_id)
+      assert :error = Memory.get(old_id)
+    end
+
     test "a respawn at the same price carries the open segment unchanged" do
       {:ok, _pid, compute} =
         Orchestrator.spawn(

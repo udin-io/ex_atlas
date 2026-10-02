@@ -58,9 +58,11 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
   defp pod_token(%{raw: %{request: request}}),
     do: ExAtlas.Spec.ComputeRequest.container_env(request)["ATLAS_CALLBACK_TOKEN"]
 
-  defp post_finish(token, exit_code) do
+  defp post_finish(token, exit_code), do: post(token, "/finish", ~s({"exit_code":#{exit_code}}))
+
+  defp post(token, path, body) do
     :post
-    |> Plug.Test.conn("/finish", ~s({"exit_code":#{exit_code}}))
+    |> Plug.Test.conn(path, body)
     |> Plug.Conn.put_req_header("content-type", "application/json")
     |> Plug.Conn.put_req_header("authorization", "Bearer " <> token)
     |> ExAtlas.Callback.Plug.call([])
@@ -640,6 +642,43 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       refute_received {:atlas_compute, ^id, {:respawned, _}}
       refute "trainer-adopted-s3:latest" in images()
       assert :error = Memory.get(id)
+    end
+
+    # The refusal comes before any rent, so it spends no attempt. The record
+    # outlives the task only when the DELETE of the old pod fails, and then the
+    # next boot must not count an attempt that rented nothing.
+    test "a respawn refused before the rent records no attempt" do
+      compute =
+        orphaned_task(
+          provider: ExAtlas.Test.FaultyProvider,
+          image: "trainer-adopted-s3-refused:latest",
+          s3: @s3,
+          spot: true,
+          on_failure: {:respawn, 2},
+          status_poll_ms: 30
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, pid} = Orchestrator.lookup(id)
+      ref = Process.monitor(pid)
+
+      ExAtlas.Test.FaultyProvider.arm(
+        :terminate,
+        {:error, ExAtlas.Error.new(:transport, provider: :mock)}
+      )
+
+      :ok = Mock.set_status(id, :stopped)
+
+      assert_receive {:atlas_compute, ^id, {:respawn_failed, {:preempted, %ExAtlas.Error{}}}},
+                     2_000
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_received {:atlas_compute, ^id, {:terminate_failed, _}}
+      assert {:ok, %{respawns: 0} = record} = Memory.get(id)
+      assert Map.get(record, :respawning) == nil
     end
 
     test "scrub_keys: [:s3] keeps the marker, so the respawn is still refused" do
@@ -1753,6 +1792,167 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
       assert {:ok, %{owner: "a"}} = Memory.get(compute.id)
       assert Orchestrator.list_ids() == []
+    end
+  end
+
+  # Risk 51. Pod A is preempted, the tracker rents pod B, and the node dies
+  # before the record moves to B. B runs on with a token for attempt 1 and no
+  # tracker; the record still names A.
+  describe "a node that dies while a respawn rents the replacement" do
+    alias ExAtlas.Test.FaultyProvider
+
+    defp died_mid_respawn(max_attempts) do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            callback: "https://app.example.com/atlas/cb",
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, max_attempts}
+          )
+        )
+
+      FaultyProvider.arm(:spawn_compute, {:block_after, self()})
+      :ok = Mock.set_status(pod_a.id, :stopped)
+      assert_receive {:blocked, :spawn_compute, ^pid}, 2_000
+      FaultyProvider.reset()
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      TestOrchestrator.sync_registry()
+
+      {:ok, pods} = Mock.list_compute([], %{})
+      assert [pod_b] = Enum.reject(pods, &(&1.id == pod_a.id))
+      assert {:ok, %{id: id}} = Memory.get(pod_a.id)
+      assert id == pod_a.id
+      assert :error = Memory.get(pod_b.id)
+
+      {pod_a, pod_b}
+    end
+
+    test "the orphan's report gets 410, before and after the adopted task respawns" do
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      # Hold the adopted tracker's first poll, so the task is adopted and has
+      # not respawned yet: the window in which only the Registry decides.
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      me = self()
+      adopter = Task.async(fn -> Adopter.run(notify: me) end)
+      assert_receive {:blocked, :get_compute, observer}, 2_000
+      send(observer, :release)
+      assert_receive {:blocked, :get_compute, poller}, 2_000
+      FaultyProvider.reset()
+      assert :ok = Task.await(adopter)
+      assert_receive :adoption_complete, 2_000
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      assert post_finish(pod_token(pod_a), 0).status == 410
+
+      send(poller, :release)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_c} = Mock.get_compute(new_id, %{})
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(pod_token(pod_b), 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
+
+      assert post_finish(pod_token(pod_c), 4).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
+    # The orphan bills until the Reaper or an operator deletes it, and only
+    # this node knows it may exist.
+    test "the adoption warns, naming the orphan's pod name and attempt" do
+      {pod_a, _pod_b} = died_mid_respawn(2)
+
+      log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+
+      assert log =~ "adopting #{pod_a.id}"
+      assert log =~ "attempt 1"
+      assert log =~ ~s(named "atlas-adoptable")
+      assert log =~ ":reap_providers"
+    end
+
+    # The orphan and the adopted task's replacement share the task's name and
+    # the prefix. Only the live tracker separates them, so the replacement's
+    # record is removed first: the Registry alone must keep it.
+    test "the Reaper deletes the orphan and never the replacement a live tracker holds" do
+      TestOrchestrator.put_env(reap_grace_ms: 0)
+      {pod_a, pod_b} = died_mid_respawn(2)
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Adopter.run(notify: self())
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      :ok = Memory.delete(new_id)
+      assert {:ok, %{status: :running, name: name}} = Mock.get_compute(new_id, %{})
+      assert name == pod_b.name
+
+      :ok = ExAtlas.Orchestrator.Reaper.reap_now("atlas-", [FaultyProvider])
+
+      assert {:ok, %{status: :terminated}} = Mock.get_compute(pod_b.id, %{})
+      assert {:ok, %{status: :running}} = Mock.get_compute(new_id, %{})
+      assert {:ok, %{compute: %{id: ^new_id}}} = Orchestrator.info(new_id)
+    end
+
+    test "the interrupted attempt counts as spent, so a spent budget rents nothing more" do
+      {pod_a, _pod_b} = died_mid_respawn(1)
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert_receive {:atlas_compute, ^old_id, {:task, _outcome}}, 2_000
+      refute_received {:atlas_compute, ^old_id, {:respawned, _}}
+      assert {:ok, pods} = Mock.list_compute([], %{})
+      assert length(pods) == 2
+    end
+
+    # A record 0.8.0 wrote has no `:respawning`; a host store that nils a
+    # field it does not know returns `nil`. A host column with a default
+    # returns 0, and a rollback's `carry_record` copies a stale intent equal to
+    # `respawns`: neither is an attempt beyond `respawns`. All adopt as before
+    # this field: the current pod reports, and the budget is what `respawns`
+    # says.
+    for shape <- [:missing, nil, 0] do
+      test "a record with :respawning #{inspect(shape)} adopts and respawns as before" do
+        compute =
+          orphaned_task(
+            provider: ExAtlas.Test.FaultyProvider,
+            callback: "https://app.example.com/atlas/cb",
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+
+        {:ok, record} = Memory.get(compute.id)
+
+        record =
+          case unquote(shape) do
+            :missing -> Map.delete(record, :respawning)
+            value -> Map.put(record, :respawning, value)
+          end
+
+        :ok = Memory.put(record)
+        old_id = compute.id
+        Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+        log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+        assert_receive :adoption_complete, 2_000
+        refute log =~ "rented the replacement"
+
+        assert post(pod_token(compute), "/progress", ~s({"step":1})).status == 202
+        assert_receive {:atlas_compute, ^old_id, {:progress, %{"step" => 1}}}, 2_000
+
+        :ok = Mock.set_status(old_id, :stopped)
+        assert_receive {:atlas_compute, ^old_id, {:respawned, _new_id}}, 2_000
+      end
     end
   end
 

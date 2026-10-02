@@ -557,7 +557,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     state =
       %{
         new_state(compute, opts, tracking)
-        | respawns: record.respawns,
+        | respawns: spent_respawns(record),
+          interrupted_respawn?: is_integer(interrupted_attempt(record)),
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
@@ -568,6 +569,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       |> arm_cost_cap()
 
     register_callback(state)
+    warn_interrupted_respawn(record)
     Events.broadcast(compute.id, {:status, compute.status})
     schedule_heartbeat(state)
     schedule_deadline(remaining_ms)
@@ -609,6 +611,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       upstream_deletable?: true,
       respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
+      interrupted_respawn?: false,
       last_activity_ms: now_ms(),
       mode: tracking[:mode],
       deadline_at_ms: deadline_at(tracking[:max_runtime_ms]),
@@ -657,6 +660,38 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     else
       _valid_or_absent -> opts
     end
+  end
+
+  # A respawn that was renting when the node died spent its attempt: the
+  # provider may have rented the replacement, which no record names (risk 51).
+  defp spent_respawns(record), do: interrupted_attempt(record) || record.respawns
+
+  # Only an attempt past `respawns` was started and not finished. A record
+  # without the field (0.8.0's) or with `nil` started none. So did one whose
+  # value is not past `respawns`: a host column's default of 0, or an intent an
+  # earlier build's `carry_record` copied onto the replacement after a
+  # rollback. Reading those as interrupted would refuse the live pod.
+  defp interrupted_attempt(%{respawning: attempt, respawns: respawns})
+       when is_integer(attempt) and attempt > respawns,
+       do: attempt
+
+  defp interrupted_attempt(_record), do: nil
+
+  defp warn_interrupted_respawn(record) do
+    case interrupted_attempt(record) do
+      nil -> :ok
+      attempt -> log_interrupted_respawn(record, attempt)
+    end
+  end
+
+  defp log_interrupted_respawn(record, attempt) do
+    Logger.warning(
+      "[ExAtlas.Orchestrator.ComputeServer] adopting #{record.id}: the node stopped while it " <>
+        "rented the replacement for attempt #{attempt}. A pod named " <>
+        "#{inspect(Keyword.get(record.opts, :name))} that no record names may be running and " <>
+        "billing; its reports get 410. The Reaper deletes it when " <>
+        "#{inspect(record.provider)} is in :reap_providers; otherwise delete it by hand."
+    )
   end
 
   # What is left of a wall-clock budget, measured from the spawn that started
@@ -1157,6 +1192,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
               opts: opts,
               cost_meter: new_pod(state.cost_meter),
               respawns: state.respawns + 1,
+              interrupted_respawn?: false,
               poll_failures: 0,
               upstream_deletable?: true,
               last_activity_ms: now_ms()
@@ -1185,17 +1221,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
     cond do
       needs == %{s3: false, env: nil} ->
-        spawn_compute(opts)
+        spawn_compute(opts, state)
 
       resolver = resolver(opts) ->
-        with {:ok, opts} <- resolve_credentials(resolver, needs, state), do: spawn_compute(opts)
+        with {:ok, opts} <- resolve_credentials(resolver, needs, state),
+             do: spawn_compute(opts, state)
 
       true ->
         not_stored(opts, needs)
     end
   end
 
-  defp spawn_compute(opts) do
+  # The mark goes in just before the rent, after every check that can refuse
+  # without renting: a node that dies before `carry_record/3` leaves the
+  # replacement with no record, and the mark tells the next boot that its
+  # attempt is spent (risk 51).
+  defp spawn_compute(opts, state) do
+    update_record(state, &Map.put(&1, :respawning, state.respawns + 1))
     with {:ok, replacement} <- ExAtlas.spawn_compute(opts), do: {:ok, replacement, opts}
   end
 
@@ -1501,12 +1543,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         attempt = state.respawns + 1
 
         store.put(
-          TrackingStore.scrub_env(%{
-            record
-            | id: new_id,
+          TrackingStore.scrub_env(
+            Map.merge(record, %{
+              id: new_id,
               respawns: attempt,
+              respawning: nil,
               opts: next_attempt(record.opts, attempt)
-          })
+            })
+          )
         )
 
         store.delete(old_id)
@@ -1733,6 +1777,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   # A callback descriptor stored by 0.8.0 has no `:attempt`, and neither does
   # the token minted from it. A respawn writes one (`next_attempt/2`).
+  #
+  # An adopted task whose node died mid-respawn has no current pod: its record
+  # names the preempted pod, and the orphan holds the spent attempt's token.
+  # `:none` matches no token until the next respawn registers its attempt.
+  defp callback_value(%{interrupted_respawn?: true}), do: :none
+
   defp callback_value(%{opts: opts, respawns: respawns}) do
     case Keyword.get(opts, :callback) do
       %{attempt: attempt} when is_integer(attempt) -> respawns
