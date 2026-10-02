@@ -843,7 +843,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       "startJupyter" => false
     }
 
-    test "normalizes a RunPod template and keeps the body in raw" do
+    test "normalizes a RunPod template and keeps its body, without env, in raw" do
       assert %Spec.Template{
                id: "9x4m2p7v",
                provider: :runpod,
@@ -857,8 +857,15 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
                serverless: false,
                ssh: true,
                jupyter: false,
-               raw: @template
+               raw: raw
              } = Translate.template_to_spec(@template)
+
+      assert raw == Map.delete(@template, "env")
+    end
+
+    test "raw keeps a template body that has no env whole" do
+      body = Map.delete(@template, "env")
+      assert %Spec.Template{raw: ^body, env: %{}} = Translate.template_to_spec(body)
     end
 
     test "a sparse body reads as absent fields" do
@@ -909,7 +916,7 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       "createdAt" => "2026-03-13T20:00:00Z"
     }
 
-    test "normalizes a RunPod endpoint and keeps the body in raw" do
+    test "normalizes a RunPod endpoint and keeps its body, without env, in raw" do
       assert %Spec.Endpoint{
                id: "4m7x2k9q",
                provider: :runpod,
@@ -921,8 +928,30 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
                region_hints: ["US-TX-3"],
                network_volume_ids: ["vol_abc"],
                created_at: ~U[2026-03-13 20:00:00Z],
-               raw: @endpoint
+               raw: raw
              } = Translate.endpoint_to_spec(@endpoint)
+
+      assert raw == Map.delete(@endpoint, "env")
+    end
+
+    test "raw drops the env of the template nested in an endpoint, and keeps its other keys" do
+      body =
+        Map.put(@endpoint, "template", %{"id" => "t", "env" => %{"K" => "v"}, "image" => "i"})
+
+      assert %Spec.Endpoint{raw: raw} = Translate.endpoint_to_spec(body)
+      assert raw["template"] == %{"id" => "t", "image" => "i"}
+      refute Map.has_key?(raw, "env")
+    end
+
+    test "raw keeps an endpoint body that has no env whole" do
+      body = %{"id" => "a", "template" => %{"id" => "t"}, "workers" => %{"min" => 1}}
+      assert %Spec.Endpoint{raw: ^body} = Translate.endpoint_to_spec(body)
+    end
+
+    test "a template that is not an object stays as RunPod sent it" do
+      body = %{"id" => "a", "template" => "t1", "env" => %{"K" => "v"}}
+      assert %Spec.Endpoint{raw: %{"template" => "t1"} = raw} = Translate.endpoint_to_spec(body)
+      refute Map.has_key?(raw, "env")
     end
 
     test "LOAD_BALANCER maps to :load_balancer, an unknown type to :unknown, an absent one to nil" do

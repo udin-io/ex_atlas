@@ -43,6 +43,28 @@ defmodule ExAtlas.Providers.HTTP do
 
   defp telemetry_url(%URI{} = url), do: URI.to_string(%{url | query: nil})
 
+  @doc """
+  Drop the `env` a provider echoes from a resource body: the body's own and
+  the one of an embedded `template` (a RunPod endpoint carries its template).
+
+  `env` holds the credentials the caller set. A struct that keeps the body in
+  `raw` prints them in a crash report or under `inspect(.., structs: false)`,
+  which skip the struct's own `Inspect`. A body that is not a map passes
+  through.
+  """
+  @spec drop_env(term()) :: term()
+  def drop_env(%{} = body) do
+    case Map.delete(body, "env") do
+      %{"template" => %{} = template} = rest ->
+        %{rest | "template" => Map.delete(template, "env")}
+
+      rest ->
+        rest
+    end
+  end
+
+  def drop_env(other), do: other
+
   @doc "Merge the caller's `ctx.req_options` in last, so they win."
   @spec merge_user_options(Req.Request.t(), ExAtlas.Provider.ctx()) :: Req.Request.t()
   def merge_user_options(req, %{req_options: opts}) when is_list(opts) and opts != [] do
