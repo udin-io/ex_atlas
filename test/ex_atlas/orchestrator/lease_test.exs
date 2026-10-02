@@ -352,6 +352,34 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     end
   end
 
+  describe "one takeover at a time" do
+    test "claims nothing new while the last takeover is still adopting" do
+      %{id: first} = orphaned_task("m1", ExAtlas.Test.FaultyProvider)
+      expire!("m1")
+      ExAtlas.Test.FaultyProvider.arm(:get_compute, {:block, self()})
+
+      capture_log(fn ->
+        lease = held_lease!("m2")
+        assert_receive {:blocked, :get_compute, call}, 2_000
+
+        %{id: second} = orphaned_task("m3")
+        expire!("m3")
+        as_owner("m2")
+        tick!(lease)
+        assert {:ok, %{owner: "m3"}} = Store.get(second)
+
+        # Once the first adoption ends, a tick claims the second.
+        send(call, :release)
+        assert await(fn -> first in Orchestrator.list_ids() end)
+
+        assert await(fn ->
+                 tick!(lease)
+                 match?({:ok, %{owner: "m2"}}, Store.get(second))
+               end)
+      end)
+    end
+  end
+
   describe "records this build would not adopt" do
     # A signed record of a newer release, say, in a rolling deploy: claimed,
     # it would belong to a node that cannot track it.
