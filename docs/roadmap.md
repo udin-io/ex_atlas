@@ -13,6 +13,7 @@ Nothing filed. The owner picks the next feature after 0.8.0.
 
 | Feature | Ticket | State |
 |---|---|---|
+| A late report from a replaced pod no longer ends the replacement | #100 | PR #101: the callback token signs the pod's attempt, and a stale report gets 410 |
 | Release 0.8.0 | #94 | PR #95 (merged): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. The owner runs `mix hex.publish` and pushes the `v0.8.0` tag after the merge |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
