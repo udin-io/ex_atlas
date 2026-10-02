@@ -34,7 +34,7 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   alias ExAtlas.{Error, Spec}
   alias ExAtlas.Providers.HTTP
-  alias ExAtlas.Providers.LambdaLabs.{Client, Translate}
+  alias ExAtlas.Providers.LambdaLabs.{Client, Firewall, Translate}
 
   @impl true
   def capabilities, do: [:raw_tcp]
@@ -44,11 +44,16 @@ defmodule ExAtlas.Providers.LambdaLabs do
     with :ok <- check_supported(request),
          {:ok, ssh_key} <- ssh_key(request),
          {:ok, parts} <- Translate.launch_parts(request, DateTime.utc_now()),
+         {:ok, rules} <- Translate.firewall_rules(request),
          {:ok, types} <- instance_types(ctx),
          {:ok, type} <- Translate.instance_type(request, types),
          {:ok, region} <- Translate.region(type, types[type], request.region_hints),
-         body = Translate.launch_body(request, parts, type, region, ssh_key),
-         {:ok, id} <- launch(ctx, body) do
+         {:ok, ruleset} <- Firewall.open(ctx, request, rules, region),
+         body =
+           request
+           |> Translate.launch_body(parts, type, region, ssh_key)
+           |> Firewall.attach(ruleset),
+         {:ok, id} <- launch(ctx, body, ruleset) do
       {:ok, Translate.launched_compute(id, request, parts, types[type], region)}
     end
   end
@@ -141,15 +146,17 @@ defmodule ExAtlas.Providers.LambdaLabs do
 
   # Retried on a 429 only: a launch that answered 5xx or timed out may have
   # rented an instance already.
-  defp launch(ctx, body) do
+  defp launch(ctx, body, ruleset) do
     case Client.post(ctx, "/instance-operations/launch", body, retry: &HTTP.retry_rate_limited/2) do
       {:ok, %{"instance_ids" => [id | _]}} when is_binary(id) ->
         {:ok, id}
 
       {:ok, _other} ->
+        Firewall.delete(ctx, ruleset)
         unexpected_body("POST /instance-operations/launch")
 
       {:error, %Error{} = error} ->
+        Firewall.delete(ctx, ruleset)
         {:error, withhold_echo(error)}
     end
   end

@@ -50,6 +50,18 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     body
   end
 
+  # Routes for the firewall calls a spawn with `ports:` makes. A test that
+  # asserts on them registers its own expects instead.
+  defp stub_firewall(bypass) do
+    Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
+      json(conn, 200, %{"data" => ruleset(%{"id" => "rs-stub"})})
+    end)
+
+    Bypass.stub(bypass, "DELETE", "/firewall-rulesets/:id", fn conn ->
+      json(conn, 200, %{"data" => %{}})
+    end)
+  end
+
   defp tags(body), do: Map.new(body["tags"], &{&1["key"], &1["value"]})
 
   describe "spawn_compute/1 picks the type and region" do
@@ -59,6 +71,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     } do
       expect_types(bypass)
       expect_launch(bypass)
+      stub_firewall(bypass)
       before = DateTime.utc_now() |> DateTime.truncate(:second)
 
       assert {:ok, compute} =
@@ -170,6 +183,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     } do
       expect_types(bypass)
       expect_launch(bypass)
+      stub_firewall(bypass)
 
       long_image = "registry.example.com/" <> String.duplicate("a", 200) <> ":latest"
 
@@ -231,6 +245,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
          %{bypass: bypass, opts: opts, tmp_dir: dir} do
       expect_types(bypass)
       expect_launch(bypass)
+      stub_firewall(bypass)
       tricky = "it's $(id) `whoami` \"q\"\nline two\\"
 
       assert {:ok, compute} =
@@ -426,6 +441,313 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
                ExAtlas.spawn_compute(opts)
 
       assert message =~ "/instance-operations/launch"
+    end
+  end
+
+  describe "spawn_compute/1 firewall ruleset" do
+    # The ruleset opens `ports:` at Lambda's firewall. `FirewallRule` and the
+    # create request are in Lambda's OpenAPI spec 1.10.0: a rule needs
+    # `protocol`, `source_network` and `description`; the name holds at most 64
+    # characters.
+    @ruleset_rule_keys ~w(protocol port_range source_network description)
+
+    # Logs the order of the three calls a spawn makes.
+    defp expect_ruleset_flow(bypass, log, launch_status \\ 200) do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:ruleset, body})
+        Agent.update(log, &[:create | &1])
+        json(conn, 200, %{"data" => ruleset(%{"id" => "rs-1", "name" => body["name"]})})
+      end)
+
+      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:launch, body})
+        Agent.update(log, &[:launch | &1])
+
+        if launch_status == 200 do
+          json(conn, 200, %{"data" => %{"instance_ids" => [@launched_id]}})
+        else
+          json(conn, launch_status, %{"error" => %{"code" => "global/invalid-parameters"}})
+        end
+      end)
+    end
+
+    defp ruleset_body do
+      assert_received {:ruleset, body}
+      body
+    end
+
+    setup do
+      {:ok, log: start_supervised!({Agent, fn -> [] end})}
+    end
+
+    test "creates one ruleset with a tcp rule per port, then launches with its id", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_types(bypass)
+      expect_ruleset_flow(bypass, log)
+
+      assert {:ok, %{id: @launched_id}} =
+               ExAtlas.spawn_compute(
+                 opts ++
+                   [
+                     name: "vllm-a",
+                     ports: [{8000, :http}, {9000, :tcp}],
+                     region_hints: ["us-east-1"]
+                   ]
+               )
+
+      body = ruleset_body()
+      assert body["region"] == "us-east-1"
+      assert body["name"] =~ ~r/\Aatlas-vllm-a-[0-9a-f]{8}\z/
+
+      assert [
+               %{"protocol" => "tcp", "port_range" => [8000, 8000]} = http,
+               %{"protocol" => "tcp", "port_range" => [9000, 9000]}
+             ] = body["rules"]
+
+      assert http["source_network"] == "0.0.0.0/0"
+      assert Enum.all?(body["rules"], &(Map.keys(&1) -- @ruleset_rule_keys == []))
+      assert Enum.all?(body["rules"], &(&1["description"] != ""))
+
+      assert launched_body()["firewall_rulesets"] == [%{"id" => "rs-1"}]
+      assert Agent.get(log, &Enum.reverse/1) == [:create, :launch]
+    end
+
+    test "provider_opts.source_network limits the rules", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_types(bypass)
+      expect_ruleset_flow(bypass, log)
+
+      opts =
+        Keyword.put(opts, :provider_opts, %{
+          source_network: "203.0.113.0/24",
+          ssh_key_name: "deploy"
+        })
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert [%{"source_network" => "203.0.113.0/24"}] = ruleset_body()["rules"]
+    end
+
+    test "a port listed twice opens one rule", %{bypass: bypass, opts: opts, log: log} do
+      expect_types(bypass)
+      expect_ruleset_flow(bypass, log)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{22, :tcp}, {22, :http}]])
+      assert [%{"port_range" => [22, 22]}] = ruleset_body()["rules"]
+    end
+
+    test "the ruleset name holds at most 64 characters, and differs for two spawns of one name",
+         %{bypass: bypass, opts: opts} do
+      expect_types(bypass)
+      test_pid = self()
+
+      Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:ruleset, body})
+        json(conn, 200, %{"data" => ruleset()})
+      end)
+
+      Bypass.stub(bypass, "POST", @launch, fn conn ->
+        json(conn, 200, %{"data" => %{"instance_ids" => [@launched_id]}})
+      end)
+
+      Bypass.stub(bypass, "GET", "/instance-types", fn conn ->
+        json(conn, 200, %{"data" => instance_types()})
+      end)
+
+      long = String.duplicate("é", 100)
+
+      for name <- [long, long] do
+        assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [name: name, ports: [{80, :http}]])
+      end
+
+      assert [%{"name" => first}, %{"name" => second}] = [ruleset_body(), ruleset_body()]
+      assert String.length(first) == 64
+      assert first != second
+    end
+
+    test "an unnamed spawn gets a generated ruleset name", %{bypass: bypass, opts: opts, log: log} do
+      expect_types(bypass)
+      expect_ruleset_flow(bypass, log)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert ruleset_body()["name"] =~ ~r/\Aatlas-[0-9a-f]{8}\z/
+    end
+
+    test "ports: [] creates no ruleset and sends no firewall_rulesets", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+      expect_launch(bypass)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: []])
+      refute Map.has_key?(launched_body(), "firewall_rulesets")
+    end
+
+    test "a refused ruleset create returns its error and launches nothing", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+
+      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+        json(conn, 400, %{
+          "error" => %{"code" => "global/quota-exceeded", "message" => "Too many rulesets."}
+        })
+      end)
+
+      assert {:error,
+              %ExAtlas.Error{
+                kind: :provider,
+                status: 400,
+                provider: :lambda_labs,
+                message: "Too many rulesets."
+              }} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+    end
+
+    test "a ruleset create answered 429 then 200 creates one ruleset", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_types(bypass)
+      calls = :counters.new(1, [])
+
+      Bypass.expect(bypass, "POST", "/firewall-rulesets", fn conn ->
+        :counters.add(calls, 1, 1)
+
+        if :counters.get(calls, 1) == 1 do
+          conn
+          |> Plug.Conn.put_resp_header("retry-after", "0")
+          |> json(429, %{"error" => %{"code" => "global/rate-limited", "message" => "slow"}})
+        else
+          json(conn, 200, %{"data" => ruleset(%{"id" => "rs-1"})})
+        end
+      end)
+
+      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+        Agent.update(log, &[:launch | &1])
+        json(conn, 200, %{"data" => %{"instance_ids" => [@launched_id]}})
+      end)
+
+      assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+      assert :counters.get(calls, 1) == 2
+    end
+
+    test "a refused launch deletes the ruleset it created and returns the launch error", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_types(bypass)
+      expect_ruleset_flow(bypass, log, 400)
+
+      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
+        Agent.update(log, &[:delete | &1])
+        json(conn, 200, %{"data" => %{}})
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 400, provider: :lambda_labs}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      assert Agent.get(log, &Enum.reverse/1) == [:create, :launch, :delete]
+    end
+
+    test "a refused launch whose ruleset delete also fails still returns the launch error", %{
+      bypass: bypass,
+      opts: opts,
+      log: log
+    } do
+      expect_types(bypass)
+      expect_ruleset_flow(bypass, log, 400)
+
+      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
+        json(conn, 500, %{"error" => %{"code" => "global/internal-error"}})
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 400, message: message}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      assert message =~ "refused the launch"
+    end
+
+    test "a launch answered 200 with no instance id deletes the ruleset it created", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+        json(conn, 200, %{"data" => ruleset(%{"id" => "rs-1"})})
+      end)
+
+      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+        json(conn, 200, %{"data" => %{"instance_ids" => []}})
+      end)
+
+      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
+        send(test_pid, :ruleset_deleted)
+        json(conn, 200, %{"data" => %{}})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      assert_received :ruleset_deleted
+    end
+
+    test "a ruleset create answered 200 with no id is a :provider error and launches nothing", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass)
+
+      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+        json(conn, 200, %{"data" => %{"name" => "atlas-x"}})
+      end)
+
+      assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      assert message =~ "/firewall-rulesets"
+    end
+
+    test "us-south-1 launches with no ruleset, since Lambda applies no firewall rules there", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_types(bypass, %{
+        "gpu_1x_h100_pcie" => type_entry("gpu_1x_h100_pcie", 249, 1, "H100", ["us-south-1"])
+      })
+
+      expect_launch(bypass)
+
+      assert {:ok, %{region: "us-south-1"}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      body = launched_body()
+      assert body["region_name"] == "us-south-1"
+      refute Map.has_key?(body, "firewall_rulesets")
+    end
+
+    test "a source_network that is not a string is :validation before any request", %{opts: opts} do
+      opts = Keyword.put(opts, :provider_opts, %{source_network: 5, ssh_key_name: "deploy"})
+
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+               ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
+
+      assert message =~ "source_network"
     end
   end
 
