@@ -207,6 +207,7 @@ node has none:
 - After adoption, a preemption broadcasts `{:respawn_failed, {reason,
   %ExAtlas.Error{kind: :validation}}}` and ends the task. No pod is rented.
 
+`scrub_keys: [:s3]` keeps the marker alone, so the refusal holds there too.
 `Spec.Staging.new/1` refuses `credentials: :not_stored`, so a record's `s3:`
 cannot rent a pod by hand either. A host `TrackingStore` must keep `opts`
 whole; one that drops the marker still gets the refusal, since an adopted
