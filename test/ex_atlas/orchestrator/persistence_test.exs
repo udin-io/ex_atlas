@@ -424,25 +424,64 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
   describe "secrets" do
     @describetag :tmp_dir
 
-    test "a record built from spawn opts drops s3:" do
+    test "a record built from spawn opts keeps only s3:'s non-secret fields" do
       compute = %ExAtlas.Spec.Compute{id: "mock-s3", provider: :mock, status: :running}
 
-      opts =
-        task_opts(
-          s3: %{
-            access_key_id: "tid-test-4b1e",
-            secret_access_key: "tsec-test-9f2c",
-            artifact_uri: "s3://b/a"
-          },
-          env: %{"WANDB_PROJECT" => "x"}
-        )
+      # `Orchestrator.spawn/1` hands the record a validated `Staging`.
+      {:ok, staging} =
+        ExAtlas.Spec.Staging.new(%{
+          endpoint: "https://t3.storage.dev",
+          region: "auto",
+          access_key_id: "tid-test-4b1e",
+          secret_access_key: "tsec-test-9f2c",
+          session_token: "tses-test-0d7a",
+          dataset_uri: "s3://bucket/datasets/abc/",
+          artifact_uri: "s3://bucket/artifacts/run-123/",
+          dataset_url: "https://b.example/d.tar.gz?X-Amz-Signature=getsig-5d0c91",
+          artifact_url: "https://b.example/a.tar.gz?X-Amz-Signature=putsig-a7e3b2"
+        })
+
+      opts = task_opts(s3: staging, env: %{"WANDB_PROJECT" => "x"})
 
       record = TrackingStore.new(compute, opts, mode: :task)
 
-      refute Keyword.has_key?(record.opts, :s3)
-      refute inspect(record) =~ "tsec-test-9f2c"
+      assert record.opts[:s3] == %{
+               endpoint: "https://t3.storage.dev",
+               region: "auto",
+               dataset_uri: "s3://bucket/datasets/abc/",
+               artifact_uri: "s3://bucket/artifacts/run-123/",
+               credentials: :not_stored
+             }
+
+      text = inspect(record, limit: :infinity, printable_limit: :infinity, structs: false)
+
+      for secret <- ~w(tid-test-4b1e tsec-test-9f2c tses-test-0d7a getsig-5d0c91 putsig-a7e3b2),
+          do: refute(text =~ secret)
+
       # Control: the rest of the opts are kept.
       assert record.opts[:env] == %{"WANDB_PROJECT" => "x"}
+    end
+
+    test "presigned URLs alone leave only the marker" do
+      {:ok, staging} =
+        ExAtlas.Spec.Staging.new(
+          dataset_url: "https://b.example/d.tar.gz?X-Amz-Signature=getsig-5d0c91"
+        )
+
+      assert TrackingStore.scrub_opts(s3: staging) == [s3: %{credentials: :not_stored}]
+    end
+
+    test "an s3: no one validated keeps only the marker" do
+      # A tracker started directly holds the raw map; its endpoint was never
+      # checked for user info.
+      raw = %{endpoint: "https://u:tsec-test-9f2c@t3.storage.dev", dataset_uri: "s3://b/d/"}
+
+      assert TrackingStore.scrub_opts(s3: raw) == [s3: %{credentials: :not_stored}]
+      assert TrackingStore.scrub_opts(s3: Map.to_list(raw)) == [s3: %{credentials: :not_stored}]
+    end
+
+    test "s3: nil stays nil" do
+      assert TrackingStore.scrub_opts(s3: nil) == [s3: nil]
     end
 
     test "never reach the store's bytes on disk", %{tmp_dir: dir} do

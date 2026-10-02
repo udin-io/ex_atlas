@@ -220,10 +220,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     cost_since_ms: nil
   }
 
-  # Opts that are credentials, or that could carry one. `:req_options` gets its
-  # own treatment below because the secret is nested inside it. `:s3` holds
-  # storage keys beside its URIs and goes whole.
-  @secret_opts [:api_key, :api_secret, :secret, :token, :password, :s3]
+  # Opts that are credentials, or that could carry one. `:req_options` and
+  # `:s3` get their own treatment below because the secret is nested inside.
+  @secret_opts [:api_key, :api_secret, :secret, :token, :password]
 
   @doc "The current record schema version."
   @spec version() :: version()
@@ -307,13 +306,16 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   Drops `#{inspect(@secret_opts)}`, anything named by
   `config :ex_atlas, :orchestrator, scrub_keys: [...]`, and the
   `#{inspect(Config.secret_req_options())}` entries of `:req_options`,
-  where a hand-rolled bearer header or AWS signing key would be.
+  where a hand-rolled bearer header or AWS signing key would be. `:s3` keeps
+  its endpoint, region and URIs, and `credentials: :not_stored` in place of
+  the keys and presigned URLs (`ExAtlas.Spec.Staging.scrub/1`).
   """
   @spec scrub_opts(keyword()) :: keyword()
   def scrub_opts(opts) do
     opts
     |> Keyword.drop(@secret_opts ++ configured_scrub_keys())
     |> scrub_req_options()
+    |> scrub_staging()
   end
 
   @doc """
@@ -336,6 +338,14 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
       _not_a_keyword_list ->
         opts
+    end
+  end
+
+  defp scrub_staging(opts) do
+    case Keyword.fetch(opts, :s3) do
+      {:ok, nil} -> opts
+      {:ok, s3} -> Keyword.put(opts, :s3, Spec.Staging.scrub(s3))
+      :error -> opts
     end
   end
 

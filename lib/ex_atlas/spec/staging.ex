@@ -80,6 +80,8 @@ defmodule ExAtlas.Spec.Staging do
     :artifact_url
   ]
 
+  @public [:endpoint, :region, :dataset_uri, :artifact_uri]
+
   @variables [
     endpoint: ["AWS_ENDPOINT_URL_S3"],
     region: ["AWS_REGION", "AWS_DEFAULT_REGION"],
@@ -145,6 +147,24 @@ defmodule ExAtlas.Spec.Staging do
           "ComputeRequest.s3 must be nil or an ExAtlas.Spec.Staging from Staging.new/1 " <>
             "or ComputeRequest.new/1"
   end
+
+  @doc """
+  The part of `s3:` a tracking record may keep: the endpoint, region and URIs
+  that are set, plus `credentials: :not_stored`.
+
+  Only a `Staging` from `new/1` gives up its fields. Any other value gives the
+  marker alone, since nothing checked it for a credential.
+  """
+  @spec scrub(term()) :: map()
+  def scrub(%__MODULE__{} = staging) do
+    for key <- @public,
+        value = Map.fetch!(staging, key),
+        value != nil,
+        into: %{credentials: :not_stored},
+        do: {key, value}
+  end
+
+  def scrub(_unvalidated), do: %{credentials: :not_stored}
 
   # A presigned URL is a bearer credential until it expires.
   @sealed [:access_key_id, :secret_access_key, :session_token, :dataset_url, :artifact_url]
