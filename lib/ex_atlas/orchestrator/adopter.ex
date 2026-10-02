@@ -111,6 +111,16 @@ defmodule ExAtlas.Orchestrator.Adopter do
     end
   end
 
+  @doc """
+  Adopt `records` that this node, as `owner`, just claimed from an owner whose
+  lease expired (`ExAtlas.Orchestrator.Lease`), as a boot adopts its own: a
+  record whose pod is gone is deleted, the rest get trackers. Signals no one.
+  """
+  @spec adopt_claimed([TrackingStore.record()], String.t(), module()) :: :ok
+  def adopt_claimed(records, owner, store) do
+    Enum.each(records, &adopt_one(&1, owner, store))
+  end
+
   defp adopt_all(store, notify) do
     case read_all(store) do
       {:ok, records} ->

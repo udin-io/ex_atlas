@@ -1,0 +1,223 @@
+defmodule ExAtlas.Orchestrator.LeaseTest do
+  @moduledoc """
+  Owner leases on the Ecto store (issue 132): a node renews its lease every
+  third of `lease_ttl_ms`, and takes over the signed records of an owner whose
+  lease expired, adopting them as a boot adopts its own.
+
+  Each test plays "m1 died, m2 lives" on one SQLite file: m1 spawns and its
+  tracker is killed, then the config names m2 and m2's `Lease` starts.
+  """
+
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
+
+  alias ExAtlas.Orchestrator
+  alias ExAtlas.Orchestrator.{Lease, TrackingStore}
+  alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+  alias ExAtlas.Providers.Mock
+  alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
+  alias ExAtlas.Test.Repo
+
+  @moduletag :tmp_dir
+
+  # Long enough that no tick fires on its own during a test: each test drives
+  # the ticks it needs with `tick!/0`.
+  @ttl 60_000
+
+  defmodule RenewFails do
+    @moduledoc false
+    # The Ecto store whose lease renewal fails: a node cut off from the row
+    # that proves it is alive.
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate all(), to: Store
+    defdelegate get(id), to: Store
+    defdelegate claim_expired(claimer, now_ms, rewrite), to: Store
+    def renew_lease(_owner, _expires_at_ms), do: {:error, :database_unreachable}
+  end
+
+  setup %{tmp_dir: dir} do
+    Repo.start!(dir)
+    TestOrchestrator.start!(tracking_store: Store)
+    TestOrchestrator.put_env(repo: Repo)
+    :ok
+  end
+
+  defp now, do: System.system_time(:millisecond)
+
+  defp as_owner(owner), do: TestOrchestrator.put_env(reap_owner: owner)
+
+  # A persisted task of `owner` whose node then dies: the pod runs on, the
+  # record is all that is left.
+  defp orphaned_task(owner) do
+    as_owner(owner)
+
+    {:ok, pid, compute} =
+      Orchestrator.spawn(
+        provider: :mock,
+        gpu: :h100,
+        image: "trainer:latest",
+        name: "atlas-lease",
+        mode: :task,
+        max_runtime_ms: 90 * 60 * 1_000,
+        persist: true
+      )
+
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+    TestOrchestrator.sync_registry()
+    compute
+  end
+
+  defp start_lease!(owner, opts \\ []) do
+    as_owner(owner)
+    opts = Keyword.merge([store: Store, owner: owner, ttl_ms: @ttl], opts)
+    pid = start_supervised!({Lease, opts})
+    # `init/1` queues the first tick before any call, so this returns after it.
+    :sys.get_state(pid)
+    pid
+  end
+
+  defp tick!(pid) do
+    send(pid, :tick)
+    :sys.get_state(pid)
+    :ok
+  end
+
+  defp expire!(owner), do: :ok = Store.renew_lease(owner, now() - 1)
+
+  defp lease_expiry(owner) do
+    %{rows: [[expires_at]]} =
+      Repo.query!("SELECT expires_at FROM atlas_owner_leases WHERE owner = ?1", [owner])
+
+    {:ok, at, 0} = DateTime.from_iso8601(expires_at)
+    DateTime.to_unix(at, :millisecond)
+  end
+
+  defp put_row!(record) do
+    stamp = DateTime.to_iso8601(DateTime.utc_now())
+
+    Repo.query!(
+      "INSERT OR REPLACE INTO atlas_tracking_records " <>
+        "(id, owner, record, inserted_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+      [record.id, record[:owner], {:blob, :erlang.term_to_binary(record)}, stamp]
+    )
+  end
+
+  defp pod_status(id) do
+    {:ok, %{status: status}} = ExAtlas.get_compute(id, provider: :mock)
+    status
+  end
+
+  describe "renewal" do
+    test "renews the lease every third of lease_ttl_ms, until now plus the ttl" do
+      test = self()
+
+      clock = fn ->
+        at = now()
+        send(test, {:clock, at})
+        at
+      end
+
+      start_lease!("m2", ttl_ms: 300, clock: clock)
+
+      assert_receive {:clock, first}, 1_000
+      assert_receive {:clock, second}, 1_000
+      :sys.get_state(Lease)
+
+      assert lease_expiry("m2") >= second + 300
+      assert second - first >= 90
+      assert second - first < 300
+    end
+
+    test "takes lease_ttl_ms from config when no :ttl_ms is given" do
+      TestOrchestrator.put_env(lease_ttl_ms: 120_000)
+      at = now()
+      :sys.get_state(start_supervised!({Lease, store: Store, owner: "m2"}))
+
+      assert_in_delta lease_expiry("m2"), at + 120_000, 5_000
+    end
+
+    test "accepts lease_ttl_ms from 3 ms to one hour, and refuses either side" do
+      for ttl <- [3, 3_600_000] do
+        pid = start_lease!("m2", ttl_ms: ttl)
+        assert Process.alive?(pid)
+        stop_supervised!(Lease)
+      end
+
+      for ttl <- [2, 3_600_001, 0, -90_000, 90.0, "90000"] do
+        assert {:error, {{%ArgumentError{message: message}, _stack}, _child}} =
+                 start_supervised({Lease, store: Store, owner: "m2", ttl_ms: ttl})
+
+        assert message =~ "lease_ttl_ms"
+      end
+    end
+  end
+
+  describe "takeover" do
+    test "claims and adopts an expired owner's signed record: list_ids names it" do
+      %{id: id} = orphaned_task("m1")
+      expire!("m1")
+
+      start_lease!("m2")
+
+      assert Orchestrator.list_ids() == [id]
+      assert {:ok, record} = Store.get(id)
+      assert record.owner == "m2"
+      assert TrackingStore.sealed?(record)
+      assert pod_status(id) == :running
+    end
+
+    test "control: claims nothing while the owner's lease is live" do
+      %{id: id} = orphaned_task("m1")
+      :ok = Store.renew_lease("m1", now() + @ttl)
+
+      start_lease!("m2")
+
+      assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m1"}} = Store.get(id)
+    end
+
+    test "deletes a claimed record whose pod is gone, as a boot does" do
+      %{id: id} = orphaned_task("m1")
+      :ok = Mock.forget(id)
+      expire!("m1")
+
+      start_lease!("m2")
+
+      assert Orchestrator.list_ids() == []
+      assert Store.get(id) == :error
+    end
+
+    test "a node that cannot renew its own lease claims nothing" do
+      %{id: id} = orphaned_task("m1")
+      expire!("m1")
+
+      log = capture_log(fn -> start_lease!("m2", store: RenewFails) end)
+
+      assert log =~ "could not renew the lease of \"m2\""
+      assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m1"}} = Store.get(id)
+    end
+
+    test "leaves an unsigned record of an expired owner, and logs it once" do
+      %{id: id} = orphaned_task("m1")
+      {:ok, record} = Store.get(id)
+      put_row!(Map.delete(record, :mac))
+      expire!("m1")
+
+      log =
+        capture_log(fn ->
+          pid = start_lease!("m2")
+          tick!(pid)
+        end)
+
+      assert [_once] = String.split(log, "not taking over #{inspect(id)}") |> tl()
+      assert Orchestrator.list_ids() == []
+      assert {:ok, %{owner: "m1"}} = Store.get(id)
+      assert pod_status(id) == :running
+    end
+  end
+end
