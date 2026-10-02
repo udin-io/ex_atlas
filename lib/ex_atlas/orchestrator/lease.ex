@@ -59,7 +59,7 @@ defmodule ExAtlas.Orchestrator.Lease do
   require Logger
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Adopter, ComputeServer, TrackingStore}
+  alias ExAtlas.Orchestrator.{Adopter, ComputeServer, Ownership, TrackingStore}
 
   @default_ttl_ms 90_000
   # A dead node's tasks wait out the whole ttl before another node tracks them.
@@ -72,6 +72,8 @@ defmodule ExAtlas.Orchestrator.Lease do
   # An orphan of a dead owner bills for the whole window.
   @max_window_ms 86_400_000
 
+  @dead_owners_timeout_ms 5_000
+
   @doc false
   def child_spec(opts) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
@@ -80,7 +82,8 @@ defmodule ExAtlas.Orchestrator.Lease do
   @doc """
   Options: `:store` and `:owner` (required), `:ttl_ms` (default
   `config :ex_atlas, :orchestrator, lease_ttl_ms:`, else 90 s), and
-  `:clock`, a 0-arity function returning wall-clock milliseconds.
+  `:clock`, a 0-arity function returning wall-clock milliseconds, and
+  `:monotonic`, one returning monotonic milliseconds.
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -101,7 +104,10 @@ defmodule ExAtlas.Orchestrator.Lease do
       ttl_ms: ttl,
       window_ms: window!(configured_window(ttl), ttl),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
+      monotonic: Keyword.get(opts, :monotonic, fn -> System.monotonic_time(:millisecond) end),
       renewed_at: nil,
+      renewed_mono: nil,
+      watch: %{},
       held_since: nil,
       adopting: nil,
       skipped: MapSet.new()
@@ -109,6 +115,28 @@ defmodule ExAtlas.Orchestrator.Lease do
 
     send(self(), :tick)
     {:ok, state}
+  end
+
+  @doc """
+  The owners this node reads as dead, each with its lease's expiry in
+  wall-clock ms: `%{"m1" => 1_790_000_000_000}`.
+
+  An owner is dead when its lease has stayed expired, with the same expiry,
+  for `:reap_dead_owner_after_ms` on this node's monotonic clock, while this
+  node renewed its own lease every time, and a read at the call still finds
+  that expiry. Answers `%{}` when no Lease runs, when the store has no
+  `expired_leases/1`, and when this node's last renewal is a ttl old.
+  """
+  @spec dead_owners() :: %{optional(String.t()) => integer()}
+  def dead_owners do
+    GenServer.call(__MODULE__, :dead_owners, @dead_owners_timeout_ms)
+  catch
+    :exit, _not_running_or_slow -> %{}
+  end
+
+  @impl GenServer
+  def handle_call(:dead_owners, _from, state) do
+    {:reply, confirmed_dead(state, state.monotonic.()), state}
   end
 
   @impl GenServer
@@ -143,7 +171,8 @@ defmodule ExAtlas.Orchestrator.Lease do
   defp renew(state, now) do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
       :ok ->
-        state = hold(state, now)
+        held = hold(state, now)
+        state = watch(held, now, held.held_since == state.held_since)
         release_lost_trackers(state)
         if claiming?(state, now), do: claim(state, now), else: state
 
@@ -153,7 +182,7 @@ defmodule ExAtlas.Orchestrator.Lease do
             "(#{inspect(other)}); claiming nothing until it renews."
         )
 
-        state
+        %{state | watch: %{}}
     end
   end
 
@@ -226,6 +255,66 @@ defmodule ExAtlas.Orchestrator.Lease do
     do: %{state | renewed_at: now}
 
   defp hold(state, now), do: %{state | renewed_at: now, held_since: now}
+
+  # Called after each renewal that succeeded. The watch holds each expired
+  # owner with its expiry and the monotonic ms it was first seen with that
+  # expiry. It starts again whenever this node's own hold may have broken:
+  # `hold/2` restarted it (a ttl gap on the wall clock), or a ttl passed on
+  # the monotonic clock since the last renewal.
+  defp watch(state, now, hold_kept?) do
+    mono = state.monotonic.()
+
+    held? =
+      hold_kept? and is_integer(state.renewed_mono) and mono - state.renewed_mono < state.ttl_ms
+
+    watch = if held?, do: state.watch, else: %{}
+    %{state | renewed_mono: mono, watch: observe(state, watch, now, mono)}
+  end
+
+  defp observe(state, watch, now, mono) do
+    if function_exported?(state.store, :expired_leases, 1) do
+      case safely(fn -> state.store.expired_leases(now) end) do
+        {:ok, expired} when is_map(expired) ->
+          for {owner, at} <- expired, Ownership.valid?(owner), is_integer(at), into: %{} do
+            case watch do
+              %{^owner => {^at, since}} -> {owner, {at, since}}
+              _new_or_moved -> {owner, {at, mono}}
+            end
+          end
+
+        other ->
+          Logger.warning(
+            "[ExAtlas.Orchestrator.Lease] could not read expired leases (#{inspect(other)}); " <>
+              "no owner reads as dead for a full :reap_dead_owner_after_ms after the next read."
+          )
+
+          %{}
+      end
+    else
+      %{}
+    end
+  end
+
+  # The watch is up to a third of a ttl old: an owner back from the dead may
+  # have renewed since. Read the leases again and keep only an expiry that
+  # has not moved.
+  defp confirmed_dead(state, mono) do
+    candidates =
+      for {owner, {at, since}} <- state.watch,
+          mono - since >= state.window_ms,
+          into: %{},
+          do: {owner, at}
+
+    still_holding? = is_integer(state.renewed_mono) and mono - state.renewed_mono < state.ttl_ms
+
+    with true <- still_holding? and candidates != %{},
+         {:ok, expired} when is_map(expired) <-
+           safely(fn -> state.store.expired_leases(state.clock.()) end) do
+      Map.filter(candidates, fn {owner, at} -> Map.get(expired, owner) == at end)
+    else
+      _nothing_to_confirm -> %{}
+    end
+  end
 
   # On every renewal, not only after a lapse this node's clock saw: skew, a
   # late write, a forged expiry or a claim before this node's first renewal

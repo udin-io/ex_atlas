@@ -47,6 +47,38 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     def claim_expired(_claimer, _now_ms, _rewrite), do: {:ok, :not_a_list}
   end
 
+  defmodule Flaky do
+    @moduledoc false
+    # The Ecto store whose lease calls fail while the test lists them in
+    # `config :ex_atlas, :lease_test_failing`: a node cut off for one tick.
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate all(), to: Store
+    defdelegate get(id), to: Store
+    defdelegate claim_expired(claimer, now_ms, rewrite), to: Store
+
+    def renew_lease(owner, at),
+      do:
+        if(failing?(:renew_lease), do: {:error, :unreachable}, else: Store.renew_lease(owner, at))
+
+    def expired_leases(now),
+      do:
+        if(failing?(:expired_leases), do: {:error, :unreachable}, else: Store.expired_leases(now))
+
+    defp failing?(call), do: call in Application.get_env(:ex_atlas, :lease_test_failing, [])
+  end
+
+  defmodule NoExpiredLeases do
+    @moduledoc false
+    # A custom store with leases and claims, written before expired_leases/1.
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate all(), to: Store
+    defdelegate get(id), to: Store
+    defdelegate renew_lease(owner, expires_at_ms), to: Store
+    defdelegate claim_expired(claimer, now_ms, rewrite), to: Store
+  end
+
   setup %{tmp_dir: dir} do
     Repo.start!(dir)
     TestOrchestrator.start!(tracking_store: Store)
@@ -241,6 +273,254 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
         assert Process.alive?(pid)
         stop_supervised!(Lease)
       end
+    end
+  end
+
+  describe "dead_owners/0" do
+    # The shortest window the setting allows, so a test steps through it in
+    # six renewals.
+    @window 2 * @ttl
+    @step div(@ttl, 3)
+
+    setup do
+      TestOrchestrator.put_env(reap_dead_owner_after_ms: @window)
+      on_exit(fn -> Application.delete_env(:ex_atlas, :lease_test_failing) end)
+    end
+
+    # A Lease on two clocks the test steps: the wall clock it renews and
+    # reads expiries with, and the monotonic clock it times the window on.
+    defp watching_lease!(owner, opts \\ []) do
+      {:ok, wall} = Agent.start_link(&now/0)
+      {:ok, mono} = Agent.start_link(fn -> 0 end)
+
+      pid =
+        start_lease!(
+          owner,
+          Keyword.merge(
+            [clock: fn -> Agent.get(wall, & &1) end, monotonic: fn -> Agent.get(mono, & &1) end],
+            opts
+          )
+        )
+
+      %{pid: pid, wall: wall, mono: mono}
+    end
+
+    defp step!(lease, wall_ms, mono_ms) do
+      Agent.update(lease.wall, &(&1 + wall_ms))
+      Agent.update(lease.mono, &(&1 + mono_ms))
+      tick!(lease.pid)
+    end
+
+    # Both clocks run on together for `ms`, with a renewal every third of a
+    # ttl, as a live node renews.
+    defp run_for!(lease, ms) when ms <= @step, do: step!(lease, ms, ms)
+
+    defp run_for!(lease, ms) do
+      step!(lease, @step, @step)
+      run_for!(lease, ms - @step)
+    end
+
+    defp fail!(calls), do: Application.put_env(:ex_atlas, :lease_test_failing, calls)
+
+    test "an owner expired and unchanged for the whole window is dead; a ms short, it is not" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+
+      run_for!(lease, @window - 1)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, 1)
+      assert Lease.dead_owners() == %{"m1" => lease_expiry("m1")}
+    end
+
+    test "control: an owner that renews mid-window, still expired, starts a new window" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      run_for!(lease, div(@window, 2))
+
+      :ok = Store.renew_lease("m1", lease_expiry("m1") - 1_000)
+      run_for!(lease, @window)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, @step)
+      assert Lease.dead_owners() == %{"m1" => lease_expiry("m1")}
+    end
+
+    test "control: an owner that renews its lease into the future is never dead" do
+      :ok = Store.renew_lease("m1", now() + 10 * @window)
+      lease = watching_lease!("m2")
+
+      run_for!(lease, 2 * @window)
+
+      assert Lease.dead_owners() == %{}
+    end
+
+    # A node that just booted, or came back from its own outage, waits a full
+    # window before it reads anyone as dead.
+    test "a Lease restarted near the end of a window waits a full new window" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      run_for!(lease, @window - @step)
+
+      stop_supervised!(Lease)
+
+      lease = %{
+        lease
+        | pid:
+            start_lease!("m2",
+              clock: fn -> Agent.get(lease.wall, & &1) end,
+              monotonic: fn -> Agent.get(lease.mono, & &1) end
+            )
+      }
+
+      run_for!(lease, @window - 1)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, 1)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "one failed renewal of its own lease clears the watch for a full new window" do
+      expire!("m1")
+      lease = watching_lease!("m2", store: Flaky)
+      run_for!(lease, @window)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+
+      fail!([:renew_lease])
+      capture_log(fn -> run_for!(lease, @step) end)
+      assert Lease.dead_owners() == %{}
+
+      fail!([])
+      run_for!(lease, @window)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, @step)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "one failed read of the expired leases clears the watch for a full new window" do
+      expire!("m1")
+      lease = watching_lease!("m2", store: Flaky)
+      run_for!(lease, @window)
+
+      fail!([:expired_leases])
+      log = capture_log(fn -> run_for!(lease, @step) end)
+      assert log =~ "could not read expired leases"
+      assert Lease.dead_owners() == %{}
+
+      fail!([])
+      run_for!(lease, @window)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, @step)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    # The wall clock jumped a full ttl between two renewals: by it, this
+    # node's own lease lapsed, and every live owner may have read expired.
+    test "a gap of a full ttl between its renewals on the wall clock starts a new window" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      run_for!(lease, @window - @step)
+
+      step!(lease, @ttl, @step)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, @window - 1)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, 1)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "a gap of a full ttl between its renewals on the monotonic clock starts a new window" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      run_for!(lease, @window - @step)
+
+      step!(lease, @step, @ttl)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, @window - 1)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, 1)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "nothing is dead once its own last renewal is a ttl old" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      run_for!(lease, @window)
+
+      Agent.update(lease.mono, &(&1 + @ttl))
+
+      assert Lease.dead_owners() == %{}
+    end
+
+    # The watch is up to a third of a ttl old at the call. An owner back
+    # from the dead renews in that time, before its first pod is past grace.
+    test "an owner that renewed since the last tick is not dead" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      run_for!(lease, @window)
+
+      :ok = Store.renew_lease("m1", lease_expiry("m1") - 1_000)
+      assert Lease.dead_owners() == %{}
+
+      :ok = Store.renew_lease("m1", now() + @ttl)
+      assert Lease.dead_owners() == %{}
+    end
+
+    # Each moves one source away from the monotonic clock: an expiry 26 years
+    # old, or this node's wall clock a day ahead of a live owner's lease.
+    test "a lease row backdated by years waits out the whole window" do
+      :ok = Store.renew_lease("m1", DateTime.to_unix(~U[2000-01-01 00:00:00Z], :millisecond))
+      lease = watching_lease!("m2")
+
+      run_for!(lease, @window - 1)
+      assert Lease.dead_owners() == %{}
+
+      run_for!(lease, 1)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "a wall clock a day ahead makes no live owner dead" do
+      :ok = Store.renew_lease("m1", now() + @ttl)
+      lease = watching_lease!("m2")
+      run_for!(lease, @step)
+
+      step!(lease, 86_400_000, @step)
+      run_for!(lease, @window - 2 * @step - 1)
+
+      assert Lease.dead_owners() == %{}
+    end
+
+    test "an expired lease whose owner no pod name can carry is never dead" do
+      for owner <- ["M1", "a-b", String.duplicate("a", 33)], do: expire!(owner)
+      expire!("m1")
+      lease = watching_lease!("m2")
+
+      run_for!(lease, 2 * @window)
+
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "answers %{} when no Lease runs" do
+      assert Lease.dead_owners() == %{}
+    end
+
+    test "a store without expired_leases/1: nothing dead, and nothing logged" do
+      expire!("m1")
+
+      log =
+        capture_log(fn ->
+          lease = watching_lease!("m2", store: NoExpiredLeases)
+          run_for!(lease, 2 * @window)
+        end)
+
+      assert Lease.dead_owners() == %{}
+      refute log =~ "[warning]"
     end
   end
 
