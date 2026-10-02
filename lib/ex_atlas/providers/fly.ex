@@ -12,5 +12,5 @@ defmodule ExAtlas.Providers.Fly do
   use ExAtlas.Providers.Stub,
     provider: :fly,
     capabilities: [:http_proxy, :raw_tcp, :global_networking],
-    docs_url: "https://hexdocs.pm/atlas"
+    docs_url: "https://hexdocs.pm/ex_atlas"
 end

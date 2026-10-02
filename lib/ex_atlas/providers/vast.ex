@@ -11,5 +11,5 @@ defmodule ExAtlas.Providers.Vast do
   use ExAtlas.Providers.Stub,
     provider: :vast,
     capabilities: [:spot, :raw_tcp],
-    docs_url: "https://hexdocs.pm/atlas"
+    docs_url: "https://hexdocs.pm/ex_atlas"
 end

@@ -1,10 +1,10 @@
 # ExAtlas
 
-[![Hex.pm](https://img.shields.io/hexpm/v/atlas.svg)](https://hex.pm/packages/atlas)
-[![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/atlas)
+[![Hex.pm](https://img.shields.io/hexpm/v/ex_atlas.svg)](https://hex.pm/packages/ex_atlas)
+[![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/ex_atlas)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-Project docs: [docs/PROJECT.md](docs/PROJECT.md) (roadmap, architecture, risks,
+Project docs: [docs/PROJECT.md](https://github.com/udin-io/ex_atlas/blob/main/docs/PROJECT.md) (roadmap, architecture, risks,
 decisions).
 
 A composable, pluggable Elixir SDK for **infrastructure management**.
@@ -15,7 +15,7 @@ Two concerns under one roof:
    changing one option.
 2. **Fly.io platform operations.** First-class deploys, log streaming, and
    token lifecycle — independent of the compute pipeline. See
-   [`ExAtlas.Fly`](lib/atlas/fly.ex) and the [Fly guide](guides/fly.md).
+   `ExAtlas.Fly` and the [Fly guide](guides/fly.md).
 
 - **One contract, many providers.** `ExAtlas.Provider` is a behaviour; swap
   `:runpod`, `:fly`, `:lambda_labs`, `:vast`, or your own module without
@@ -27,9 +27,9 @@ Two concerns under one roof:
 - **Batteries-included orchestration.** `Registry` + `DynamicSupervisor`
   + `Phoenix.PubSub` + reaper for the "per-user transient pod" pattern.
 - **Igniter installer.** `mix igniter.install ex_atlas` wires everything up.
-- **Built for the S3-style handoff.** `ExAtlas.Auth` mints bearer tokens and
-  S3-style HMAC-signed URLs so your browser can talk directly to a pod without
-  the Phoenix app proxying every frame.
+- **Built for the S3-style handoff.** `ExAtlas.Auth.Token` mints bearer tokens and
+  `ExAtlas.Auth.SignedUrl` builds S3-style HMAC-signed URLs, so your browser
+  can talk directly to a pod without the Phoenix app proxying every frame.
 - **Pure `Req` under the hood.** Every HTTP call goes through
   [Req](https://hex.pm/packages/req), so you get retries, decoding, and
   telemetry for free.
@@ -83,7 +83,7 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_atlas, "~> 0.2"}
+    {:ex_atlas, "~> 0.7"}
   ]
 end
 ```
@@ -103,15 +103,15 @@ library consumers.
 
 ### Upgrading
 
-To upgrade atlas and run any version-specific migrations:
+To upgrade ExAtlas and run any version-specific migrations:
 
 ```bash
-mix deps.update atlas
+mix deps.update ex_atlas
 mix ex_atlas.upgrade
 ```
 
 The upgrade task is idempotent and runs only the steps needed between your
-previous and current atlas version.
+previous and current ExAtlas version.
 
 ## Architecture at a glance
 

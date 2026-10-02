@@ -5,20 +5,20 @@ if Code.ensure_loaded?(Igniter) do
     @moduledoc """
     Runs upgrade steps between ExAtlas versions.
 
-    Invoke after updating the atlas dep:
+    Invoke after updating the ex_atlas dep:
 
-        mix deps.update atlas
+        mix deps.update ex_atlas
         mix ex_atlas.upgrade
 
     Or via Igniter's aggregate upgrader:
 
-        mix igniter.upgrade atlas
+        mix igniter.upgrade ex_atlas
 
     ## Arguments
 
     When called directly by `mix igniter.upgrade`, receives `<from_version> <to_version>`.
     When called directly by you, reads versions from `mix.lock` and the current
-    atlas mix.exs; defaults to running *all* upgraders if versions can't be
+    ex_atlas mix.exs; defaults to running *all* upgraders if versions can't be
     determined.
 
     ## Registered upgraders
@@ -80,7 +80,7 @@ if Code.ensure_loaded?(Igniter) do
       ExAtlas 0.2 introduces the `ExAtlas.Fly.*` namespace (Fly.io platform ops).
 
       If your app also manages Fly tokens elsewhere, see:
-      https://hexdocs.pm/atlas/fly.html#token-lifecycle
+      https://hexdocs.pm/ex_atlas/fly.html#token-lifecycle
 
       No breaking changes to the compute API.
       """)

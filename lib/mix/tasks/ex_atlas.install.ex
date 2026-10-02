@@ -5,13 +5,13 @@ if Code.ensure_loaded?(Igniter) do
     @moduledoc """
     Installs ExAtlas into your project.
 
-    Run this once after adding `{:ex_atlas, "~> 0.2"}` to `mix.exs`:
+    Run this once after adding `{:ex_atlas, "~> 0.7"}` to `mix.exs`:
 
         mix ex_atlas.install
 
     Or use Igniter's installer entry point, which handles the dep addition too:
 
-        mix igniter.install atlas
+        mix igniter.install ex_atlas
 
     ## What it does
 
@@ -48,7 +48,7 @@ if Code.ensure_loaded?(Igniter) do
       ExAtlas installed.
 
       • Run `mix ex_atlas.upgrade` after updating the dep in the future.
-      • Fly ops: see `ExAtlas.Fly` or the guide at https://hexdocs.pm/atlas/fly.html.
+      • Fly ops: see `ExAtlas.Fly` or the guide at https://hexdocs.pm/ex_atlas/fly.html.
       • Disable the Fly sub-tree with `config :ex_atlas, :fly, enabled: false`.
 
       For containerized deploys (Mix releases) where the priv dir is
