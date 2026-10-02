@@ -85,6 +85,8 @@ sequenceDiagram
   Store->>Repo: SELECT id, record FROM atlas_tracking_records
   Repo-->>Store: rows
   Store-->>Adopter: ok with records, or error when a row will not decode
+  Adopter->>Adopter: skip and keep a record whose provider is not built in and declares no ExAtlas.Provider
+  Note over Adopter: the adopted task calls its provider at config base_url and req_options, never the record's
   Adopter->>Reaper: adoption_complete, or adoption_failed
   Note over Host,Reaper: Shutdown runs in reverse, so the trackers stop while the Repo is up and persisted rows stay
 ```

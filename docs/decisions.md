@@ -9,6 +9,10 @@ names the PR or issue that holds the reasoning.
 
 | Decision | Alternative not taken | Where |
 |---|---|---|
+| An adopted task takes `:base_url` and `:req_options` from `config :ex_atlas, <provider>`, as `:api_key`; a record stores neither, and every rewrite drops them from an older one | Keep storing them and refuse a record whose URL differs from config: it still reads a value the store's writer chose, and refuses live pods after a host changes its URL | #125 |
+| Drop all of `:req_options` from the record | Drop a list of Req keys (`base_url`, `plug`, `connect_options`): Req adds keys, and a deny-list misses them | #125 |
+| `Config.build_ctx/2` reads `base_url:` and `req_options:` from every provider's app config; per-call `req_options` merge over config key by key | Keep #85's per-client `base_url:` fallback: RunPod had none, so an adopted RunPod task would lose a proxy. On RunPod it sets the management URL, as a per-call `base_url:` does | #125 |
+| The Adopter adopts a record only when its provider is built in or declares `@behaviour ExAtlas.Provider` | Tighten `Config.provider_module/1` for every call: a caller's own `provider:` is trusted code | #125 |
 | The host starts `ExAtlas.Orchestrator.Supervisor` after its repo | The Ecto store waits or retries for the repo inside ExAtlas's tree: a retry still answers `all/0` with an error at boot, which shuts the Reaper for that boot | #120 |
 | `start_orchestrator: true` plus the host's child refuses to start, naming both | Start a second tree: it crashes on duplicate names | #120 |
 | The record is one `term_to_binary` column, plus an `owner` column for queries | A column per field: every new record field needs a migration | #120 |
@@ -99,7 +103,7 @@ names the PR or issue that holds the reasoning.
 | The exports run in a `( ... )` subshell with `docker run` | Export at script level: `DBUS_*`, `SYSTEMD_*` or `TMPDIR` from `env:` would steer `systemd-run` and `mktemp` | #85 |
 | The unit starts with any callback, with or without `command:` | Only with `command:`, as RunPod wraps only a command: the host can report the image's own command too | #85 |
 | curl retries 5 times, connection refused included | One try, as RunPod's container: `finish` is first-report-wins, and a lost report bills until `max_runtime_ms` | #85 |
-| `config :ex_atlas, :lambda_labs, base_url:` for calls with none | A base URL in `Config.build_ctx/2` for every provider: RunPod has two base URLs | #85 |
+| `config :ex_atlas, :lambda_labs, base_url:` for calls with none (moved into `Config.build_ctx/2` for every provider by #125) | A base URL in `Config.build_ctx/2` for every provider: RunPod has two base URLs | #85 |
 | An `atlas-created-at` more than 10 minutes ahead reads as absent | Clamp it to now: every list would read the instance as new, so it stays young for ever | #85 |
 | RunPod and Lambda share `Providers.Shell` quoting; each keeps its own finish snippet | Share the snippet too, as #85 planned: Lambda's reads the token from stdin on the host | #85 |
 | With a callback, a failed `docker run` still starts the unit, which reports 125 for the missing container | Stop the script: the instance billed until `max_runtime_ms` (review finding) | #85 |

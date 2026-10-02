@@ -525,6 +525,11 @@ config :ex_atlas, :lambda_labs, api_key: System.get_env("LAMBDA_LABS_API_KEY"),
                                 ssh_key_name: "deploy"   # Lambda requires one SSH key
 config :ex_atlas, :vast,        api_key: System.get_env("VAST_API_KEY")
 
+# Endpoint: per-call :base_url / :req_options > :ex_atlas / :<provider> config.
+# A task adopted after a restart reads them from config alone.
+config :ex_atlas, :runpod, base_url: "https://proxy.internal/runpod/v1",
+                           req_options: [receive_timeout: 60_000]
+
 # Start the orchestrator (Registry + Task.Supervisor + DynamicSupervisor +
 # PubSub + Reaper).
 # When false (default), ExAtlas boots no processes.
@@ -1316,6 +1321,13 @@ What an adopted task keeps:
 | The callback `task_id` | In-flight pod callbacks stop answering `410 Gone`. |
 | `max_cost` and the spend so far | The downtime counts at the last known price, so a task that spent $2 of $2.50 resumes with $0.50, and one whose budget ran out while the node was down fails with `:cost_cap` at once. |
 
+What it does not keep: `base_url:` and `req_options:`. An adopted task calls
+its provider where `config :ex_atlas, <provider>, base_url:, req_options:`
+points, as it reads `api_key:` from config, so whoever can write the store
+cannot send your key to another host. If you pass either per call to a
+`persist: true` spawn, set it in config too before you deploy; otherwise the
+adopted task calls the provider's public URL.
+
 Seven things to know before you rely on it:
 
 - **Tasks only.** `persist: true` requires `mode: :task` and is refused
@@ -1406,9 +1418,11 @@ children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
 - A row over 1 MiB, or a compressed one, is refused like any row that will
   not decode. Writes run in their own process, so a rollback of your own
   `Repo.transaction` never erases a record.
-- A decoded row is not trusted input: its `base_url:` steers the adopted
-  task's provider calls, which carry your API key (issue 125). Let only your
-  app write `atlas_tracking_records`.
+- A decoded row is not trusted input. An adopted task ignores the row's
+  `base_url:` and `req_options:` and takes them from config, and it adopts
+  only a provider that is built in or declares `ExAtlas.Provider`. The row
+  still chooses what a respawn after adoption rents, so let only your app
+  write `atlas_tracking_records`.
 
 ## Phoenix LiveDashboard integration
 
