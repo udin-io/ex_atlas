@@ -1,19 +1,23 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #70 (slice 3 of
-feature #28). It feeds the choice of the next feature. Dates are merge dates.
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #75 (slice 1 of
+feature #26). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
 | Item | Ticket | State |
 |---|---|---|
-| S3-compatible data staging: credential injection and artifact contract | #26 (milestone: Data staging) | Open, not started |
+| Data staging slice 2: `guides/data_staging.md` and a tested reference entrypoint | #72 (milestone: Data staging) | Open, after #71 |
+| Data staging slice 3: presigned-URL mode | #73 | Open, after #72 |
+| Data staging slice 4: `persist: true` with `s3:` | #74 | Open, after #71 |
 | Release 0.8.0 (owner ids, cost caps, `Timer` bound) | none filed | `CHANGELOG.md` lists it as Unreleased; `mix.exs` says 0.7.0 |
 
 ## In progress
 
-Nothing. Feature #28 closes with #70.
+| Feature | Slice | PR |
+|---|---|---|
+| S3-compatible data staging (feature #26, milestone Data staging) | Slice 1 (#71): the `s3:` option, `Spec.Staging`, `ComputeRequest.container_env/1`; `inspect(%Compute{})` hides `raw`; `env:` errors carry no values | #75 |
 
 ## Shipped
 

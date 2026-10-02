@@ -5,6 +5,23 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Data staging (feature #26)
+
+| Decision | Alternative not taken | Where |
+|---|---|---|
+| Option name `s3:` on `ComputeRequest` | `staging:`: more general, but the variables are S3 | #26 |
+| `s3:` becomes an `ExAtlas.Spec.Staging` whose `inspect/1` shows only non-secret fields | A plain map: `inspect/1` prints the secret | #26, #75 |
+| One `ComputeRequest.container_env/1` (env, callback, staging) that every provider calls | Each translator merges `Staging.env/1` itself: the next provider forgets it | #26, #75 |
+| Only `AWS_ENDPOINT_URL_S3`, never the global `AWS_ENDPOINT_URL` | The global one also redirects STS and every other AWS service | #26 |
+| Region sets `AWS_REGION` and `AWS_DEFAULT_REGION` | `AWS_REGION` only: aws-cli v1 reads `AWS_DEFAULT_REGION` | #26 |
+| An `env:` entry that `s3:` would also set is an error naming it | Either side wins silently | #26, #75 |
+| `s3:` and `env:` are validated after NimbleOptions, with messages that name keys, never values | NimbleOptions types: its `ValidationError` holds the input | #26, #75 |
+| `inspect(%Spec.Compute{})` hides `raw` | Leave it: RunPod echoes env in `raw` | #26, #75 |
+| The tracker holds `s3:` as a `Spec.Staging`, validated at the top of `Orchestrator.spawn/1`; `Config.build_ctx/2` drops `:s3` | Rely on `format_status/1`: OTP prints a crashing callback's arguments in the stacktrace, outside it | #75 review |
+| `persist: true` with `s3:` is refused until #74 | Store `s3:` like `env:`: a credential on disk | #26, #75 |
+| URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
+| ExAtlas never presigns and never calls S3 | Presign in ExAtlas: needs a SigV4 signer and host credentials | #26 |
+
 ## Cost caps (feature #28)
 
 | Decision | Alternative not taken | Where |

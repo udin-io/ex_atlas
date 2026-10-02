@@ -91,6 +91,9 @@ defmodule ExAtlas.Config do
   def build_ctx(provider, opts) do
     opts
     |> Keyword.drop(@resolved_opts)
+    # Storage credentials belong to the request alone; a tracker passes its
+    # whole opts here on every poll and terminate.
+    |> Keyword.delete(:s3)
     |> Map.new()
     |> Map.merge(%{
       provider: provider,

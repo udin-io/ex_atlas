@@ -1,0 +1,155 @@
+defmodule ExAtlas.Spec.StagingTest do
+  use ExUnit.Case, async: true
+
+  alias ExAtlas.Spec.Staging
+
+  # Distinctive strings, so a `refute =~` cannot pass on a common substring.
+  @key_id "tid-test-4b1e"
+  @secret "tsec-test-9f2c"
+  @token "tses-test-0d7a"
+
+  @full %{
+    endpoint: "https://t3.storage.dev",
+    region: "auto",
+    access_key_id: @key_id,
+    secret_access_key: @secret,
+    session_token: @token,
+    dataset_uri: "s3://bucket/datasets/abc/",
+    artifact_uri: "s3://bucket/artifacts/run-123/"
+  }
+
+  defp refute_secrets(text) do
+    for secret <- [@key_id, @secret, @token], do: refute(text =~ secret)
+  end
+
+  describe "new/1 and env/1" do
+    test "every key becomes its variable" do
+      assert {:ok, staging} = Staging.new(@full)
+
+      assert Staging.env(staging) == %{
+               "AWS_ENDPOINT_URL_S3" => "https://t3.storage.dev",
+               "AWS_REGION" => "auto",
+               "AWS_DEFAULT_REGION" => "auto",
+               "AWS_ACCESS_KEY_ID" => @key_id,
+               "AWS_SECRET_ACCESS_KEY" => @secret,
+               "AWS_SESSION_TOKEN" => @token,
+               "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
+               "ATLAS_ARTIFACT_URI" => "s3://bucket/artifacts/run-123/"
+             }
+    end
+
+    test "a keyword list works like a map" do
+      assert {:ok, staging} = Staging.new(Map.to_list(@full))
+      assert {:ok, ^staging} = Staging.new(@full)
+    end
+
+    test "a key left out sets no variable" do
+      assert {:ok, staging} = Staging.new(dataset_uri: "s3://bucket/d/")
+      assert Staging.env(staging) == %{"ATLAS_DATASET_URI" => "s3://bucket/d/"}
+    end
+
+    test "nil is no staging and no variables" do
+      assert {:ok, nil} = Staging.new(nil)
+      assert Staging.env(nil) == %{}
+    end
+
+    test "a built Staging validates again to itself" do
+      {:ok, staging} = Staging.new(@full)
+      assert {:ok, ^staging} = Staging.new(staging)
+    end
+
+    test "a bucket with dots, dashes and digits is accepted (control)" do
+      assert {:ok, _} =
+               Staging.new(dataset_uri: "s3://my-bucket.v2/data set/", region: "eu-west-1")
+    end
+
+    test "a plain-http endpoint is accepted, for a local MinIO" do
+      assert {:ok, _} = Staging.new(endpoint: "http://localhost:9000", artifact_uri: "s3://b")
+    end
+
+    test "env/1 refuses a value that Staging.new/1 did not build, without printing it" do
+      error = assert_raise ArgumentError, fn -> Staging.env(@full) end
+      assert Exception.message(error) =~ "Staging.new/1"
+      refute_secrets(Exception.message(error))
+    end
+  end
+
+  describe "inspect/1" do
+    test "shows the URIs and the endpoint and none of the three secrets" do
+      {:ok, staging} = Staging.new(@full)
+      text = inspect(staging)
+
+      assert text =~ "s3://bucket/datasets/abc/"
+      assert text =~ "https://t3.storage.dev"
+      refute_secrets(text)
+    end
+  end
+
+  describe "new/1 refusals" do
+    # Each row: the input, then text the message must hold to show which
+    # clause fired. Every input carries the three secrets where it can, so the
+    # refute below has something to find.
+    @refusals [
+      {"key id without secret", Map.delete(@full, :secret_access_key),
+       ":access_key_id and :secret_access_key go together"},
+      {"secret without key id", Map.delete(@full, :access_key_id),
+       ":access_key_id and :secret_access_key go together"},
+      {"session token without keys", %{session_token: @token, dataset_uri: "s3://bucket/d/"},
+       ":session_token needs"},
+      {"https dataset URI", %{@full | dataset_uri: "https://bucket/d/"},
+       ":dataset_uri must start with s3://"},
+      {"s3 URI with no bucket", %{@full | dataset_uri: "s3:///d/"},
+       ":dataset_uri must start with s3://"},
+      {"bad artifact URI", %{@full | artifact_uri: "/local/out"},
+       ":artifact_uri must start with s3://"},
+      {"unknown key", Map.put(@full, :bucket, "b"), "unknown key :bucket"},
+      {"neither URI", Map.drop(@full, [:dataset_uri, :artifact_uri]),
+       "needs :dataset_uri or :artifact_uri"},
+      {"ftp endpoint", %{@full | endpoint: "ftp://t3.storage.dev"},
+       ":endpoint must be an http:// or https:// URL"},
+      {"endpoint with no host", %{@full | endpoint: "https://"},
+       ":endpoint must be an http:// or https:// URL"},
+      {"non-string value", %{@full | region: 1}, ":region must be a non-empty string"},
+      {"empty string", %{@full | secret_access_key: ""},
+       ":secret_access_key must be a non-empty string"},
+      {"string keys", Map.new(@full, fn {k, v} -> {Atom.to_string(k), v} end),
+       "keys must be atoms"},
+      {"duplicate key", Map.to_list(@full) ++ [secret_access_key: @secret],
+       "duplicate key :secret_access_key"},
+      {"not a map", @secret, "expected a map or a keyword list"},
+      {"improper list", [{:dataset_uri, "s3://bucket/d/"} | @secret],
+       "expected a map or a keyword list"},
+      {"credentials in the endpoint", %{@full | endpoint: "https://u:#{@secret}@t3.storage.dev"},
+       ":endpoint must not carry user info"},
+      {"endpoint port out of range", %{@full | endpoint: "http://localhost:99999"},
+       ":endpoint must be an http:// or https:// URL"},
+      {"control character in a value", %{@full | session_token: @token <> "\nX=1"},
+       ":session_token must not hold control characters"},
+      {"space in a bucket", %{@full | dataset_uri: "s3://b c/d/"},
+       ":dataset_uri must start with s3://"},
+      {"blank bucket", %{@full | artifact_uri: "s3:// /a/"},
+       ":artifact_uri must start with s3://"},
+      {"newline in a URI path", %{@full | dataset_uri: "s3://bucket/d/\nX=1"},
+       ":dataset_uri must not hold control characters"},
+      {"space in the endpoint", %{@full | endpoint: "https://t3 storage.dev"},
+       ":endpoint must be an http:// or https:// URL"}
+    ]
+
+    for {name, input, expected} <- @refusals do
+      @input input
+      @expected expected
+
+      test "#{name} returns a value-free error on :s3" do
+        assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
+                 Staging.new(@input)
+
+        assert Exception.message(error) =~ @expected
+        refute_secrets(inspect(error))
+      end
+    end
+
+    test "the full input with the same secrets is accepted (control)" do
+      assert {:ok, %Staging{secret_access_key: @secret}} = Staging.new(@full)
+    end
+  end
+end

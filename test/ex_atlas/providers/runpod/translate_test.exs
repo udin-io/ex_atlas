@@ -544,6 +544,32 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
       refute body["cmd"] |> List.last() =~ "ATLAS_CALLBACK_URL"
     end
 
+    test "without s3: the env is env: plus auth and callback, with their precedence unchanged",
+         %{callback: callback} do
+      req =
+        Spec.ComputeRequest.new!(
+          gpu: :h100,
+          image: "x",
+          auth: :bearer,
+          callback: callback,
+          env: %{
+            "MODEL" => "llama",
+            "ATLAS_PRESHARED_KEY" => "from-env",
+            "ATLAS_TASK_ID" => "from-env"
+          }
+        )
+
+      {body, auth} = Translate.compute_request_to_pod_create(req)
+
+      assert Map.keys(body["env"]) |> Enum.sort() ==
+               ~w(ATLAS_CALLBACK_TOKEN ATLAS_CALLBACK_URL ATLAS_PRESHARED_KEY ATLAS_TASK_ID MODEL)
+
+      assert body["env"]["MODEL"] == "llama"
+      # Auth and callback variables replace an env: entry of the same name, as on main.
+      assert body["env"]["ATLAS_PRESHARED_KEY"] == auth.token
+      assert body["env"]["ATLAS_TASK_ID"] == callback.task_id
+    end
+
     test "a callback injects the three documented variables", %{callback: callback} do
       req = Spec.ComputeRequest.new!(gpu: :h100, image: "x", callback: callback)
       {body, _} = Translate.compute_request_to_pod_create(req)
@@ -1033,6 +1059,43 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
         assert {:ok, %Spec.Spend{from: nil, to: nil, total_usd: 12.34}} =
                  Translate.pod_billing_to_spend(body, "pod_9")
       end
+    end
+  end
+
+  describe "s3 staging" do
+    @s3 %{
+      endpoint: "https://t3.storage.dev",
+      region: "auto",
+      access_key_id: "tid-test-4b1e",
+      secret_access_key: "tsec-test-9f2c",
+      dataset_uri: "s3://bucket/datasets/abc/",
+      artifact_uri: "s3://bucket/artifacts/run-123/"
+    }
+
+    defp pod_env(opts) do
+      req = Spec.ComputeRequest.new!([gpu: :h100, image: "x"] ++ opts)
+      {body, _auth} = Translate.compute_request_to_pod_create(req)
+      body["env"]
+    end
+
+    test "a session token adds AWS_SESSION_TOKEN" do
+      env = pod_env(s3: Map.put(@s3, :session_token, "tses-test-0d7a"))
+      assert env["AWS_SESSION_TOKEN"] == "tses-test-0d7a"
+      assert env["AWS_ACCESS_KEY_ID"] == "tid-test-4b1e"
+    end
+
+    test "only a dataset URI sets ATLAS_DATASET_URI and no AWS_* variable" do
+      env = pod_env(s3: %{dataset_uri: "s3://bucket/d/"})
+
+      assert env == %{"ATLAS_DATASET_URI" => "s3://bucket/d/"}
+    end
+
+    test "an unrelated env: variable stays beside the staging variables" do
+      env = pod_env(env: %{"WANDB_PROJECT" => "x"}, s3: @s3)
+
+      assert env["WANDB_PROJECT"] == "x"
+      assert env["AWS_SECRET_ACCESS_KEY"] == "tsec-test-9f2c"
+      assert env["ATLAS_ARTIFACT_URI"] == "s3://bucket/artifacts/run-123/"
     end
   end
 end

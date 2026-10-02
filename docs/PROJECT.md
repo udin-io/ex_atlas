@@ -59,17 +59,17 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Public API for network volumes, templates, endpoints, spend | Shipped (feature #27, PRs #60 to #63) |
 | Orchestrator: polling, task mode, callbacks, adoption, multi-node | Shipped |
 | Cost caps with billing reconciliation (feature #28) | Shipped in #70 (slices #67, #69, #70) |
-| S3-compatible data staging (#26) | Not started |
+| S3-compatible data staging (#26) | Slice 1 of 4 in PR #75: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages
 
 | Page | Question it answers | Status |
 |---|---|---|
-| [roadmap.md](roadmap.md) | What shipped, what is next? | Current to #70 |
-| [architecture.md](architecture.md) | Which modules and processes exist? | Current to #70 |
-| [risks.md](risks.md) | What could go wrong? | Current to #70 |
-| [decisions.md](decisions.md) | Which choices shape the system? | Current to #70 |
+| [roadmap.md](roadmap.md) | What shipped, what is next? | Current to #75 |
+| [architecture.md](architecture.md) | Which modules and processes exist? | Current to #75 |
+| [risks.md](risks.md) | What could go wrong? | Current to #75 |
+| [decisions.md](decisions.md) | Which choices shape the system? | Current to #75 |
 
 There is no `uat.md`: the library has no user interface. The guides in
 `guides/` and the live test (`mix test --only runpod_live`) cover

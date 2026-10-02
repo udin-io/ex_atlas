@@ -375,8 +375,75 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
   end
 
+  describe "persist: true with s3:" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
+    end
+
+    @s3 %{
+      access_key_id: "tid-test-4b1e",
+      secret_access_key: "tsec-test-9f2c",
+      dataset_uri: "s3://bucket/datasets/abc/"
+    }
+
+    defp mock_images do
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      Enum.map(computes, & &1.image)
+    end
+
+    test "is refused on :persist before the provider is called" do
+      opts = task_opts(image: "trainer-s3-refused:latest", s3: @s3)
+
+      assert {:error, %NimbleOptions.ValidationError{key: :persist, value: true} = error} =
+               Orchestrator.run_task(opts)
+
+      assert Exception.message(error) =~ ":s3"
+      refute inspect(error) =~ "tsec-test-9f2c"
+      refute "trainer-s3-refused:latest" in mock_images()
+    end
+
+    test "without s3: still persists (control)" do
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(task_opts(image: "trainer-s3-control:latest"))
+
+      assert {:ok, %{id: _}} = Memory.get(compute.id)
+      assert "trainer-s3-control:latest" in mock_images()
+    end
+
+    test "with s3: nil still persists" do
+      assert {:ok, _pid, compute} = Orchestrator.run_task(task_opts(s3: nil))
+      assert {:ok, %{id: _}} = Memory.get(compute.id)
+    end
+
+    test "s3: without persist: true runs" do
+      assert {:ok, _pid, compute} = Orchestrator.run_task(task_opts(persist: false, s3: @s3))
+      assert :error = Memory.get(compute.id)
+    end
+  end
+
   describe "secrets" do
     @describetag :tmp_dir
+
+    test "a record built from spawn opts drops s3:" do
+      compute = %ExAtlas.Spec.Compute{id: "mock-s3", provider: :mock, status: :running}
+
+      opts =
+        task_opts(
+          s3: %{
+            access_key_id: "tid-test-4b1e",
+            secret_access_key: "tsec-test-9f2c",
+            artifact_uri: "s3://b/a"
+          },
+          env: %{"WANDB_PROJECT" => "x"}
+        )
+
+      record = TrackingStore.new(compute, opts, mode: :task)
+
+      refute Keyword.has_key?(record.opts, :s3)
+      refute inspect(record) =~ "tsec-test-9f2c"
+      # Control: the rest of the opts are kept.
+      assert record.opts[:env] == %{"WANDB_PROJECT" => "x"}
+    end
 
     test "never reach the store's bytes on disk", %{tmp_dir: dir} do
       ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})

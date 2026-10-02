@@ -3,9 +3,11 @@ defmodule ExAtlas.Spec.Compute do
   Normalized representation of a running or tracked compute resource.
 
   `:raw` holds the provider's native response for callers that need access to
-  fields ExAtlas doesn't normalize.
+  fields ExAtlas doesn't normalize. `inspect/1` leaves it out: RunPod's pod body
+  echoes the container `env`, credentials included.
   """
 
+  @derive {Inspect, except: [:raw]}
   @enforce_keys [:id, :provider, :status]
   defstruct id: nil,
             provider: nil,

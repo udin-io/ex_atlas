@@ -149,6 +149,104 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
   end
 
+  describe "a crash report of the tracker" do
+    test "holds no s3: credential and still holds the compute id" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          s3: %{
+            access_key_id: "tid-test-4b1e",
+            secret_access_key: "tsec-test-9f2c",
+            session_token: "tses-test-0d7a",
+            dataset_uri: "s3://bucket/datasets/abc/"
+          }
+        )
+
+      text = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+
+      assert text =~ compute.id
+      refute text =~ "tid-test-4b1e"
+      refute text =~ "tsec-test-9f2c"
+      refute text =~ "tses-test-0d7a"
+    end
+  end
+
+  describe "s3: credentials beyond the State line" do
+    @s3 %{
+      access_key_id: "tid-test-4b1e",
+      secret_access_key: "tsec-test-9f2c",
+      session_token: "tses-test-0d7a",
+      dataset_uri: "s3://bucket/datasets/abc/"
+    }
+
+    defp refute_s3_secrets(text) do
+      for secret <- ["tid-test-4b1e", "tsec-test-9f2c", "tses-test-0d7a"],
+          do: refute(text =~ secret)
+    end
+
+    test "a function clause crash prints no credential in its stacktrace" do
+      {:ok, pid, compute} =
+        ExAtlas.Orchestrator.spawn(
+          provider: :mock,
+          gpu: :h100,
+          image: "x",
+          status_poll_ms: false,
+          s3: @s3
+        )
+
+      ref = Process.monitor(pid)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          catch_exit(GenServer.call(pid, {:not_a_call, 1}))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+        end)
+
+      # The crash and its stacktrace were logged, so the refutes are not vacuous.
+      assert log =~ "terminating"
+      assert log =~ "handle_call"
+      assert log =~ compute.id
+      refute_s3_secrets(log)
+    end
+
+    test "the provider ctx of a status poll holds no s3:" do
+      ctx = ExAtlas.Config.build_ctx(:mock, s3: @s3, endpoint: "abc123")
+
+      refute Map.has_key?(ctx, :s3)
+      # Control: other pass-through options still reach the provider.
+      assert ctx.endpoint == "abc123"
+    end
+
+    test "an invalid s3: is an error from spawn/1, before the provider is called" do
+      assert {:error, %NimbleOptions.ValidationError{key: :s3, value: nil} = error} =
+               ExAtlas.Orchestrator.spawn(
+                 provider: :mock,
+                 gpu: :h100,
+                 image: "x-s3-invalid",
+                 s3: Map.delete(@s3, :secret_access_key)
+               )
+
+      refute_s3_secrets(inspect(error))
+      {:ok, computes} = ExAtlas.list_compute(provider: :mock)
+      refute Enum.any?(computes, &(&1.image == "x-s3-invalid"))
+    end
+
+    test "spawn_compute/2 refuses s3: in its provider opts" do
+      req = ExAtlas.Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+
+      error =
+        assert_raise ArgumentError, fn ->
+          ExAtlas.spawn_compute(req, provider: :mock, s3: @s3)
+        end
+
+      assert Exception.message(error) =~ "ComputeRequest"
+      refute_s3_secrets(Exception.message(error))
+    end
+  end
+
   describe "upstream status polling" do
     setup do
       # Idle TTL and heartbeat are pushed far out so nothing but the status
@@ -305,6 +403,29 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       assert is_binary(token)
       assert {:error, :not_tracked} = ExAtlas.Orchestrator.info(old_id)
       assert new_id in ExAtlas.Orchestrator.list_ids()
+    end
+
+    test "a replacement is spawned with the same s3: staging", %{base: base} do
+      s3 = %{
+        access_key_id: "tid-test-4b1e",
+        secret_access_key: "tsec-test-9f2c",
+        dataset_uri: "s3://bucket/datasets/abc/"
+      }
+
+      {:ok, _pid, compute} = ExAtlas.Orchestrator.spawn([s3: s3] ++ base)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+      old_id = compute.id
+
+      # Control: the Mock records the staging it was asked for.
+      assert %{dataset_uri: "s3://bucket/datasets/abc/"} = compute.raw.request.s3
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+
+      assert {:ok, %{compute: replacement}} = ExAtlas.Orchestrator.info(new_id)
+
+      assert %{dataset_uri: "s3://bucket/datasets/abc/", secret_access_key: "tsec-test-9f2c"} =
+               replacement.raw.request.s3
     end
 
     test "a preempted pod still present upstream is terminated, not abandoned", %{base: base} do

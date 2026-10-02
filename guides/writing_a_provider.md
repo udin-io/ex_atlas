@@ -24,7 +24,9 @@ defmodule MyCloud.Provider do
       # translate ExAtlas.Spec.ComputeRequest into MyCloud's native shape
       "gpu" => translate_gpu(req.gpu),
       "image" => req.image,
-      "ports" => Enum.map(req.ports, fn {p, _} -> p end)
+      "ports" => Enum.map(req.ports, fn {p, _} -> p end),
+      # env:, the callback variables and the s3: staging variables, in one map
+      "env" => Spec.ComputeRequest.container_env(req)
     }
 
     case Req.post(client, url: "/instances", json: body) do
@@ -68,6 +70,12 @@ defmodule MyCloud.Provider do
   end
 end
 ```
+
+Build the container environment from `ExAtlas.Spec.ComputeRequest.container_env/1`,
+never from `req.env` alone. It returns `:env`, the `ATLAS_CALLBACK_*` variables
+of a `:callback` and the `AWS_*` and `ATLAS_*` variables of an `s3:` staging.
+A provider that reads `req.env` drops the callback and the staging silently.
+Add any provider-specific variables (RunPod adds its auth token) on top.
 
 ## Use it right away
 

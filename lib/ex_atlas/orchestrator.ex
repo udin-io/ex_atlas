@@ -139,6 +139,10 @@ defmodule ExAtlas.Orchestrator do
   tracker starts, so the next boot can re-adopt it instead of letting the
   Reaper reclaim it as an orphan. See `ExAtlas.Orchestrator.TrackingStore` for
   what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
+
+  `persist: true` with `s3:` returns `{:error, %NimbleOptions.ValidationError{key:
+  :persist}}` before the provider is called: a record never holds the storage
+  credentials, so an adopted task would respawn without them.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}
@@ -147,12 +151,26 @@ defmodule ExAtlas.Orchestrator do
     ensure_running!()
 
     with {:ok, opts} <- Callback.prepare(opts),
+         {:ok, opts} <- stage(opts),
          {:ok, tracking} <- ComputeServer.validate_opts(opts),
          {:ok, opts} <- Ownership.stamp(opts),
          {:ok, compute} <- ExAtlas.spawn_compute(opts),
          :ok <- require_price(compute, opts, tracking) do
       persist(compute, opts, tracking)
       track(compute, opts, tracking)
+    end
+  end
+
+  # The tracker keeps its opts for the life of the task and passes them to every
+  # respawn. A raw `s3:` map there prints its credentials in any stacktrace that
+  # carries the state; a `Spec.Staging` prints none.
+  defp stage(opts) do
+    case Keyword.fetch(opts, :s3) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, s3} ->
+        with {:ok, staging} <- Spec.Staging.new(s3), do: {:ok, Keyword.put(opts, :s3, staging)}
     end
   end
 

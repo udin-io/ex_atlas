@@ -351,8 +351,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   @spec validate_opts(keyword()) ::
           {:ok, keyword()} | {:error, NimbleOptions.ValidationError.t()}
   def validate_opts(opts) do
-    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema) do
-      validate_persist_mode(tracking)
+    with {:ok, tracking} <- opts |> Keyword.take(@option_keys) |> NimbleOptions.validate(@schema),
+         {:ok, tracking} <- validate_persist_mode(tracking) do
+      validate_persist_staging(tracking, Keyword.get(opts, :s3))
     end
   end
 
@@ -379,6 +380,25 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
            "invalid value for :persist option: only mode: :task can be persisted and adopted. " <>
              "An interactive session's auth token is never stored, so an adopted one would be " <>
              "unreachable and would bill for another idle TTL."
+       }}
+    else
+      {:ok, tracking}
+    end
+  end
+
+  # A record never holds `s3:` credentials, so an adopted task would respawn
+  # with no storage access and run broken work. Refused until records can keep
+  # the non-secret fields and refuse that respawn (issue 74).
+  defp validate_persist_staging(tracking, s3) do
+    if tracking[:persist] and s3 != nil do
+      {:error,
+       %NimbleOptions.ValidationError{
+         key: :persist,
+         value: true,
+         message:
+           "invalid value for :persist option: a task with :s3 cannot be persisted yet. " <>
+             "A tracking record never stores the :s3 credentials, so an adopted task " <>
+             "would respawn without them."
        }}
     else
       {:ok, tracking}

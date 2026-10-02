@@ -104,6 +104,107 @@ defmodule ExAtlas.Providers.RunPodTest do
 
       assert {:ok, _} = ExAtlas.spawn_compute([gpu: :h100, image: "x"] ++ opts)
     end
+
+    test "s3: puts the seven staging variables into the POST body env", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:env, Jason.decode!(raw)["env"]})
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      assert {:ok, %{id: "p1"}} =
+               ExAtlas.spawn_compute(
+                 [
+                   gpu: :h100,
+                   image: "x",
+                   s3: %{
+                     endpoint: "https://t3.storage.dev",
+                     region: "auto",
+                     access_key_id: "tid-test-4b1e",
+                     secret_access_key: "tsec-test-9f2c",
+                     dataset_uri: "s3://bucket/datasets/abc/",
+                     artifact_uri: "s3://bucket/artifacts/run-123/"
+                   }
+                 ] ++ opts
+               )
+
+      assert_receive {:env, env}
+
+      assert env == %{
+               "AWS_ENDPOINT_URL_S3" => "https://t3.storage.dev",
+               "AWS_REGION" => "auto",
+               "AWS_DEFAULT_REGION" => "auto",
+               "AWS_ACCESS_KEY_ID" => "tid-test-4b1e",
+               "AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c",
+               "ATLAS_DATASET_URI" => "s3://bucket/datasets/abc/",
+               "ATLAS_ARTIFACT_URI" => "s3://bucket/artifacts/run-123/"
+             }
+    end
+
+    test "an invalid s3: raises before any request reaches RunPod", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      test_pid = self()
+
+      Bypass.stub(bypass, "POST", "/pods", fn conn ->
+        send(test_pid, :posted)
+        json(conn, 201, pod("p1", "RUNNING", "t"))
+      end)
+
+      error =
+        assert_raise NimbleOptions.ValidationError, fn ->
+          ExAtlas.spawn_compute(
+            [
+              gpu: :h100,
+              image: "x",
+              s3: %{access_key_id: "tid-test-4b1e", dataset_uri: "s3://bucket/d/"}
+            ] ++ opts
+          )
+        end
+
+      assert error.key == :s3
+      refute inspect(error) =~ "tid-test-4b1e"
+      # The valid-s3: test above is the control: the same stub path does POST.
+      refute_received :posted
+    end
+
+    test "a string-keyed s3 option raises without printing it", %{ctx_opts: opts} do
+      error =
+        assert_raise ArgumentError, fn ->
+          ExAtlas.spawn_compute(
+            [gpu: :h100, image: "x"] ++ opts ++ [{"s3", %{secret_access_key: "tsec-test-9f2c"}}]
+          )
+        end
+
+      refute Exception.message(error) =~ "tsec-test-9f2c"
+    end
+
+    test "inspect of the compute omits the env RunPod echoes back", %{
+      bypass: bypass,
+      ctx_opts: opts
+    } do
+      Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+        json(conn, 201, Map.put(pod("p1", "RUNNING", "t"), "env", body["env"]))
+      end)
+
+      {:ok, compute} =
+        ExAtlas.spawn_compute(
+          [gpu: :h100, image: "x", env: %{"AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"}] ++ opts
+        )
+
+      # Control: the response did echo the secret, and `raw` still keeps it.
+      assert compute.raw["env"]["AWS_SECRET_ACCESS_KEY"] == "tsec-test-9f2c"
+      assert inspect(compute) =~ ~s(id: "p1")
+      refute inspect(compute) =~ "tsec-test-9f2c"
+    end
   end
 
   describe "get_compute/2" do

@@ -101,6 +101,12 @@ defmodule ExAtlas do
   """
   @spec spawn_compute(opts()) :: {:ok, Spec.Compute.t()} | {:error, term()}
   def spawn_compute(opts) when is_list(opts) do
+    # Checked here, not by `Keyword.split/2` below: a non-atom key would skip
+    # validation and reach the provider ctx, credentials and all.
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError, "spawn_compute/1 expects a keyword list with atom keys"
+    end
+
     {provider, opts} = Config.pop_provider!(opts)
     {request_opts, config_opts} = split_compute_request_opts(opts)
     req = Spec.ComputeRequest.new!(request_opts)
@@ -111,6 +117,12 @@ defmodule ExAtlas do
   @spec spawn_compute(Spec.ComputeRequest.t(), opts()) ::
           {:ok, Spec.Compute.t()} | {:error, term()}
   def spawn_compute(%Spec.ComputeRequest{} = req, opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :s3) do
+      raise ArgumentError,
+            "s3: belongs to the ComputeRequest; pass it to ComputeRequest.new/1, " <>
+              "not to spawn_compute/2's provider opts"
+    end
+
     {provider, opts} = Config.pop_provider!(opts)
     ctx = Config.build_ctx(provider, opts)
     provider |> Config.provider_module() |> apply(:spawn_compute, [req, ctx])
@@ -467,6 +479,7 @@ defmodule ExAtlas do
     :command,
     :self_terminate,
     :callback,
+    :s3,
     :provider_opts
   ]
 
