@@ -27,6 +27,12 @@ defmodule ExAtlas.Providers.Vast.Translate do
   # The largest offer page Vast returns.
   @search_limit 64
 
+  # The instance fields `raw` keeps: none holds an env value or a credential.
+  @raw_keys ~w(id actual_status intended_status cur_state next_state label image_uuid
+               image_runtype public_ipaddr ports gpu_name num_gpus gpu_ram gpu_totalram
+               dph_total dph_base geolocation start_date end_date machine_id host_id
+               ssh_host ssh_port disk_space is_bid)
+
   @env_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
 
   @typedoc """
@@ -180,8 +186,10 @@ defmodule ExAtlas.Providers.Vast.Translate do
   @doc """
   Turn a Vast instance into an `ExAtlas.Spec.Compute`.
 
-  `raw` drops `extra_env` and `onstart`, which echo the env values, and
-  `jupyter_token`.
+  `raw` keeps only the fields in `#{inspect(@raw_keys)}`. Vast's body also
+  echoes the env values (`extra_env`, `onstart`), the container's arguments
+  and the Jupyter token, and `list_compute/1` reads instances ExAtlas did not
+  start, so a field Vast adds later stays out too.
   """
   @spec instance_to_compute(map()) :: Spec.Compute.t()
   def instance_to_compute(%{} = instance) do
@@ -200,7 +208,7 @@ defmodule ExAtlas.Providers.Vast.Translate do
       image: string_or_nil(instance["image_uuid"]),
       name: string_or_nil(instance["label"]),
       created_at: started_at(instance["start_date"]),
-      raw: Map.drop(instance, ["extra_env", "onstart", "jupyter_token"])
+      raw: Map.take(instance, @raw_keys)
     }
   end
 

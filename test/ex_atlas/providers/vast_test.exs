@@ -83,6 +83,28 @@ defmodule ExAtlas.Providers.VastTest do
       refute Map.has_key?(compute.raw, "onstart")
     end
 
+    # `list_compute/1` lists every instance on the account, ExAtlas's or not,
+    # and a field Vast adds later may carry a value too, so raw keeps only
+    # fields known to hold none.
+    test "raw keeps no field it does not know: image_args, status_msg, a new one", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      expect_instance(
+        bypass,
+        instance(%{
+          "image_args" => ["serve", "--api-key", "args-secret-4e1"],
+          "status_msg" => "pulled with token args-secret-4e1",
+          "some_new_field" => "args-secret-4e1"
+        })
+      )
+
+      assert {:ok, compute} = ExAtlas.get_compute("28411907", opts)
+
+      assert compute.raw["gpu_name"] == "RTX 4090"
+      refute inspect(compute.raw) =~ "args-secret-4e1"
+    end
+
     test "a port Vast has not mapped yet has no URL", %{bypass: bypass, opts: opts} do
       expect_instance(bypass, instance(%{"ports" => %{}, "actual_status" => "loading"}))
 
