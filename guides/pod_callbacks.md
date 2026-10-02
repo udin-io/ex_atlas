@@ -122,8 +122,12 @@ The container gets three environment variables:
 
 `/finish` is already handled for you: the self-termination wrapper ExAtlas
 generates POSTs the exit code from its `trap`, before deleting the pod. On
-Lambda Labs the instance's host POSTs it once `docker wait` returns, and the
-tracker deletes the instance. You only write code for progress and logs.
+Lambda Labs the instance's host POSTs it once `docker wait` returns, or 125
+when the container never ran, and the tracker deletes the instance. You only
+write code for progress and logs.
+
+The callback URL takes no userinfo, query or fragment: the pod appends
+`/finish` to it.
 
 ```sh
 #!/bin/sh

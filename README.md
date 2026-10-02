@@ -608,7 +608,7 @@ compute.ports
   (and `base_url:` for a proxy).
 - `env:` names starting `DOCKER_` or `LD_` are refused: the script exports
   each value for `docker run` on the host, where docker and the loader read
-  them.
+  them. So are names bash keeps for itself (`UID`, `RANDOM`, `BASH_*`).
 
 ### Canonical GPU atoms
 

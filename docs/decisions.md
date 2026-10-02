@@ -37,6 +37,11 @@ names the PR or issue that holds the reasoning.
 | `config :ex_atlas, :lambda_labs, base_url:` for calls with none | A base URL in `Config.build_ctx/2` for every provider: RunPod has two base URLs | #85 |
 | An `atlas-created-at` more than 10 minutes ahead reads as absent | Clamp it to now: every list would read the instance as new, so it stays young for ever | #85 |
 | RunPod and Lambda share `Providers.Shell` quoting; each keeps its own finish snippet | Share the snippet too, as #85 planned: Lambda's reads the token from stdin on the host | #85 |
+| With a callback, a failed `docker run` still starts the unit, which reports 125 for the missing container | Stop the script: the instance billed until `max_runtime_ms` (review finding) | #85 |
+| Env names bash keeps for itself (`UID`, `RANDOM`, `BASH_*`, `COMP_*`, ...) are `:validation` | Pass them: `export UID` stops the script, and bash rewrites `RANDOM` (review finding) | #85 |
+| The unit deletes its script as it starts | Keep it until reboot: it holds the token | #85 |
+| A callback URL with userinfo, a query or a fragment is refused, for every provider | Keep accepting it: `/finish` appended after a query never reached the plug, and userinfo shows in `ps` | #85 |
+| `Orchestrator.spawn/1` in interactive mode with Lambda `command:` and `callback:` is allowed; the idle TTL ends it | Refuse it in the orchestrator for every provider without `:self_terminate`: the Mock lacks it too, and interactive Mock sessions with a command would break | #85 |
 
 ## Data staging (feature #26)
 

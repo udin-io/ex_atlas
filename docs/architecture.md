@@ -153,8 +153,9 @@ sequenceDiagram
   VM->>VM: mktemp, printf the unit script (URL, token)
   VM->>C: docker run --detach image command (exports in a subshell)
   VM->>U: systemd-run /bin/bash unit-script docker
+  U->>U: rm its own script
   U->>C: docker wait atlas
-  C-->>U: exit code
+  C-->>U: exit code, or 125 when the container never ran
   U->>CB: POST /finish exit_code, token on curl stdin
   CB->>CS: finish report
   CS->>CS: finish_grace_ms, then task completed or failed

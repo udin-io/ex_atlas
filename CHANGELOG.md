@@ -44,12 +44,26 @@ on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
 - `command:` with `self_terminate: true` (the default) and no callback is
   `:validation` before any request: Lambda gives an instance no key to
   delete itself, so nothing would end it.
-- `command:` without `image:`, and a command argument holding a NUL byte or
-  not UTF-8, are `:validation`.
+- When the container never ran (`docker run` failed) or is gone, the host
+  reports exit code 125, so the task ends at once instead of at
+  `max_runtime_ms`. The unit deletes its script, which holds the token, as
+  it starts.
+- `command:` without `image:`, a command argument or image holding a NUL
+  byte or not UTF-8, and an env name bash keeps for itself (`UID`,
+  `RANDOM`, `BASH_*`, `COMP_*`, ...) are `:validation`. bash refused to
+  export the readonly ones, which stopped the script before `docker run`.
 - `config :ex_atlas, :lambda_labs, base_url:` sets the API URL for calls that
   pass none, such as the Reaper's list.
 - An `atlas-created-at` tag more than ten minutes ahead of the clock reads
   as no `created_at`, so the Reaper gives that instance no grace window.
+
+### Fixed: a callback URL with userinfo, a query or a fragment is refused (#85)
+
+`ExAtlas.Callback.prepare/1` returns `{:error, {:invalid_callback_url,
+:has_userinfo | :has_query | :has_fragment}}`, with or without
+`allow_insecure_callback`. The pod appends `/finish`, which a query or a
+fragment swallowed, so the report never arrived; userinfo showed in `ps`
+wherever curl ran.
 
 ### Changed: spawn POSTs retry on a 429 only (#84)
 
