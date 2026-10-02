@@ -89,7 +89,7 @@ defmodule ExAtlas.Orchestrator do
   The tracking options (`:idle_ttl_ms`, `:heartbeat_ms`, `:status_poll_ms`,
   `:on_failure`, `:mode`, `:max_runtime_ms`, `:ready_timeout_ms`,
   `:finish_grace_ms`, `:callback`, `:user_id`, `:persist`, `:max_cost`,
-  `:reconcile_spend_ms`)
+  `:reconcile_spend_ms`, `:respawn_credentials`)
   are validated *before* the provider is called, so
   a typo costs nothing: an unvalidated option that only blew up in the
   tracker's `init/1` would leave the resource running — and billing — with
@@ -142,9 +142,22 @@ defmodule ExAtlas.Orchestrator do
   what is stored, and `ExAtlas.Orchestrator.Adopter` for what happens at boot.
 
   With `s3:` the record keeps the endpoint, region and URIs, never the keys or
-  presigned URLs. An adopted task runs on, but a respawn after adoption has no
-  credentials to give the replacement: it broadcasts `{:respawn_failed,
-  {reason, %ExAtlas.Error{kind: :validation}}}` and ends the task.
+  presigned URLs, and with `env:` the names alone. An adopted task runs on.
+  A respawn after adoption asks the host for the left-out values through
+  `respawn_credentials: {module, function, args}`, which needs `persist: true`:
+
+      respawn_credentials: {MyApp.Atlas, :credentials, [:trainer]}
+      # at the respawn: MyApp.Atlas.credentials(:trainer, info)
+      # info: %{id:, name:, user_id:, provider:, s3: stored_s3, env_names: [...]}
+      # => {:ok, s3: full_s3, env: %{"HF_TOKEN" => token}}
+
+  The record keeps the tuple, args included, and never what it returns.
+  `config :ex_atlas, :orchestrator, respawn_credentials:` serves a record
+  with no tuple. No resolver, another return, a raise, an exit, or no answer
+  within `respawn_credentials_timeout_ms` (default 30,000) broadcasts
+  `{:respawn_failed, {reason, %ExAtlas.Error{kind: :validation}}}` and ends
+  the task. A task that never restarted respawns with its own values. See the
+  data staging guide.
   """
   @spec spawn(keyword()) ::
           {:ok, pid(), ExAtlas.Spec.Compute.t()}

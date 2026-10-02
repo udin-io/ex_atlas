@@ -94,6 +94,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   first status poll runs immediately, since nothing has watched the resource
   since the node went down.
 
+  The record holds no `s3:` credential and no `env:` value. A respawn after
+  adoption gets them from the host's `respawn_credentials:` resolver, called
+  in a task under `ExAtlas.Orchestrator.TaskSupervisor` and bounded by
+  `respawn_credentials_timeout_ms`. They are checked as
+  `ExAtlas.Spec.ComputeRequest.new/1` checks a spawn's and sealed before the
+  replacement is rented; any failure ends the task with `{:respawn_failed,
+  _}`. They stay in this server's opts and never reach the record.
+
   A graceful node stop leaves such a task's resource running and its record
   in place: its supervisor's `:shutdown` is the one reason `terminate/2` does
   not delete for. A task whose container already reported its exit code still
