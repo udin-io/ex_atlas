@@ -23,6 +23,11 @@ defmodule ExAtlas.Spec.ComputeRequest do
   API can tell the difference. Self-termination is the only thing that turns a
   finished container into an observable event.
 
+  A provider without the `:self_terminate` capability cannot do this. Lambda
+  Labs refuses `:command` with `self_terminate: true` unless a `:callback` is
+  set: its host then reports the exit code, and the tracker deletes the
+  instance.
+
   Set `self_terminate: false` for an image with no shell or no `curl`, or when
   you want to keep the resource up for inspection after the command ends. Then
   the only thing that will ever stop it is
