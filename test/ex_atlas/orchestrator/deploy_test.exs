@@ -11,6 +11,8 @@ defmodule ExAtlas.Orchestrator.DeployTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias ExAtlas.Orchestrator
   alias ExAtlas.Orchestrator.{Adopter, Events, Reaper, TrackingStore}
   alias ExAtlas.Providers.Mock
@@ -273,6 +275,32 @@ defmodule ExAtlas.Orchestrator.DeployTest do
       crash_reaper(sup)
       tick()
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+    end
+  end
+
+  describe "a Reaper that restarts after a failed adoption" do
+    test "stays disabled for the boot and says so" do
+      Application.put_env(
+        :ex_atlas,
+        :orchestrator,
+        Keyword.put(
+          Application.get_env(:ex_atlas, :orchestrator),
+          :tracking_store,
+          ExAtlas.Test.TrackingStore.Raising
+        )
+      )
+
+      sup = boot()
+      {:ok, orphan} = spawn_orphan()
+
+      log =
+        capture_log(fn ->
+          crash_reaper(sup)
+          tick()
+        end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+      assert log =~ "reaping is DISABLED for this boot"
     end
   end
 

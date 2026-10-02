@@ -281,12 +281,13 @@ defmodule ExAtlas.Orchestrator.Adopter do
     end
   end
 
-  defp signal(notify, :adoption_complete = message) do
-    :ok = Reaper.record_adoption(:settled)
+  defp signal(notify, message) do
+    :ok = Reaper.record_adoption(outcome(message))
     send_signal(notify, message)
   end
 
-  defp signal(notify, message), do: send_signal(notify, message)
+  defp outcome(:adoption_complete), do: :settled
+  defp outcome(:adoption_failed), do: :failed
 
   defp send_signal(nil, _message), do: :ok
 

@@ -171,8 +171,8 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # supervisor the caller runs under, which the Reaper shares. Entries of dead
   # supervisors are dropped on each write, so `:persistent_term` sees one
   # write per boot.
-  @spec record_adoption(:settled) :: :ok
-  def record_adoption(outcome) when outcome in [:settled] do
+  @spec record_adoption(:settled | :failed) :: :ok
+  def record_adoption(outcome) when outcome in [:settled, :failed] do
     case tree() do
       nil ->
         :ok
