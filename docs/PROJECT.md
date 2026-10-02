@@ -9,9 +9,10 @@ structure, a risk or a decision updates the pages in the same PR.
 ## What ExAtlas is
 
 ExAtlas is an Elixir library (`ex_atlas`, version 0.8.0). It gives one
-API over GPU clouds, with RunPod as the only complete provider, plus an
-opt-in orchestrator that tracks, polls and deletes the pods you rent. It also carries Fly.io platform operations
-(deploys, log streaming, tokens) that are independent of the compute path.
+API over GPU clouds, with RunPod, Lambda Labs and Vast.ai as complete
+providers, plus an opt-in orchestrator that tracks, polls and deletes the
+pods you rent. It also carries Fly.io platform operations (deploys, log
+streaming, tokens) that are independent of the compute path.
 
 ## Public API
 
@@ -60,6 +61,7 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Cost caps with billing reconciliation (feature #28) | Shipped in #70 (slices #67, #69, #70) |
 | S3-compatible data staging (#26) | Shipped in four slices: `s3:` injects `AWS_*` and `ATLAS_*` into RunPod pods (#75); a guide and a tested entrypoint script say what the container does with them (PR #77); credentials print redacted in crash reports (#78); presigned URLs put no storage key on the pod (#80); `persist: true` with `s3:` stores no credential, and an adopted task cannot respawn (#81); `env:` values print redacted and records keep names only (#82) |
 | Lambda Labs provider (feature #83) | Shipped in three slices. Slice 1 (#84, PR #89): a container runs through cloud-init `user_data`; get, list, terminate and `list_gpu_types/1`. Slice 3 (#86, PR #91): one firewall ruleset per instance opens its `ports:`. Slice 2 (#85, PR #90): `command:`, `run_task/1` ended by the host's finish report, the Reaper. #96 (PR #97): an interactive session with a self-terminating command ends on the report too |
+| Vast.ai provider (feature #98) | Shipped in four slices. Slice 1 (#99, PR #102): rent the cheapest on-demand offer; get, list, terminate and `list_gpu_types/1`. Slice 2 (#105, PR #108): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper (with `reap_providers: [:vast]`). Slice 3 (#112, PR #113): `spot: true` rents interruptible offers, and an outbid instance respawns. Slice 4 (#116, PR #117): `stop/2`, `start/2` and `compute_spend/3`, so `max_cost` reconciles against Vast's bill |
 | Release 0.8.0 (#94) | `mix ex_atlas.upgrade` has a `"0.8.0"` step that edits no file: it warns about each module with `@behaviour ExAtlas.Provider` and about `start_orchestrator: true` with no `:reap_owner`. `guides/upgrading.md` covers the six breaking changes. The owner publishes to Hex and pushes the tag |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
@@ -67,14 +69,14 @@ See [architecture.md](architecture.md) for the modules and processes.
 
 | Page | Question it answers | Status |
 |---|---|---|
-| [roadmap.md](roadmap.md) | What shipped, what is next? | Current to #97 |
-| [architecture.md](architecture.md) | Which modules and processes exist? | Current to #97 |
-| [risks.md](risks.md) | What could go wrong? | Current to #97 |
-| [decisions.md](decisions.md) | Which choices shape the system? | Current to #97 |
+| [roadmap.md](roadmap.md) | What shipped, what is next? | Current to #117 |
+| [architecture.md](architecture.md) | Which modules and processes exist? | Current to #117 |
+| [risks.md](risks.md) | What could go wrong? | Current to #117 |
+| [decisions.md](decisions.md) | Which choices shape the system? | Current to #117 |
 
 There is no `uat.md`: the library has no user interface. The guides in
 `guides/` and the live tests (`mix test --only runpod_live`,
-`mix test --only lambda_live`) cover
+`mix test --only lambda_live`, `mix test --only vast_live`) cover
 acceptance.
 
 ## Keeping it current
