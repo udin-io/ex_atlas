@@ -7,6 +7,44 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: Lambda Labs compute provider (#84)
+
+`provider: :lambda_labs` spawns, reads, lists and terminates Lambda Cloud
+on-demand instances, and `list_gpu_types/1` reads Lambda's catalog.
+
+- A spawn with `image:` hands the instance a cloud-init `user_data` script
+  that runs the image with `docker run --gpus all`, with `env:`, `s3:`,
+  `auth:` and `ports:`. Values reach `docker` through its environment, never
+  its argv. `env:`, `s3:`, `auth:` or `ports:` without `image:` is
+  `:validation`; no image launches a plain VM.
+- The spawn picks the first of `region_hints` with capacity, else Lambda's
+  first region with capacity. `gpu_count: 8` launches `gpu_8x_<family>`.
+  `provider_opts: %{instance_type: ..., ssh_key_name: ...}`; the SSH key
+  falls back to `config :ex_atlas, :lambda_labs, ssh_key_name:`.
+- Instance tags `atlas-ports`, `atlas-created-at` and `atlas-image` let
+  `get_compute/2` and `list_compute/1` rebuild `ports`, URLs and
+  `created_at` on any node.
+- `stop/2`, `start/2`, `spot: true`, `template_id:`, `network_volume_id:`
+  and `command:` return `:unsupported`. Open `ports:` in Lambda's firewall
+  yourself for now.
+- `raw` leaves out `jupyter_token` and `jupyter_url`. A refused launch keeps
+  its status and Lambda's error code, and withholds Lambda's message, which
+  can echo `user_data`.
+- An env name starting `DOCKER_` or `LD_`, a value or image that is not
+  UTF-8, and an image starting with `-` are `:validation`.
+
+### Changed: spawn POSTs retry on a 429 only (#84)
+
+`RunPod.Pods.create/2` never retried; it now retries a 429, which means
+RunPod made nothing. A 5xx or a timeout is still returned at once, since the
+pod may exist. Lambda's launch follows the same rule
+(`ExAtlas.Providers.HTTP.retry_rate_limited/2`).
+
+### Fixed: Lambda instance type names in `Spec.GpuCatalog` (#84)
+
+`:rtx_6000` is `gpu_1x_rtx6000` and `:a100_80g` is `gpu_1x_a100_80gb_sxm4`,
+as Lambda names them. `:gh200` maps to `gpu_1x_gh200`.
+
 ### Changed: `env:` values print redacted and stay off disk (#79)
 
 A tracker crash printed every `env:` value, and a `persist: true` record

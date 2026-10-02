@@ -5,6 +5,28 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Lambda Labs provider (feature #83)
+
+| Decision | Alternative not taken | Where |
+|---|---|---|
+| Run the container through cloud-init `user_data` and `docker run` | SSH in after boot: no SSH client or private key in the library | #84 |
+| Values through `export` lines and `docker run -e NAME` | `--env-file`: it cannot hold a newline, and argv shows in `ps` | #84 |
+| The script waits up to 180 s for the Docker daemon before `docker run` | Run at once: cloud-init can reach the script before `docker.service` is up | #89 |
+| Region: the first hinted region with capacity, else Lambda's first with capacity | Require `region_hints`: Lambda requires a region, and a full one fails the launch | #84 |
+| The GPU count swaps `1x` in the catalog name; a count Lambda does not list is `:validation` before launch | A table per count | #84 |
+| SSH key from `provider_opts`, else app config, else `:validation` | The account's only key: implicit | #84 |
+| Rebuild `Compute` from instance tags | A local map of ports: lost on restart and on other nodes | #84 |
+| Spawn POSTs retry on a 429 only, on both providers | `retry: :transient` for Lambda; RunPod never retried a 429 before | #84, #89 |
+| `unhealthy` reads `:running` | `:failed`: it ends a session and deletes the instance on a status that can clear | #84 |
+| `raw` drops `jupyter_token` and `jupyter_url`, which carries the same token | Keep `raw` whole | #84, #89 |
+| `user_data` stays an `ExAtlas.Secret` until the last Req request step encodes the body | `json:`: Req's `inspect/1` prints `json` in full (risk 26) | #89 |
+| A refused launch keeps its status and only Lambda's error `code`, and always withholds Lambda's message | Withhold only a message that contains a value: the review's probes showed echoes quoted (`'\''`), JSON-escaped or cut short pass a substring check | #89 |
+| The script finds docker and waits for its daemon, then exports the values in a subshell that only runs `docker run` | Export at the top: a container `PATH` hid docker, and every value steered the host's shell | #89 |
+| Env names starting `DOCKER_` or `LD_` are `:validation` | Allow them: `docker run` reads them on the host, so `DOCKER_HOST` sends every value to another daemon | #89 |
+| An image starting with `-` is `:validation` | `--` before the image: docker CLI support unchecked on Lambda's image | #89 |
+| A missing API key raises `:unauthorized`, as RunPod does, through the shared `Providers.HTTP.bearer/3` | Return an error tuple for Lambda only | #89 |
+| `Providers.HTTP` and `ExAtlas.Auth.for_scheme/1` hold what both providers share | Copy `RunPod.Client` and RunPod's auth minting | #84, #89 |
+
 ## Data staging (feature #26)
 
 | Decision | Alternative not taken | Where |

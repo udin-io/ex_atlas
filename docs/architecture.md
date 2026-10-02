@@ -11,6 +11,8 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Host Phoenix app | Calls `ExAtlas` and `ExAtlas.Orchestrator`; subscribes to `ExAtlas.PubSub` topics `"compute:<id>"` |
 | RunPod | HTTPS through `Req` (`ExAtlas.Providers.RunPod.Client`): pods, catalog, billing, templates, volumes, endpoints, jobs |
+| Lambda Cloud API v1 | HTTPS through `Req` (`ExAtlas.Providers.LambdaLabs.Client`): instance types, launch, get, list, terminate |
+| A Lambda instance | cloud-init runs the `user_data` script ExAtlas wrote; it starts the container with `docker run` |
 | A running pod | POSTs to the host through `ExAtlas.Callback.Plug` (progress, logs, finish) |
 | Fly.io | `ExAtlas.Fly.*`: deploys, log streams, tokens |
 | A shared store | Optional host `TrackingStore` implementation (a database) |
@@ -21,10 +23,10 @@ database and no web UI. It runs inside the host application's VM.
 |---|---|
 | Facade | `ExAtlas` (`dispatch/3`, `dispatch_optional/3`), `ExAtlas.Config` (its `seal_credentials/1` wraps credentials), `ExAtlas.Secret`, `ExAtlas.Error` |
 | Contract | `ExAtlas.Provider` (behaviour, optional callbacks) |
-| Providers | `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast`, `Providers.LambdaLabs` (built with `Providers.Stub`) |
+| Providers | `Providers.HTTP` (shared `Req` plumbing and the 429-only spawn retry), `Providers.RunPod` (with `Pods`, `Jobs`, `Catalog`, `Billing`, `Templates`, `NetworkVolumes`, `Endpoints`, `Translate`, `Client`), `Providers.LambdaLabs` (with `Client`, `Translate`), `Providers.Mock`, stubs `Providers.Fly`, `Providers.Vast` (built with `Providers.Stub`) |
 | Specs | `ExAtlas.Spec.*`: `ComputeRequest` (its `container_env/1` is the env every provider sends), `Staging` (the `s3:` option), `Compute`, `Spend`, `Template`, `NetworkVolume`, `Endpoint`, `Job`, `GpuType` and the request structs |
 | Callback | `ExAtlas.Callback`, `Callback.Plug`, `Callback.Token`, `Callback.Limiter` |
-| Auth | `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` |
+| Auth | `ExAtlas.Auth` (the env and handle for each `auth:` scheme, shared by providers), `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` |
 | Orchestrator | listed below |
 | Fly ops | `ExAtlas.Fly`, `Fly.Deploy`, `Fly.Logs.*`, `Fly.Tokens.*`, `Fly.TokenStorage` (DETS) |
 | Dashboard | `ExAtlas.LiveDashboard.ComputePage` |
@@ -57,7 +59,7 @@ store, `ComputeRegistry`, the `Task.Supervisor` for polls, `ComputeSupervisor`,
 ```mermaid
 flowchart TD
   host["Host app"] -->|"spawn/1, run_task/1"| orc["Orchestrator"]
-  orc -->|"ExAtlas.spawn_compute/1"| prov["Provider (RunPod)"]
+  orc -->|"ExAtlas.spawn_compute/1"| prov["Provider (RunPod, Lambda Labs)"]
   orc -->|"persist: true"| store[("TrackingStore")]
   orc -->|"start tracker"| cs["ComputeServer"]
   cs -->|"status poll"| us["UpstreamStatus"]
@@ -93,3 +95,75 @@ flowchart TD
    `estimated_usd`, `billed_usd` and `spent_usd`.
 5. A respawn calls `CostMeter.new_pod/2`; a bill queued for the replaced pod
    is ignored.
+
+## A Lambda Labs spawn
+
+Lambda rents VMs. `Providers.LambdaLabs` reads the catalog for price and
+capacity, then launches with a cloud-init script that runs the container.
+The tags let any node rebuild the `Compute` with no local state. Added in
+#89.
+
+```mermaid
+sequenceDiagram
+  participant Host as Host app
+  participant LL as Providers.LambdaLabs
+  participant T as LambdaLabs.Translate
+  participant L as Lambda Cloud API v1
+  participant VM as Instance, cloud-init
+  Host->>LL: ExAtlas.spawn_compute(provider: :lambda_labs, image:, env:, ports:)
+  LL->>T: launch_parts(request, now)
+  T-->>LL: user_data as a Secret, atlas tags, auth handle
+  LL->>L: GET /instance-types
+  L-->>LL: price_cents_per_hour, regions_with_capacity_available
+  LL->>L: POST /instance-operations/launch (retried on 429 only)
+  L-->>LL: instance_ids
+  LL-->>Host: Compute provisioning, cost_per_hour, region
+  L->>VM: boot, then cloud-init runs user_data as root
+  VM->>VM: docker run --gpus all -p 8000:8000 -e NAME image
+  Host->>LL: ExAtlas.get_compute(id)
+  LL->>L: GET /instances/id
+  L-->>LL: status, ip, tags
+  LL-->>Host: Compute running, ports with ip URLs
+  Host->>LL: ExAtlas.terminate(id)
+  LL->>L: POST /instance-operations/terminate
+```
+
+```mermaid
+classDiagram
+  class HTTP["Providers.HTTP"] {
+    bearer(ctx, provider, hint)
+    attach_telemetry(req, prefix, api)
+    merge_user_options(req, ctx)
+    handle_response(result, expected, provider)
+    retry_rate_limited(request, response)
+  }
+  class RunPodClient["RunPod.Client"]
+  class LambdaLabs["Providers.LambdaLabs"] {
+    spawn_compute, get_compute, list_compute
+    terminate, list_gpu_types
+    stop and start return unsupported
+  }
+  class LambdaClient["LambdaLabs.Client"] {
+    get(ctx, path)
+    post(ctx, path, body, opts)
+    list_all(ctx, path)
+  }
+  class LambdaTranslate["LambdaLabs.Translate"] {
+    launch_parts(request, now)
+    launch_body(request, parts, type, region, ssh_key)
+    instance_type(request, types)
+    region(type, entry, hints)
+    instance_to_compute(instance, auth)
+    gpu_types(types)
+  }
+  class Auth["ExAtlas.Auth"] {
+    for_scheme(scheme)
+  }
+  RunPodClient ..> HTTP
+  LambdaClient ..> HTTP
+  LambdaLabs --> LambdaClient
+  LambdaLabs --> LambdaTranslate
+  LambdaTranslate ..> Auth
+  LambdaTranslate ..> GpuCatalog
+  LambdaTranslate ..> ComputeRequest
+```
