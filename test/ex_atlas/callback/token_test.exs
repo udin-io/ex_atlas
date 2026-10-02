@@ -83,6 +83,51 @@ defmodule ExAtlas.Callback.TokenTest do
       assert {:ok, _} = Token.verify(long, secret: @secret)
     end
 
+    test "an attempt minted into the token verifies back" do
+      token = Token.mint("task-1", [:finish], secret: @secret, attempt: 2)
+
+      assert {:ok, %{task_id: "task-1", kinds: [:finish], attempt: 2}} =
+               Token.verify(token, secret: @secret)
+    end
+
+    test "a token minted with no attempt, as 0.8.0 minted it, verifies with attempt nil" do
+      token = Token.mint("task-1", [:finish], secret: @secret)
+
+      assert {:ok, %{task_id: "task-1", attempt: nil}} = Token.verify(token, secret: @secret)
+    end
+
+    test "an attempt rewritten in the payload fails the signature" do
+      token = Token.mint("task-1", [:finish], secret: @secret, attempt: 0)
+      [header, payload, signature] = String.split(token, ".")
+
+      {claims, signed_at, max_age} =
+        payload |> Base.url_decode64!(padding: false) |> :erlang.binary_to_term()
+
+      forged_payload =
+        {%{claims | attempt: 1}, signed_at, max_age}
+        |> :erlang.term_to_binary()
+        |> Base.url_encode64(padding: false)
+
+      forged = Enum.join([header, forged_payload, signature], ".")
+
+      assert forged != token
+      assert {:error, :invalid} = Token.verify(forged, secret: @secret)
+    end
+
+    # The salt is part of the wire format: 0.8.0's tokens verify under it.
+    test "a signed attempt that is not a non-negative integer is invalid" do
+      for attempt <- [-1, "1", 1.0, nil] do
+        token =
+          Plug.Crypto.sign(
+            @secret,
+            "ex_atlas callback token v1",
+            %{task_id: "task-1", kinds: [:finish], attempt: attempt}
+          )
+
+        assert {:error, :invalid} = Token.verify(token, secret: @secret), inspect(attempt)
+      end
+    end
+
     test "permits/2 gates the kinds the token was minted for" do
       {:ok, claims} = Token.verify(Token.mint("t", [:progress], secret: @secret), secret: @secret)
 

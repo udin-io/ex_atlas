@@ -10,7 +10,8 @@ defmodule ExAtlas.CallbackTest do
 
   defp task_id, do: "task-#{System.unique_integer([:positive])}"
 
-  defp register(task_id), do: Registry.register(ComputeRegistry, {:callback, task_id}, nil)
+  defp register(task_id, attempt \\ nil),
+    do: Registry.register(ComputeRegistry, {:callback, task_id}, attempt)
 
   describe "verify/1" do
     test "accepts a token minted against the configured secret" do
@@ -163,6 +164,16 @@ defmodule ExAtlas.CallbackTest do
       assert again[:callback] == first[:callback]
     end
 
+    test "a prepared descriptor with no attempt, as 0.8.0 built it, starts at attempt 0" do
+      {:ok, first} = Callback.prepare(callback: "https://app.example.com/cb")
+      built_by_0_8_0 = Keyword.update!(first, :callback, &Map.delete(&1, :attempt))
+
+      {:ok, again} = Callback.prepare(built_by_0_8_0)
+
+      assert {:ok, %{attempt: 0}} =
+               Callback.verify(Callback.env(again[:callback])["ATLAS_CALLBACK_TOKEN"])
+    end
+
     test "the token expires with the work, not long after it" do
       {:ok, opts} =
         Callback.prepare(callback: "https://app.example.com/cb", max_runtime_ms: 60_000)
@@ -234,6 +245,40 @@ defmodule ExAtlas.CallbackTest do
     end
   end
 
+  describe "ingest/3 with verified claims" do
+    test "delivers a report whose attempt is the tracker's current one" do
+      task = task_id()
+      {:ok, _} = register(task, 1)
+
+      assert :ok = Callback.ingest(%{task_id: task, attempt: 1}, :progress, %{"pct" => 1})
+      assert_receive {:atlas_callback, :progress, %{"pct" => 1}, 1}
+    end
+
+    test "refuses a report from an earlier attempt as untracked" do
+      task = task_id()
+      {:ok, _} = register(task, 1)
+
+      assert {:error, :not_tracked} =
+               Callback.ingest(%{task_id: task, attempt: 0}, :finish, %{"exit_code" => 0})
+
+      refute_received {:atlas_callback, _, _}
+      refute_received {:atlas_callback, _, _, _}
+    end
+
+    test "accepts a token with no attempt unchecked, as 0.8.0 minted it" do
+      task = task_id()
+      {:ok, _} = register(task, 1)
+
+      assert :ok = Callback.ingest(%{task_id: task, attempt: nil}, :finish, %{"exit_code" => 0})
+      assert_receive {:atlas_callback, :finish, %{exit_code: 0}}
+    end
+
+    test "an untracked task is still gone" do
+      assert {:error, :not_tracked} =
+               Callback.ingest(%{task_id: task_id(), attempt: 0}, :progress, %{})
+    end
+  end
+
   describe "env/1" do
     test "expands a descriptor into the three documented variables" do
       {:ok, opts} = Callback.prepare(callback: "https://app.example.com/cb")
@@ -245,6 +290,23 @@ defmodule ExAtlas.CallbackTest do
       assert env["ATLAS_TASK_ID"] == config.task_id
       assert {:ok, %{task_id: task_id}} = Callback.verify(env["ATLAS_CALLBACK_TOKEN"])
       assert task_id == config.task_id
+    end
+
+    test "a prepared callback's token carries attempt 0" do
+      {:ok, opts} = Callback.prepare(callback: "https://app.example.com/cb")
+
+      token = Callback.env(opts[:callback])["ATLAS_CALLBACK_TOKEN"]
+
+      assert {:ok, %{attempt: 0}} = Callback.verify(token)
+    end
+
+    test "a callback map with no attempt, as 0.8.0 stored it, mints a token with none" do
+      {:ok, opts} = Callback.prepare(callback: "https://app.example.com/cb")
+      stored = Map.delete(opts[:callback], :attempt)
+
+      token = Callback.env(stored)["ATLAS_CALLBACK_TOKEN"]
+
+      assert {:ok, %{attempt: nil}} = Callback.verify(token)
     end
 
     test "the minted token is scoped to that task alone" do

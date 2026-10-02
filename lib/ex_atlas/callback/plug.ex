@@ -122,7 +122,7 @@ if Code.ensure_loaded?(Plug) do
 
     defp ingest(conn, kind, claims, body) do
       with {:ok, payload} <- decode(body),
-           :ok <- Callback.ingest(claims.task_id, kind, payload) do
+           :ok <- Callback.ingest(claims, kind, payload) do
         respond(conn, 202)
       else
         {:error, reason} -> respond(conn, status_for(reason))

@@ -92,7 +92,9 @@ defp atlas_callback(conn, _opts), do: conn
 
 Not using Plug at all? `ExAtlas.Callback` is framework-free — `verify/1`,
 `take/2`, `body_limit/1` and `ingest/3` are all you need for a hand-rolled
-handler, and `:plug` stays an optional dependency you never pull in.
+handler, and `:plug` stays an optional dependency you never pull in. Pass
+`ingest/3` the claims `verify/1` returned, not `claims.task_id`: only the
+claims carry the pod's attempt, which refuses a pod that a respawn replaced.
 
 ### 4. Spawn with a callback
 
@@ -202,7 +204,7 @@ full post-mortem log in object storage alongside your artifacts.
 | 400  | body was not a JSON object, or a finish carried no usable `exit_code` |
 | 401  | signature bad, token expired, or the token does not cover this kind |
 | 404  | not one of the three paths |
-| 410  | nothing is tracking that task any more — stop reporting |
+| 410  | nothing is tracking that task any more, or a respawn replaced this pod — stop reporting |
 | 413  | body over the cap |
 | 429  | over the rate budget; a `retry-after` header comes with it |
 
@@ -274,12 +276,17 @@ The endpoint is internet-reachable and every byte on it comes from a container
 you do not control. What the library does about that:
 
   * **A stateless signed token**, `Plug.Crypto.sign/4` over
-    `%{task_id, kinds}`, verified in constant time. No hash table, so nothing
-    to leak and nothing to replicate across nodes.
+    `%{task_id, kinds, attempt}`, verified in constant time. No hash table, so
+    nothing to leak and nothing to replicate across nodes.
   * **Bound to a `task_id`, not a compute id.** RunPod assigns the compute id
     in the `POST /pods` response, so nothing could bind a token to it while the
     container env was still being built — and the task id survives an
     `on_failure: {:respawn, n}` swap, where a compute id would not.
+  * **Bound to an attempt.** The first pod's token signs attempt 0, the
+    `n`th replacement's signs `n`. After a respawn, a late report from the
+    preempted pod gets `410`, and one already queued in the tracker is
+    dropped. A token minted by 0.8.0 has no attempt and is accepted
+    unchecked.
   * **A different credential from `ATLAS_PRESHARED_KEY`.** That one is handed
     to a browser in the interactive flow, and a browser-held secret must never
     also authorize writing into your orchestrator.

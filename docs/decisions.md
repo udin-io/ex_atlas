@@ -148,6 +148,9 @@ names the PR or issue that holds the reasoning.
 | A respawn after adoption asks a host resolver, an `{m, f, args}`, for `s3:` and `env:` | A function capture: a record must survive DETS and a restart | #87 |
 | The per-task tuple wins; `config :ex_atlas, :orchestrator, respawn_credentials:` is the fallback | App config only: credentials are often per user or per task | #87 |
 | Resolve at respawn, not at adoption | Resolve when adopting: most adopted tasks never respawn | #87 |
+| A callback token signs its pod's attempt; a report from an earlier attempt gets 410 | A new `task_id` per pod: it names the Limiter bucket, the record and `ATLAS_TASK_ID` | #100 |
+| The Registry value holds the current attempt, and the tracker checks a queued report again | A `GenServer.call` from `ingest/3`: delivery must stay a `send` | #100 |
+| A token with no attempt, as 0.8.0 minted it, is accepted unchecked | Read it as attempt 0: a respawned 0.8.0 pod's real report would get 410 | #100 |
 | The resolver returns `s3:` whole; `info.s3` gives the stored parts without the marker | ExAtlas merges keys onto the stored parts: presigned mode stores no URL | #87 |
 | `env:` must cover every stored name and replaces the stored env whole | Run with the names it returns: a container would miss a value it was rented with | #87 |
 | The resolver runs in a task under the poll `Task.Supervisor`, bounded at 30 s; a raise, throw or exit is caught inside it, so no crash report prints its value | Call inline: a hung resolver would hold the tracker forever | #87 |

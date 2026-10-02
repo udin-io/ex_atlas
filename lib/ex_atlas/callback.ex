@@ -13,7 +13,7 @@ defmodule ExAtlas.Callback do
              {:ok, body} <- read_at_most(conn, ExAtlas.Callback.body_limit(:progress)),
              {:ok, json} <- Jason.decode(body),
              :ok <- ExAtlas.Callback.Limiter.take(claims.task_id, :progress),
-             :ok <- ExAtlas.Callback.ingest(claims.task_id, :progress, json) do
+             :ok <- ExAtlas.Callback.ingest(claims, :progress, json) do
           send_resp(conn, 202, "")
         end
       end
@@ -89,10 +89,11 @@ defmodule ExAtlas.Callback do
   what a provider translator expands into container environment variables.
   """
   @type config :: %{
-          url: String.t(),
-          task_id: Token.task_id(),
-          kinds: [kind()],
-          max_age_s: pos_integer()
+          optional(:attempt) => Token.attempt(),
+          required(:url) => String.t(),
+          required(:task_id) => Token.task_id(),
+          required(:kinds) => [kind()],
+          required(:max_age_s) => pos_integer()
         }
 
   @doc "Every callback kind the boundary knows about."
@@ -126,26 +127,36 @@ defmodule ExAtlas.Callback do
   defdelegate verify(token), to: Token
 
   @doc """
-  Hand a verified callback to the tracker for `task_id`.
+  Hand a verified callback to the tracker for its task.
 
-  Returns `{:error, :not_tracked}` when nothing is tracking that task — the
-  task ended, the node holding it is not this one, or the id was never real.
+  Pass the claims `verify/1` returned. Returns `{:error, :not_tracked}` when
+  nothing is tracking that task — the task ended, the node holding it is not
+  this one, or the id was never real — and when the claims' `attempt` is not
+  the tracker's current one: the pod was preempted and a respawn replaced it.
   That is a `410 Gone`, and it is also the boundary's de-facto revocation: a
   leaked token stops being useful the moment its tracker stops.
+
+  A token minted by 0.8.0 carries no attempt (`attempt: nil`), and its attempt
+  goes unchecked. A bare `task_id` string, as 0.8.0 took, is checked the same
+  way: never.
 
   Uses `send/2`, never `GenServer.call/3`. A web request that blocked on the
   tracker would turn a slow provider poll into an HTTP timeout and would hand
   an untrusted pod a lever on the orchestrator's mailbox.
   """
-  @spec ingest(Token.task_id(), kind(), term()) ::
+  @spec ingest(Token.claims() | Token.task_id(), kind(), term()) ::
           :ok | {:error, :not_tracked | :invalid_payload}
-  def ingest(task_id, kind, payload) when is_binary(task_id) do
+  def ingest(%{task_id: task_id} = claims, kind, payload) when is_binary(task_id) do
     with {:ok, normalized} <- normalize(kind, payload),
-         {:ok, pid} <- lookup(task_id) do
-      send(pid, {:atlas_callback, kind, normalized})
+         attempt = Map.get(claims, :attempt),
+         {:ok, pid} <- lookup(task_id, attempt) do
+      send(pid, message(kind, normalized, attempt))
       :ok
     end
   end
+
+  def ingest(task_id, kind, payload) when is_binary(task_id),
+    do: ingest(%{task_id: task_id, attempt: nil}, kind, payload)
 
   @doc """
   Spend one unit of `task_id`'s rate budget for `kind`.
@@ -191,7 +202,7 @@ defmodule ExAtlas.Callback do
         end
 
       %{task_id: _} = already_prepared ->
-        {:ok, Keyword.put(opts, :callback, already_prepared)}
+        {:ok, Keyword.put(opts, :callback, Map.put_new(already_prepared, :attempt, 0))}
 
       other ->
         {:error, {:invalid_callback, other}}
@@ -202,13 +213,17 @@ defmodule ExAtlas.Callback do
   Environment variables a container needs to call back.
 
   Mints the token here, at the last possible moment, so it exists in exactly
-  one place — the pod's environment — and never in ExAtlas's own state.
+  one place — the pod's environment — and never in ExAtlas's own state. The
+  token signs the descriptor's `:attempt`; a descriptor stored by 0.8.0 has
+  none, and neither does its token.
   """
   @spec env(config(), keyword()) :: %{String.t() => String.t()}
-  def env(%{url: url, task_id: task_id, kinds: kinds, max_age_s: max_age}, opts \\ []) do
+  def env(%{url: url, task_id: task_id, kinds: kinds, max_age_s: max_age} = config, opts \\ []) do
+    mint_opts = [max_age: max_age, attempt: Map.get(config, :attempt)] ++ opts
+
     %{
       "ATLAS_CALLBACK_URL" => url,
-      "ATLAS_CALLBACK_TOKEN" => Token.mint(task_id, kinds, [max_age: max_age] ++ opts),
+      "ATLAS_CALLBACK_TOKEN" => Token.mint(task_id, kinds, mint_opts),
       "ATLAS_TASK_ID" => task_id
     }
   end
@@ -219,6 +234,7 @@ defmodule ExAtlas.Callback do
     %{
       url: url,
       task_id: Token.new_task_id(),
+      attempt: 0,
       kinds: kinds(),
       max_age_s: max_age_s(Keyword.get(opts, :max_runtime_ms, false))
     }
@@ -233,8 +249,11 @@ defmodule ExAtlas.Callback do
 
   # The Registry drops a dead owner's entry asynchronously, so an entry can name
   # a pid that already exited. The registry is node-local, so the pid is too.
-  defp lookup(task_id) do
-    with pid when is_pid(pid) <- owner_pid(task_id),
+  # The entry's value is the tracker's current attempt; `ComputeServer` moves
+  # it before it rents a replacement.
+  defp lookup(task_id, attempt) do
+    with {pid, current} <- owner(task_id),
+         true <- current_attempt?(attempt, current),
          true <- Process.alive?(pid) do
       {:ok, pid}
     else
@@ -242,14 +261,22 @@ defmodule ExAtlas.Callback do
     end
   end
 
-  defp owner_pid(task_id) do
+  defp owner(task_id) do
     if Process.whereis(ComputeRegistry) do
       case Registry.lookup(ComputeRegistry, {:callback, task_id}) do
-        [{pid, _}] -> pid
+        [{pid, current}] -> {pid, current}
         [] -> nil
       end
     end
   end
+
+  # The tracker checks the attempt again: a report can pass `lookup/2` just
+  # before a respawn moves the Registry value, and wait in the mailbox behind it.
+  defp message(kind, payload, nil), do: {:atlas_callback, kind, payload}
+  defp message(kind, payload, attempt), do: {:atlas_callback, kind, payload, attempt}
+
+  defp current_attempt?(nil, _current), do: true
+  defp current_attempt?(attempt, current), do: attempt === current
 
   # A progress or log body is whatever the container wants to say, so the only
   # rule is that it is a JSON object — anything else means the pod and the host

@@ -74,7 +74,7 @@ flowchart TD
   ev --> host
   cs -->|"terminate/2: ExAtlas.terminate/2<br/>after idle TTL, max_runtime_ms, cost cap,<br/>or finish report + finish_grace_ms"| prov
   pod["RunPod container, or Lambda host unit"] -->|"Callback.Plug"| cb["Callback"]
-  cb -->|"progress, log, finish"| cs
+  cb -->|"progress, log, finish<br/>from the current attempt only"| cs
   boot["Boot"] --> ad["Adopter"]
   ad -->|"all/0"| store
   ad -->|"start with adopted record"| cs
@@ -120,6 +120,39 @@ sequenceDiagram
 
 The resolved values live in the tracker's opts, so a second respawn in the
 same VM reuses them. The next restart calls the resolver again.
+
+## A late report from a replaced pod
+
+Every pod of a task shares its `task_id`; its token also signs its attempt
+(#100). `ComputeServer` keeps the current attempt as the Registry value of
+`{:callback, task_id}` and moves it before it rents a replacement. A report
+already queued in the tracker carries its attempt, and the tracker drops it
+when the attempt is stale.
+
+```mermaid
+sequenceDiagram
+  participant A as Pod A, attempt 0
+  participant B as Pod B, attempt 1
+  participant Pl as Callback.Plug
+  participant Cb as Callback.ingest/3
+  participant CS as ComputeServer
+  participant P as Provider
+  CS->>P: status poll
+  P-->>CS: pod A gone, preempted
+  CS->>CS: Registry value for the task becomes 1
+  CS->>P: spawn_compute, callback attempt 1
+  P-->>CS: pod B, its token signs attempt 1
+  A->>Pl: POST /finish, token for attempt 0
+  Pl->>Cb: ingest claims
+  Cb-->>Pl: not_tracked, 0 is not 1
+  Pl-->>A: 410
+  B->>Pl: POST /finish, token for attempt 1
+  Pl->>Cb: ingest claims
+  Cb->>CS: atlas_callback finish, attempt 1
+  Note over CS: a queued message with attempt 0 is dropped
+```
+
+A token minted by 0.8.0 has no attempt and goes unchecked (risk 49).
 
 ## What a cost cap does
 

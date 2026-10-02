@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed: a late report from a replaced pod no longer ends the replacement (#100)
+
+Each pod's callback token now signs its attempt: 0 for the first pod, `n` for
+the `n`th replacement. After a respawn, a `finish`, `progress` or `log` from
+the preempted pod gets `410` and never reaches the replacement's tracker.
+Before, the old pod's late `finish` ended the new pod's session and deleted
+it mid-run.
+
+`ExAtlas.Callback.ingest/3` takes the claims `verify/1` returned as its first
+argument, and checks their attempt. A bare `task_id` still works and checks
+nothing; move a hand-rolled controller to the claims form:
+
+```elixir
+:ok <- ExAtlas.Callback.ingest(claims, :progress, json)
+```
+
+A pod rented by 0.8.0 holds a token with no attempt. It is accepted
+unchecked, so its late report after a respawn still ends the replacement,
+until those pods end.
+
 ## v0.8.0 — 2026-10-02
 
 ### Upgrading

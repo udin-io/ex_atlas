@@ -567,7 +567,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       |> reprice()
       |> arm_cost_cap()
 
-    register_callback(state.callback_task_id)
+    register_callback(state)
     Events.broadcast(compute.id, {:status, compute.status})
     schedule_heartbeat(state)
     schedule_deadline(remaining_ms)
@@ -586,7 +586,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     tracking = NimbleOptions.validate!(Keyword.take(opts, @option_keys), @schema)
     state = compute |> new_state(opts, tracking) |> arm_cost_cap()
 
-    register_callback(state.callback_task_id)
+    register_callback(state)
     Events.broadcast(compute.id, {:status, compute.status})
     schedule_heartbeat(state)
     schedule_status_poll(state)
@@ -847,6 +847,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # These arrive from `ExAtlas.Callback.ingest/3` as plain messages, never as
   # calls: the web request that carried them must not be able to block on this
   # mailbox, and an untrusted pod must not get a lever on it.
+
+  # A token that signs its attempt arrives with it. A stale attempt is a report
+  # from the pod a respawn replaced: it passed the Registry check in
+  # `ExAtlas.Callback.ingest/3` before `respawn/2` moved the attempt, and
+  # waited in this mailbox behind the poll that respawned. It is dropped.
+  def handle_info({:atlas_callback, kind, payload, attempt}, %{respawns: attempt} = state),
+    do: handle_info({:atlas_callback, kind, payload}, state)
+
+  def handle_info({:atlas_callback, _kind, _payload, _stale_attempt}, state),
+    do: {:noreply, state}
 
   # Relayed verbatim and retained nowhere. `ExAtlas.Callback` has already
   # checked that the payload is a JSON object; what is *in* it is a convention
@@ -1110,8 +1120,11 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   defp respawn(state, reason) do
     old_id = state.compute.id
+    # From here on, the preempted pod's reports are stale.
+    attempt = state.respawns + 1
+    advance_callback(state, attempt)
 
-    case spawn_replacement(state) do
+    case spawn_replacement(%{state | opts: next_attempt(state.opts, attempt)}) do
       {:ok, replacement, opts} ->
         # Before `release_old/1`, which deletes the old record along with the
         # old resource. The replacement inherits the original `spawned_at_ms`
@@ -1689,12 +1702,34 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # Registered alongside the `{:compute, id}` key this server is named by, and
   # *not* re-keyed on a respawn: the task id is what the credential in the
   # pod's environment is bound to, and it has to keep working when the compute
-  # id underneath it is replaced.
-  defp register_callback(nil), do: :ok
+  # id underneath it is replaced. The value is the current attempt, which
+  # `ExAtlas.Callback.ingest/3` compares with the token's.
+  defp register_callback(%{callback_task_id: nil}), do: :ok
 
-  defp register_callback(task_id) do
-    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, nil)
+  defp register_callback(%{callback_task_id: task_id, respawns: respawns}) do
+    {:ok, _} = Registry.register(ComputeRegistry, {:callback, task_id}, respawns)
     :ok
+  end
+
+  defp advance_callback(%{callback_task_id: nil}, _attempt), do: :ok
+
+  defp advance_callback(%{callback_task_id: task_id}, attempt) do
+    {^attempt, _old} =
+      Registry.update_value(ComputeRegistry, {:callback, task_id}, fn _ -> attempt end)
+
+    :ok
+  end
+
+  # The replacement's token signs its attempt, so its reports pass the check
+  # that refuses the pod it replaced.
+  defp next_attempt(opts, attempt) do
+    case Keyword.get(opts, :callback) do
+      %{task_id: _} = callback ->
+        Keyword.put(opts, :callback, Map.put(callback, :attempt, attempt))
+
+      _none ->
+        opts
+    end
   end
 
   # The bill is asked for from the pod's spawn. The provider's own timestamp
