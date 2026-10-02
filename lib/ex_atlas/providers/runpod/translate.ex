@@ -62,6 +62,10 @@ defmodule ExAtlas.Providers.RunPod.Translate do
   Turn a REST v2 `Pod` body into an `ExAtlas.Spec.Compute`.
 
   Optional `auth` is threaded through unchanged from the spawn path.
+
+  `raw` is the pod body without `"env"`: RunPod echoes the pod's credentials
+  there, and the tracker holds the `Compute` in its state and poll replies,
+  where a crash report would print them.
   """
   @spec pod_to_compute(map(), map() | nil) :: Spec.Compute.t()
   def pod_to_compute(pod, auth \\ nil) when is_map(pod) do
@@ -79,7 +83,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       name: Map.get(pod, "name"),
       auth: auth,
       created_at: parse_created_at(pod),
-      raw: pod
+      raw: Map.delete(pod, "env")
     }
   end
 

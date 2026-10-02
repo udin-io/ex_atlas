@@ -189,9 +189,12 @@ defmodule ExAtlas.Providers.RunPodTest do
       bypass: bypass,
       ctx_opts: opts
     } do
+      test_pid = self()
+
       Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         body = Jason.decode!(raw)
+        send(test_pid, {:echoed_env, body["env"]})
         json(conn, 201, Map.put(pod("p1", "RUNNING", "t"), "env", body["env"]))
       end)
 
@@ -200,19 +203,24 @@ defmodule ExAtlas.Providers.RunPodTest do
           [gpu: :h100, image: "x", env: %{"AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"}] ++ opts
         )
 
-      # Control: the response did echo the secret, and `raw` still keeps it.
-      assert compute.raw["env"]["AWS_SECRET_ACCESS_KEY"] == "tsec-test-9f2c"
+      # Control: the response did echo the secret (the stub sends it back).
+      assert_received {:echoed_env, %{"AWS_SECRET_ACCESS_KEY" => "tsec-test-9f2c"}}
+      refute Map.has_key?(compute.raw, "env")
       assert inspect(compute) =~ ~s(id: "p1")
       refute inspect(compute) =~ "tsec-test-9f2c"
+      refute inspect(compute, structs: false, limit: :infinity) =~ "tsec-test-9f2c"
     end
 
     test "inspect of the compute omits presigned URLs RunPod echoes back", %{
       bypass: bypass,
       ctx_opts: opts
     } do
+      test_pid = self()
+
       Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         body = Jason.decode!(raw)
+        send(test_pid, {:echoed_env, body["env"]})
         json(conn, 201, Map.put(pod("p1", "RUNNING", "t"), "env", body["env"]))
       end)
 
@@ -221,9 +229,10 @@ defmodule ExAtlas.Providers.RunPodTest do
       {:ok, compute} =
         ExAtlas.spawn_compute([gpu: :h100, image: "x", s3: %{artifact_url: put_url}] ++ opts)
 
-      # Control: the response did echo the URL.
-      assert compute.raw["env"]["ATLAS_ARTIFACT_URL"] == put_url
-      text = inspect(compute, limit: :infinity, printable_limit: :infinity)
+      # Control: the response did echo the URL (the stub sends it back).
+      assert_received {:echoed_env, %{"ATLAS_ARTIFACT_URL" => ^put_url}}
+      refute Map.has_key?(compute.raw, "env")
+      text = inspect(compute, structs: false, limit: :infinity, printable_limit: :infinity)
       assert text =~ ~s(id: "p1")
       refute text =~ "putsig-a7e3b2"
     end
@@ -243,6 +252,25 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:ok, compute} = ExAtlas.get_compute("pod_abc", opts)
       assert compute.id == "pod_abc"
       assert compute.status == :running
+    end
+
+    test "keeps the env RunPod echoes back out of raw", %{bypass: bypass, ctx_opts: opts} do
+      echoed = Map.put(pod("pod_abc", "RUNNING", "t"), "env", %{"HF_TOKEN" => "hf-secret-5d1"})
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn -> json(conn, 200, echoed) end)
+
+      assert {:ok, compute} = ExAtlas.get_compute("pod_abc", opts)
+      assert compute.raw["dataCenterId"] == "US-KS-2"
+      refute Map.has_key?(compute.raw, "env")
+      refute inspect(compute, structs: false, limit: :infinity) =~ "hf-secret-5d1"
+    end
+
+    test "the status poll's compute holds no echoed env", %{bypass: bypass, ctx_opts: opts} do
+      echoed = Map.put(pod("pod_abc", "RUNNING", "t"), "env", %{"HF_TOKEN" => "hf-secret-5d1"})
+      Bypass.expect_once(bypass, "GET", "/pods/pod_abc", fn conn -> json(conn, 200, echoed) end)
+
+      assert {:alive, compute} = UpstreamStatus.observe("pod_abc", opts)
+      assert compute.raw["dataCenterId"] == "US-KS-2"
+      refute inspect(compute, structs: false, limit: :infinity) =~ "hf-secret-5d1"
     end
 
     test "carries an age the Reaper's grace window can use", %{bypass: bypass, ctx_opts: opts} do
@@ -476,6 +504,21 @@ defmodule ExAtlas.Providers.RunPodTest do
       assert {:ok, [_, _, _, _]} = ExAtlas.list_compute([gpu: :rtx_4090] ++ opts)
       assert {:ok, []} = ExAtlas.list_compute([gpu: :h100] ++ opts)
       assert {:ok, []} = ExAtlas.list_compute([region: "EU-RO-1"] ++ opts)
+    end
+  end
+
+  describe "list_compute/1 env echo" do
+    test "keeps the env RunPod echoes back out of every raw", %{bypass: bypass, ctx_opts: opts} do
+      echoed = Map.put(pod("p1", "RUNNING", "atlas-a"), "env", %{"HF_TOKEN" => "hf-secret-5d1"})
+
+      Bypass.expect_once(bypass, "GET", "/pods", fn conn ->
+        json(conn, 200, %{"pods" => [echoed], "pagination" => %{"hasNextPage" => false}})
+      end)
+
+      assert {:ok, [compute]} = ExAtlas.list_compute(opts)
+      assert compute.raw["dataCenterId"] == "US-KS-2"
+      refute Map.has_key?(compute.raw, "env")
+      refute inspect(compute, structs: false, limit: :infinity) =~ "hf-secret-5d1"
     end
   end
 
