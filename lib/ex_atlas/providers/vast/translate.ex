@@ -82,9 +82,10 @@ defmodule ExAtlas.Providers.Vast.Translate do
   end
 
   @doc """
-  The `POST /api/v0/bundles/` body: on-demand, verified, rentable and
-  unrented offers of the request's GPU, count, disk and ports, cheapest
-  first. `datacenter` only for `cloud_type: :secure`.
+  The `POST /api/v0/bundles/` body: verified, rentable and unrented offers of
+  the request's GPU, count, disk and ports, cheapest first. The offers are
+  on-demand, or interruptible (`type: "bid"`) for `spot: true`. `datacenter`
+  only for `cloud_type: :secure`.
   """
   @spec offer_query(Spec.ComputeRequest.t()) :: {:ok, map()} | {:error, Error.t()}
   def offer_query(%Spec.ComputeRequest{} = request) do
@@ -100,25 +101,31 @@ defmodule ExAtlas.Providers.Vast.Translate do
        })
        |> Map.merge(port_filter(request.ports))
        |> Map.merge(cloud_filter(request.cloud_type))
-       |> Map.merge(base_query())}
+       |> Map.merge(base_query(offer_type(request)))}
     end
   end
 
   @doc """
   The offer search body that finds the cheapest offers of `canonical`, for
-  `list_gpu_types/1`.
+  `list_gpu_types/1`: on-demand, or interruptible for `:bid`.
   """
-  @spec gpu_type_query(atom()) :: {:ok, map()} | {:error, Error.t()}
-  def gpu_type_query(canonical) do
-    with {:ok, query} <- gpu_query(canonical), do: {:ok, Map.merge(query, base_query())}
+  @spec gpu_type_query(atom(), :ondemand | :bid) :: {:ok, map()} | {:error, Error.t()}
+  def gpu_type_query(canonical, type) do
+    with {:ok, query} <- gpu_query(canonical), do: {:ok, Map.merge(query, base_query(type))}
   end
 
-  defp base_query do
+  defp offer_type(%Spec.ComputeRequest{spot: true}), do: :bid
+  defp offer_type(%Spec.ComputeRequest{}), do: :ondemand
+
+  # `dph_total` orders both types. A `bid` search lists it as the offer's
+  # `min_bid` plus storage (Vast's free search, 2026-10-02: `dph_base` equals
+  # `min_bid`, and the list is sorted by `dph_total`, not by `min_bid`).
+  defp base_query(type) do
     %{
       "verified" => %{"eq" => true},
       "rentable" => %{"eq" => true},
       "rented" => %{"eq" => false},
-      "type" => "ondemand",
+      "type" => Atom.to_string(type),
       "order" => [["dph_total", "asc"]],
       "limit" => @search_limit
     }
@@ -128,12 +135,17 @@ defmodule ExAtlas.Providers.Vast.Translate do
   The offers to try, cheapest first, at most #{@max_offers}: those whose
   `geolocation` country code is the first of `hints` that any offer has,
   else the cheapest anywhere.
+
+  With `spot?`, `offers` come from a `bid` search, where `dph_total` is the
+  offer's `min_bid` plus the disk's storage cost, so the order is still
+  `dph_total`. An offer without a positive numeric `min_bid` is dropped:
+  Vast would rent it at the on-demand price.
   """
-  @spec pick([map()], [String.t()]) :: [map()]
-  def pick(offers, hints) do
+  @spec pick([map()], [String.t()], boolean()) :: [map()]
+  def pick(offers, hints, spot?) do
     offers =
       offers
-      |> Enum.filter(&(is_map(&1) and is_integer(&1["id"])))
+      |> Enum.filter(&(is_map(&1) and is_integer(&1["id"]) and biddable?(&1, spot?)))
       |> Enum.sort_by(&price_key(&1["dph_total"]))
 
     in_hint =
@@ -146,6 +158,18 @@ defmodule ExAtlas.Providers.Vast.Translate do
 
     Enum.take(in_hint || offers, @max_offers)
   end
+
+  @doc """
+  The rent body for one `offer`: `body` as it is, or with `price`, the offer's
+  `min_bid`, for `spot: true`. Vast takes `price` as the bid per machine.
+  The bid is the offer's price without storage: `cost_per_hour` is the bid
+  plus the disk, as the offer lists it.
+  """
+  @spec priced(map(), Spec.ComputeRequest.t(), map()) :: map()
+  def priced(body, %Spec.ComputeRequest{spot: true}, %{"min_bid" => bid}),
+    do: Map.put(body, "price", bid)
+
+  def priced(body, _request, _offer), do: body
 
   @doc """
   The `PUT /api/v0/asks/{id}/` body. `env` values stay `ExAtlas.Secret`s
@@ -192,7 +216,7 @@ defmodule ExAtlas.Providers.Vast.Translate do
         Enum.map(request.ports, fn {port, protocol} -> binding(port, protocol, nil, nil) end),
       gpu_type: string_or_nil(offer["gpu_name"]),
       gpu_count: count(offer["num_gpus"]) || request.gpu_count,
-      cost_per_hour: number_or_nil(offer["dph_total"]),
+      cost_per_hour: cost_per_hour(offer, request.spot),
       region: string_or_nil(offer["geolocation"]),
       image: request.image,
       name: request.name,
@@ -234,34 +258,59 @@ defmodule ExAtlas.Providers.Vast.Translate do
   @doc """
   Turn offers into `ExAtlas.Spec.GpuType`s: one per Vast GPU name, or per
   name and memory class where the catalog splits a name by `gpu_ram` (the
-  A100), each at its lowest on-demand price.
+  A100). `lowest_price_per_hour` is the lowest on-demand `dph_total`, `nil`
+  for a GPU only `bid_offers_by_gpu` lists. `spot_price_per_hour` is the
+  lowest `dph_total` among that interruptible search's offers with a
+  `min_bid`: the bid plus the disk's storage, what a rent bills. It is `nil`
+  when none has one.
   """
-  @spec gpu_types([{atom(), [map()]}]) :: [Spec.GpuType.t()]
-  def gpu_types(offers_by_gpu) do
-    offers_by_gpu
-    |> Enum.flat_map(fn {canonical, offers} ->
-      offers
-      |> Enum.filter(&(is_map(&1) and is_binary(&1["gpu_name"])))
-      |> Enum.map(&{canonical, &1})
-    end)
-    |> Enum.group_by(fn {canonical, offer} -> {offer["gpu_name"], canonical} end)
-    |> Enum.map(fn {{name, canonical}, entries} ->
-      cheapest = entries |> Enum.map(&elem(&1, 1)) |> Enum.min_by(&price_key(&1["dph_total"]))
+  @spec gpu_types([{atom(), [map()]}], [{atom(), [map()]}]) :: [Spec.GpuType.t()]
+  def gpu_types(offers_by_gpu, bid_offers_by_gpu) do
+    on_demand = group_by_gpu(offers_by_gpu)
+
+    bid =
+      bid_offers_by_gpu
+      |> group_by_gpu()
+      |> Map.new(fn {key, offers} -> {key, Enum.filter(offers, &biddable?(&1, true))} end)
+
+    on_demand
+    |> Map.keys()
+    |> Enum.concat(Map.keys(bid))
+    |> Enum.uniq()
+    |> Enum.map(fn {name, canonical} = key ->
+      demand = cheapest(on_demand[key])
+      spot = cheapest(bid[key])
 
       %Spec.GpuType{
         id: name,
         provider: :vast,
         canonical: canonical,
         display_name: name,
-        memory_gb: memory_gb(cheapest["gpu_ram"]),
-        lowest_price_per_hour: number_or_nil(cheapest["dph_total"]),
+        memory_gb: memory_gb((demand || spot)["gpu_ram"]),
+        lowest_price_per_hour: demand && number_or_nil(demand["dph_total"]),
+        spot_price_per_hour: spot && cost_per_hour(spot, true),
         stock: :unknown,
         cloud_type: :any,
-        raw: %{"gpu_name" => name, "dph_total" => cheapest["dph_total"]}
+        raw: %{"gpu_name" => name, "dph_total" => demand && demand["dph_total"]}
       }
     end)
     |> Enum.sort_by(&{&1.id, &1.memory_gb})
   end
+
+  defp group_by_gpu(offers_by_gpu) do
+    offers_by_gpu
+    |> Enum.flat_map(fn {canonical, offers} ->
+      for offer <- offers,
+          is_map(offer),
+          is_binary(offer["gpu_name"]),
+          do: {{offer["gpu_name"], canonical}, offer}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+  end
+
+  defp cheapest(nil), do: nil
+  defp cheapest([]), do: nil
+  defp cheapest(offers), do: Enum.min_by(offers, &price_key(&1["dph_total"]))
 
   @doc """
   Whether `compute` runs one of `canonical`'s Vast names, with the GPU
@@ -276,6 +325,15 @@ defmodule ExAtlas.Providers.Vast.Translate do
   end
 
   def gpu_family?(_compute, _canonical), do: false
+
+  # What the rent bills an hour. A bid offer lists `dph_total` as its bid plus
+  # storage; one without it bills at least its bid.
+  defp cost_per_hour(offer, true), do: number_or_nil(offer["dph_total"]) || offer["min_bid"]
+  defp cost_per_hour(offer, false), do: number_or_nil(offer["dph_total"])
+
+  defp biddable?(_offer, false), do: true
+  defp biddable?(%{"min_bid" => bid}, true), do: is_number(bid) and bid > 0
+  defp biddable?(_offer, true), do: false
 
   defp ram_fits?(_mb, nil), do: true
   defp ram_fits?(mb, {"gte", min}) when is_number(mb), do: mb >= min

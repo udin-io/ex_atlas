@@ -5,6 +5,11 @@ defmodule ExAtlas.Spec.GpuType do
   On Runpod, `spot_price_per_hour` is always `nil` (Runpod sells no spot pods)
   and `raw` is `%{"SECURE" => entry, "COMMUNITY" => entry}`: the v2 catalog
   entry for each cloud, `nil` where that read did not list the GPU.
+
+  On Vast, `lowest_price_per_hour` is the lowest on-demand `dph_total`, and
+  `nil` for a GPU only the interruptible search lists. `spot_price_per_hour`
+  is the lowest `dph_total` among interruptible offers, the bid plus storage,
+  and `nil` when that search failed or listed none.
   """
 
   @enforce_keys [:id, :provider]
