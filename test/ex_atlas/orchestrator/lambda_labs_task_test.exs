@@ -1,6 +1,6 @@
 defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
   # The orchestrator on Lambda through Bypass: run_task/1 ended by the host's
-  # finish report, and max_cost.
+  # finish report, the Reaper, and max_cost.
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
@@ -8,7 +8,7 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
   import ExAtlas.Test.FakeLambda
 
   alias ExAtlas.Callback
-  alias ExAtlas.Orchestrator.Events
+  alias ExAtlas.Orchestrator.{Events, Reaper}
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
   setup do
@@ -98,6 +98,57 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
     end
   end
 
+  describe "Reaper" do
+    setup do
+      bypass = Bypass.open()
+      previous = Application.get_env(:ex_atlas, :lambda_labs)
+
+      Application.put_env(:ex_atlas, :lambda_labs,
+        api_key: "lambda-test-key",
+        base_url: "http://localhost:#{bypass.port}"
+      )
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ex_atlas, :lambda_labs, previous),
+          else: Application.delete_env(:ex_atlas, :lambda_labs)
+      end)
+
+      {:ok, bypass: bypass}
+    end
+
+    test "deletes an untracked atlas- instance past the grace window, leaves a younger one", %{
+      bypass: bypass
+    } do
+      TestOrchestrator.put_env(reap_grace_ms: 60 * 60 * 1_000)
+      now = DateTime.utc_now()
+      old = now |> DateTime.add(-2, :hour) |> DateTime.to_iso8601()
+      young = now |> DateTime.add(-5, :minute) |> DateTime.to_iso8601()
+
+      instances = [
+        instance(%{"id" => "old1", "name" => "atlas-old", "tags" => created_at(old)}),
+        instance(%{"id" => "young1", "name" => "atlas-young", "tags" => created_at(young)})
+      ]
+
+      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+        json(conn, 200, %{"data" => instances, "page_token" => nil})
+      end)
+
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
+        {body, conn} = read_json(conn)
+        send(test_pid, {:terminated, body["instance_ids"]})
+        json(conn, 200, %{"data" => %{"terminated_instances" => []}})
+      end)
+
+      :ok = Reaper.reap_now("atlas-", [:lambda_labs])
+
+      assert_received {:terminated, ["old1"]}
+      refute_received {:terminated, _}
+    end
+  end
+
   describe "max_cost" do
     test "a $36/hour type and a 1-cent cap terminates the instance, with no billing read" do
       bypass = Bypass.open()
@@ -152,4 +203,6 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
       refute_received {:atlas_compute, "capped1", {:spend_reconciled, _}}
     end
   end
+
+  defp created_at(at), do: [%{"key" => "atlas-created-at", "value" => at}]
 end
