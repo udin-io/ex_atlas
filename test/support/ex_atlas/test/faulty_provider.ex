@@ -60,7 +60,8 @@ defmodule ExAtlas.Test.FaultyProvider do
   def get_compute(id, ctx), do: with_fault(:get_compute, fn -> Mock.get_compute(id, ctx) end)
 
   @impl true
-  def list_compute(filters, ctx), do: Mock.list_compute(filters, ctx)
+  def list_compute(filters, ctx),
+    do: with_fault(:list_compute, fn -> Mock.list_compute(filters, ctx) end)
 
   @impl true
   def stop(id, ctx), do: Mock.stop(id, ctx)

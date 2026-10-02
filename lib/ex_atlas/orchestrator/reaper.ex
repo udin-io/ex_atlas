@@ -242,10 +242,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
     state = warn_silent_once(state, silent)
 
     case result do
-      {:ok, owner, dead} ->
+      {:ok, owner, peers} ->
         left_alone =
           Enum.reduce(state.providers, state.left_alone, fn provider, seen ->
-            reap_provider(provider, state.prefix, state.grace_ms, {owner, dead}, seen)
+            reap_provider(provider, state.prefix, state.grace_ms, {owner, peers}, seen)
           end)
 
         {:noreply, %{state | left_alone: left_alone, announced: nil}}
@@ -279,14 +279,14 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp ownership_gate({:ok, nil}) do
     if clustered_without_owner?(nil),
       do: {{:closed, :clustered_without_owner}, []},
-      else: {{:ok, nil, %{}}, []}
+      else: {{:ok, nil, :no_owner}, []}
   end
 
   defp ownership_gate({:ok, owner}) do
     %{same: same, silent: silent, owners: owners, unsure: unsure} = ask_peers(owner)
 
     case same do
-      [] -> {{:ok, owner, dead_owners(owners, unsure)}, silent}
+      [] -> {{:ok, owner, {owners, unsure}}, silent}
       nodes -> {{:closed, {:duplicate_owner, owner, nodes}}, silent}
     end
   end
@@ -295,8 +295,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # One that reports no owner, an invalid one, or cannot report may be the
   # dead owner itself (slow, misconfigured, on an old release), so with any
   # such peer no owner reads as dead this tick.
-  defp dead_owners(_peer_owners, [_unsure | _]), do: %{}
-  defp dead_owners(peer_owners, []), do: Map.drop(Lease.dead_owners(), peer_owners)
+  defp dead_owners(:no_owner), do: %{}
+  defp dead_owners({_peer_owners, [_unsure | _]}), do: %{}
+  defp dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
 
   # Two nodes with one owner each read the other's pods as their own. Only a
   # reported match stops reaping. A peer that cannot answer (an ex_atlas older
@@ -400,8 +401,8 @@ defmodule ExAtlas.Orchestrator.Reaper do
     Enum.each(silent, &warn_silent/1)
 
     case result do
-      {:ok, owner, dead} ->
-        Enum.each(providers, &reap_provider(&1, prefix, grace_ms, {owner, dead}, MapSet.new()))
+      {:ok, owner, peers} ->
+        Enum.each(providers, &reap_provider(&1, prefix, grace_ms, {owner, peers}, MapSet.new()))
 
       {:closed, reason} ->
         log_closed(reason)
@@ -477,7 +478,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   # Returns the ids left alone so far, so a periodic Reaper logs each one once
   # per boot rather than once per tick.
-  defp reap_provider(provider, prefix, grace_ms, {owner, dead}, left_alone) do
+  defp reap_provider(provider, prefix, grace_ms, {owner, peers}, left_alone) do
     case list_compute(provider) do
       {:ok, computes} ->
         tracked = registered_ids()
@@ -489,6 +490,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
           |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
           |> Enum.split_with(&Ownership.ours?(&1.name, prefix, owner))
 
+        # Read after the list, which can take tens of seconds: an owner that
+        # renewed meanwhile is no longer dead.
+        dead = if others == [], do: %{}, else: dead_owners(peers)
         {dead_owners, others} = Enum.split_with(others, &dead_owner(&1, prefix, owner, dead))
 
         Enum.each(ours, &delete_ours(&1, provider))

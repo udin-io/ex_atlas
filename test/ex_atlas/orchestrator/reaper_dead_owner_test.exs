@@ -136,6 +136,22 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
     end
   end
 
+  # The list can take tens of seconds. m1 comes back while it runs.
+  test "an owner that renews while its provider lists is not dead at the delete",
+       %{lease: lease} do
+    dead!(lease)
+    compute = pod()
+    FaultyProvider.arm(:list_compute, {:block_after, self()})
+    reaping = Task.async(fn -> reap([FaultyProvider]) end)
+    assert_receive {:blocked, :list_compute, listing}, 2_000
+
+    :ok = Store.renew_lease("m1", now() + @ttl)
+    send(listing, :release)
+    Task.await(reaping)
+
+    assert status(compute) == :running
+  end
+
   describe "a pod of a dead owner that something else still holds" do
     setup %{lease: lease} do
       dead!(lease)
