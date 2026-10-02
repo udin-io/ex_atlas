@@ -48,6 +48,10 @@ defmodule ExAtlas.Orchestrator.Adopter do
       for the rest of this boot**. A node that cannot tell which running pods
       are its own must never issue a DELETE.
 
+  It records the outcome for its supervisor before it sends it, so a Reaper
+  that restarts later in the boot, or was down when the signal went out,
+  starts with the gate in the same state.
+
   ## Records of other owners
 
   A tracking store shared by several nodes holds every node's tasks. A node

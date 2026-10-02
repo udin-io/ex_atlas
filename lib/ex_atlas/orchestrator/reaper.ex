@@ -58,6 +58,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   bounded by `:max_runtime_ms` and an operator reading the log, while a
   wrongly reaped task is hours of GPU spend that no longer exists.
 
+  The Adopter runs once per boot, so it records its outcome before it sends
+  it. A Reaper that crashes and restarts reads that record and keeps the gate
+  as it was: open after `:adoption_complete`, shut after `:adoption_failed`.
+  The record is keyed by the pid of the supervisor the two share. A new tree
+  (the app started again in the same VM, or a restarted supervisor) has a new
+  pid, so its Reaper starts gated until that tree's Adopter signals.
+
   With no store configured (`tracking_store: false`) there is nothing to wait
   for and the Reaper behaves exactly as it did before adoption existed.
 
