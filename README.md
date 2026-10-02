@@ -597,8 +597,8 @@ compute.ports
   attached. The source is `0.0.0.0/0`; `provider_opts: %{source_network:
   "203.0.113.0/24"}` narrows it. `ports: []` creates no ruleset.
   `terminate/2` deletes the ruleset, but Lambda refuses while the instance
-  still uses it, so the next spawn also deletes `atlas-` rulesets that no
-  instance uses. Lambda applies no firewall rules in `us-south-1`: a spawn
+  still uses it, so the next spawn also deletes the rulesets ExAtlas named
+  that no instance uses. Lambda applies no firewall rules in `us-south-1`: a spawn
   there creates no ruleset, and its ports stay closed.
 - The spawn picks the first of `region_hints` with capacity, else Lambda's
   first region with capacity. `provider_opts: %{instance_type: "..."}` names

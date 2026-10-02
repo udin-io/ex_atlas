@@ -32,6 +32,8 @@ names the PR or issue that holds the reasoning.
 | Source network `0.0.0.0/0`, or `provider_opts.source_network` | Require `source_network`: RunPod's public ports are open to all today | #86 |
 | Ruleset name `atlas-<instance name>-<8 hex>`, cut to Lambda's 64 characters | `atlas-<instance name>`: Lambda's rule on a duplicate name is unknown, and a respawn reuses the name while the old instance still holds its ruleset | #86 |
 | `terminate/2` finds the ruleset by `instance_ids` before it terminates, and ignores every ruleset error | Fail `terminate/2` on a ruleset error: the instance is gone, and a retry cannot fix the ruleset | #86 |
+| The sweep and `terminate/2` touch only names that match `atlas-...-<8 hex>` | Any `atlas-` prefix: a ruleset you named `atlas-prod` would go (the fresh review's finding) | #86 |
+| A launch refused with a 4xx deletes the ruleset; a 5xx or a timeout keeps it | Delete after every error: the delete can land before Lambda attaches the ruleset to an instance it did rent, which then runs with its ports closed | #86 |
 | `us-south-1` gets no ruleset | Create one anyway: Lambda's docs say firewall rules do not apply there | #86 |
 
 ## Data staging (feature #26)

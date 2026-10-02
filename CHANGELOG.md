@@ -42,13 +42,15 @@ and launches the instance with it attached.
   `0.0.0.0/0`. A `source_network` that is not a string is `:validation`.
   `ports: []` creates no ruleset, and neither does `us-south-1`, where Lambda
   applies no firewall rules.
-- A refused ruleset create fails the spawn before the launch. A refused
-  launch deletes the ruleset it created.
+- A refused ruleset create fails the spawn before the launch. A launch
+  Lambda refuses with a 4xx deletes the ruleset it created; after a 5xx or a
+  timeout the ruleset stays, since the instance may hold it.
 - `terminate/2` deletes the instance, then its ruleset. Lambda refuses while
   the instance still uses the ruleset (`firewall-rulesets/firewall-ruleset-in-use`);
   `terminate/2` still returns `:ok`. Every spawn with `ports:` first deletes
-  `atlas-` rulesets that no instance uses and that are 5 minutes old or
-  more, at most 10 a spawn.
+  rulesets named `atlas-...-<8 hex>` that no instance uses and that are 5
+  minutes old or more, at most 10 a spawn. A ruleset you name `atlas-prod` is
+  yours.
 - `terminate/2` makes one more call, `GET /firewall-rulesets`, to find the
   instance's ruleset.
 
