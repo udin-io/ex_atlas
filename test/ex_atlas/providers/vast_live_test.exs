@@ -167,6 +167,17 @@ defmodule ExAtlas.Providers.VastLiveTest do
     assert [price] = spot
     assert is_number(price) and price > 0
 
+    # Whether a bid search orders by dph_total the way the pick's order
+    # assumes: the printed min_bids should rise.
+    {:ok, query} = ExAtlas.Providers.Vast.Translate.gpu_type_query(:rtx_4090, :bid)
+    {:ok, %{"offers" => offers}} = Client.post(ctx(opts), "/api/v0/bundles/", query)
+
+    IO.puts(
+      "first bid offers' min_bid: #{inspect(offers |> Enum.take(8) |> Enum.map(& &1["min_bid"]))}"
+    )
+
+    assert Enum.all?(offers, &is_number(&1["min_bid"])), "a bid offer lists no min_bid"
+
     {:ok, compute} =
       ExAtlas.spawn_compute(
         [gpu: :rtx_4090, name: name, image: "nginx:alpine", spot: true] ++ opts

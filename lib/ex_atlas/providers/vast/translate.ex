@@ -117,8 +117,8 @@ defmodule ExAtlas.Providers.Vast.Translate do
   defp offer_type(%Spec.ComputeRequest{spot: true}), do: :bid
   defp offer_type(%Spec.ComputeRequest{}), do: :ondemand
 
-  # The order is `dph_total` for both types: Vast prices a `bid` search by the
-  # minimum bid.
+  # The order is `dph_total` for both types: Vast's reference says a `bid`
+  # search prices offers by their minimum bid. The live test prints the order.
   defp base_query(type) do
     %{
       "verified" => %{"eq" => true},
