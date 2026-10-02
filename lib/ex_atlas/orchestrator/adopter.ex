@@ -281,12 +281,20 @@ defmodule ExAtlas.Orchestrator.Adopter do
     end
   end
 
-  defp signal(nil, _message), do: :ok
+  defp signal(notify, :adoption_complete = message) do
+    :ok = Reaper.record_adoption(:settled)
+    send_signal(notify, message)
+  end
 
-  defp signal(pid, message) when is_pid(pid) do
+  defp signal(notify, message), do: send_signal(notify, message)
+
+  defp send_signal(nil, _message), do: :ok
+
+  defp send_signal(pid, message) when is_pid(pid) do
     send(pid, message)
     :ok
   end
 
-  defp signal(name, message) when is_atom(name), do: signal(Process.whereis(name), message)
+  defp send_signal(name, message) when is_atom(name),
+    do: send_signal(Process.whereis(name), message)
 end

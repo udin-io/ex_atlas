@@ -155,8 +155,53 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   # With no tracking store there is nothing to adopt and nothing to wait for,
   # so the Reaper behaves exactly as it did before adoption existed.
+  #
+  # With one, a Reaper restarted after the Adopter's one signal takes the
+  # outcome its tree recorded. A new tree has a new supervisor pid, so an
+  # outcome from an earlier start of the app never opens its gate.
   defp initial_adoption do
-    if TrackingStore.impl(), do: :pending, else: :settled
+    if TrackingStore.impl(), do: recorded_adoption() || :pending, else: :settled
+  end
+
+  @adoption_key {__MODULE__, :adoption}
+
+  @doc false
+  # The Adopter calls this before it signals: the signal is lost when the
+  # Reaper is down at that moment, and the record is not. Keyed by the
+  # supervisor the caller runs under, which the Reaper shares. Entries of dead
+  # supervisors are dropped on each write, so `:persistent_term` sees one
+  # write per boot.
+  @spec record_adoption(:settled) :: :ok
+  def record_adoption(outcome) when outcome in [:settled] do
+    case tree() do
+      nil ->
+        :ok
+
+      sup ->
+        live =
+          @adoption_key
+          |> :persistent_term.get(%{})
+          |> Map.filter(fn {pid, _outcome} -> Process.alive?(pid) end)
+
+        :persistent_term.put(@adoption_key, Map.put(live, sup, outcome))
+    end
+  end
+
+  defp recorded_adoption do
+    case tree() do
+      nil -> nil
+      sup -> Map.get(:persistent_term.get(@adoption_key, %{}), sup)
+    end
+  end
+
+  # The supervisor this process runs under. `proc_lib` stores a registered
+  # parent by name and an unregistered one by pid.
+  defp tree do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> pid
+      [name | _] when is_atom(name) -> Process.whereis(name)
+      _none -> nil
+    end
   end
 
   @impl true

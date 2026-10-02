@@ -225,6 +225,91 @@ defmodule ExAtlas.Orchestrator.DeployTest do
     end
   end
 
+  # Issue 122: the Adopter signals once per boot, so a Reaper that restarts
+  # after that signal must learn the outcome some other way, and must never
+  # take it from an earlier tree.
+  describe "a Reaper that restarts within a boot" do
+    test "reaps an orphan on its next tick once adoption has settled" do
+      sup = boot()
+      {:ok, orphan} = spawn_orphan()
+
+      crash_reaper(sup)
+      tick()
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+    end
+
+    test "reaps when the Adopter signalled while it was down" do
+      # The signal goes to the registered name; with the Reaper down it goes
+      # nowhere.
+      children = Enum.reject(ExAtlas.Application.orchestrator_children(), &(&1 == Adopter))
+      sup = start_tree(children)
+      :ok = Supervisor.terminate_child(sup, Reaper)
+
+      {:ok, adopter} = Supervisor.start_child(sup, Adopter)
+      ref = Process.monitor(adopter)
+      assert_receive {:DOWN, ^ref, :process, ^adopter, :normal}, 5_000
+
+      {:ok, _reaper} = Supervisor.restart_child(sup, Reaper)
+      {:ok, orphan} = spawn_orphan()
+      tick()
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+    end
+
+    test "in a new tree reaps nothing until that tree's Adopter signals" do
+      # The first tree settles; the second is the app started again in the
+      # same VM, its Adopter not yet run.
+      boot()
+      shutdown()
+
+      children = Enum.reject(ExAtlas.Application.orchestrator_children(), &(&1 == Adopter))
+      sup = start_tree(children)
+      {:ok, orphan} = spawn_orphan()
+
+      tick()
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+
+      crash_reaper(sup)
+      tick()
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+    end
+  end
+
+  defp spawn_orphan do
+    ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x", name: "atlas-orphan")
+  end
+
+  # The bug's trigger is any crash, so the test uses the bluntest one.
+  defp crash_reaper(sup) do
+    old = Process.whereis(Reaper)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, :killed}, 2_000
+    await_restart(sup, old, 200)
+  end
+
+  defp await_restart(_sup, _old, 0), do: flunk("the Reaper was not restarted")
+
+  defp await_restart(sup, old, tries) do
+    case List.keyfind(Supervisor.which_children(sup), Reaper, 0) do
+      {Reaper, pid, _type, _mods} when is_pid(pid) and pid != old ->
+        :ok
+
+      _not_yet ->
+        Process.sleep(10)
+        await_restart(sup, old, tries - 1)
+    end
+  end
+
+  # One full tick, observed by synchronising on the Reaper.
+  defp tick do
+    reaper = Process.whereis(Reaper)
+    send(reaper, :reap)
+    _ = :sys.get_state(reaper)
+    :ok
+  end
+
   defp run_task(overrides) do
     Orchestrator.run_task(
       Keyword.merge(
@@ -243,17 +328,17 @@ defmodule ExAtlas.Orchestrator.DeployTest do
   end
 
   defp boot do
-    children = ExAtlas.Application.orchestrator_children()
-
-    sup =
-      start_supervised!(%{
-        id: :atlas_orchestrator_tree,
-        start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]},
-        type: :supervisor
-      })
-
+    sup = start_tree(ExAtlas.Application.orchestrator_children())
     await_adoption(sup)
     sup
+  end
+
+  defp start_tree(children) do
+    start_supervised!(%{
+      id: :atlas_orchestrator_tree,
+      start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]},
+      type: :supervisor
+    })
   end
 
   defp shutdown, do: stop_supervised!(:atlas_orchestrator_tree)
