@@ -52,6 +52,12 @@ defmodule ExAtlas.Providers.Vast do
   task also vanishes, which reads the same on spot capacity, so pass a
   `:callback` to a spot task you respawn (see `ExAtlas.Orchestrator.TaskOutcome`).
 
+  `compute_spend/3` reads `GET /api/v0/charges/`: the instance's GPU, disk and
+  bandwidth charges for the UTC days from `:from` (default: the instance's
+  start) to `:to` (default: now). Vast takes no instance filter, so the call
+  pages through the account's contract rows for those days. `ExAtlas.Orchestrator`
+  uses it for `max_cost`.
+
   `stop/2` and `start/2` pause and resume an instance (`PUT` with
   `state: "stopped"` or `"running"`). Both return `:ok` once Vast takes the
   request; the instance reads `:stopped` or `:running` on the next
@@ -74,7 +80,7 @@ defmodule ExAtlas.Providers.Vast do
   @search_concurrency 4
 
   @impl true
-  def capabilities, do: [:raw_tcp, :self_terminate, :spot]
+  def capabilities, do: [:billing, :raw_tcp, :self_terminate, :spot]
 
   @impl true
   def spawn_compute(%Spec.ComputeRequest{} = request, ctx) do
@@ -130,6 +136,59 @@ defmodule ExAtlas.Providers.Vast do
 
   @impl true
   def start(id, ctx), do: set_state(ctx, id, :running, "start")
+
+  @impl true
+  # Vast lists charges by UTC day, so the window snaps down to midnight and
+  # the total covers whole days. The rows are the account's, filtered to this
+  # instance by `source`.
+  def compute_spend(id, opts, ctx) do
+    to = opts[:to] || DateTime.utc_now()
+
+    with {:ok, from} <- spend_from(id, opts[:from], ctx),
+         :ok <- check_window(from, to),
+         day = day_start(from),
+         {:ok, rows} <-
+           Client.instance_charges(
+             ctx,
+             "instance-#{id}",
+             DateTime.to_unix(day),
+             DateTime.to_unix(to)
+           ) do
+      case Translate.charges_to_spend(rows, id, day, to) do
+        {:ok, spend} -> {:ok, spend}
+        :error -> unexpected_body("GET /api/v0/charges/ (a row with no amount)")
+      end
+    end
+  end
+
+  defp spend_from(_id, %DateTime{} = from, _ctx), do: {:ok, from}
+
+  defp spend_from(id, nil, ctx) do
+    with {:ok, compute} <- get_compute(id, ctx) do
+      case compute.created_at do
+        %DateTime{} = created_at ->
+          {:ok, created_at}
+
+        nil ->
+          {:error,
+           Error.new(:validation,
+             provider: :vast,
+             message: "Vast lists no start_date for instance #{id}; pass :from"
+           )}
+      end
+    end
+  end
+
+  defp check_window(from, to) do
+    if DateTime.compare(from, to) == :gt,
+      do: {:error, Error.new(:validation, provider: :vast, message: ":from is after :to")},
+      else: :ok
+  end
+
+  defp day_start(%DateTime{} = at) do
+    unix = DateTime.to_unix(at)
+    DateTime.from_unix!(unix - Integer.mod(unix, 86_400))
+  end
 
   @impl true
   # Two searches per catalog GPU, on-demand and interruptible, four at a

@@ -66,6 +66,41 @@ defmodule ExAtlas.Test.FakeVast do
     )
   end
 
+  @doc """
+  One contract's row from `GET /api/v0/charges/`, as Vast's OpenAPI reference
+  shows it. `items` are `{type, amount}` pairs; the row's `amount` defaults to
+  their sum.
+  """
+  def charge_row(id, items, attrs \\ %{}) do
+    amount = items |> Enum.map(&elem(&1, 1)) |> Enum.sum() |> Float.round(3)
+
+    Map.merge(
+      %{
+        "start" => 1_790_000_000,
+        "end" => 1_790_086_400,
+        "type" => "instance",
+        "source" => "instance-#{id}",
+        "description" => "Instance #{id} Charges - 1 days",
+        "amount" => amount,
+        "metadata" => %{"label" => "atlas-test"},
+        "items" =>
+          for {type, item_amount} <- items do
+            %{
+              "start" => 1_790_000_000,
+              "end" => 1_790_086_400,
+              "type" => Atom.to_string(type),
+              "source" => nil,
+              "description" => "#{type} charge",
+              "amount" => item_amount,
+              "metadata" => %{},
+              "items" => []
+            }
+          end
+      },
+      attrs
+    )
+  end
+
   @doc "A refused rent, as Vast's reference documents it."
   def refused(code, msg), do: %{"success" => false, "error" => code, "msg" => msg}
 
