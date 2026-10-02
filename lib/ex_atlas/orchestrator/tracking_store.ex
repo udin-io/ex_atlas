@@ -184,8 +184,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   cap, and ends with `{:respawn_failed, _}` where it would respawn. A store
   must return each record term for term, `:mac` byte for byte.
 
-  An unsigned record can still name any pod id of this account, and its
-  deadline deletes that pod (issue 138).
+  An unsigned record names a pod id its writer chose, and its deadline
+  deletes that pod. So it adopts only when the provider names that pod as
+  this node's Reaper would delete it: with `:reap_name_prefix` and, with a
+  `:reap_owner`, that owner. Any other unsigned record is kept and logged,
+  and adopts nothing (see `ExAtlas.Orchestrator.Adopter`).
 
   ## A store shared by several nodes
 

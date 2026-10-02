@@ -71,6 +71,17 @@ defmodule ExAtlas.Orchestrator.Adopter do
     * **An invalid `:reap_owner`** adopts nothing and keeps every record, as the
       Reaper reaps nothing while the owner is invalid.
 
+  ## Records this node did not sign
+
+  An adopted task deletes its pod at its deadline with this node's key, and
+  whoever wrote the record chose the pod id. A record whose signature does not
+  check (`ExAtlas.Orchestrator.TrackingStore.sealed?/1`) is adopted only when
+  the provider names its pod as this node's Reaper would delete it: the name
+  starts with `:reap_name_prefix` and, with a `:reap_owner`, carries that
+  owner (`ExAtlas.Orchestrator.Ownership.ours?/3`). Any other unsigned record,
+  and one whose pod the provider could not report, is skipped, kept, logged
+  and not claimed. The next boot checks it again.
+
   ## Records this build does not understand
 
   A record with a `:v` other than 1, 2 or 3, a `:mode` other than `:task`, or a

@@ -53,7 +53,7 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.Lease` | `GenServer`, only with a lease store, `:reap_owner` and a callback secret | Every `lease_ttl_ms / 3`, renews this node's lease, releases trackers of records another node owns, and, once it held its lease a full ttl, claims and adopts (in a task) the signed records of owners whose lease expired |
 | `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
-| `Orchestrator.Ownership` | Functions | Reads and validates `reap_owner`; stamps it into pod names |
+| `Orchestrator.Ownership` | Functions | Reads and validates `reap_owner`; stamps it into pod names; `ours?/3` is the may-delete test the Reaper and the Adopter share |
 | `Orchestrator.ComputeRegistry`, `ComputeSupervisor` | `Registry`, `DynamicSupervisor` | Look up and supervise trackers |
 | `Callback` | Functions | Routes a pod's report into a tracker through the `Registry` |
 
@@ -204,6 +204,33 @@ flowchart TD
   pt -.->|"init: this tree's outcome,<br/>after a Reaper restart"| rp
   rp -->|"list, delete untracked"| prov
   rp -.->|"ours = Registry or store"| store
+```
+
+## What adoption does with a record this node did not sign
+
+A store writer without the callback secret chooses an unsigned record's pod
+id, and an adopted task deletes that pod at its deadline. So the Adopter
+adopts an unsigned record only for a pod the Reaper would delete too, by the
+name the provider reports (#138):
+
+```mermaid
+sequenceDiagram
+  participant Store as TrackingStore
+  participant Ad as Adopter
+  participant P as Provider
+  participant CS as ComputeServer
+  Ad->>Store: all()
+  Store-->>Ad: records
+  Ad->>P: get_compute(id)
+  P-->>Ad: compute with the provider's name, 404, or no answer
+  alt 404
+    Ad->>Store: delete(id)
+  else signed, or unsigned and Ownership.ours?(name, prefix, owner)
+    Ad->>Store: claim when unowned
+    Ad->>CS: start the tracker, deadline armed
+  else unsigned, name fails or no answer
+    Ad->>Ad: skip and keep the record, log, no claim, no tracker
+  end
 ```
 
 ## What a respawn after adoption does

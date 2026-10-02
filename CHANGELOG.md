@@ -36,6 +36,33 @@ ExAtlas.Orchestrator.list_ids()
 - **Upgrade:** `Migration` step 2 creates `atlas_owner_leases`. A database
   that ran step 1 needs a migration calling `Migration.up(version: 2)`.
 
+### Fixed: a forged tracking record no longer deletes another app's pod (#138)
+
+A writer of the tracking store without the callback secret could file an
+unsigned record under any pod id of the account, with its deadline spent.
+The next boot adopted it, and the deadline deleted that pod with the node's
+key.
+
+```elixir
+# a row in atlas_tracking_records, no :mac, id: "pod-of-other-app"
+# the provider names that pod "billing-db"
+# before: adopted, then ExAtlas.terminate("pod-of-other-app")
+# after:  [warning] not adopting pod-of-other-app: its record is not signed by
+#         this node, and the provider names the pod "billing-db", which this
+#         node's Reaper would not delete ...
+```
+
+- An unsigned record adopts only when the provider's name for its pod starts
+  with `:reap_name_prefix` and, with a `:reap_owner`, carries it: the pods
+  the Reaper deletes once untracked. Any other one is kept, logged and not
+  claimed. So is one whose provider does not answer at boot; the next boot
+  checks it again. Signed records adopt as before.
+- **Upgrade:** a task persisted by 0.8.0, by a node with no callback secret,
+  or under a rotated secret, whose pod name lacks the prefix or this node's
+  owner, is no longer adopted after a restart. The Reaper leaves such a pod
+  alone too: terminate it by hand. A `persist: true` spawn on a node with no
+  callback secret warns when its name will not pass.
+
 ### Fixed: an adopted task respawns only from a record this node signed (#131)
 
 A tracking record's writer chose what an adopted task's respawn rented: the
