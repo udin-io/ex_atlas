@@ -288,6 +288,26 @@ defmodule ExAtlas.Providers.RunPod.TranslateTest do
   end
 
   describe "pod_to_compute/2" do
+    test "keeps the pod env out of raw and every other raw key in it" do
+      pod =
+        Map.put(fixture("running"), "env", %{
+          "HF_TOKEN" => "hf-secret-5d1",
+          "ATLAS_CALLBACK_TOKEN" => "cb-secret-8e2"
+        })
+
+      compute = Translate.pod_to_compute(pod)
+
+      refute Map.has_key?(compute.raw, "env")
+      assert compute.raw == Map.delete(pod, "env")
+      refute inspect(compute, structs: false, limit: :infinity) =~ "hf-secret-5d1"
+      refute inspect(compute, structs: false, limit: :infinity) =~ "cb-secret-8e2"
+    end
+
+    test "a pod with no env keeps its raw as given" do
+      pod = Map.delete(fixture("running"), "env")
+      assert Translate.pod_to_compute(pod).raw == pod
+    end
+
     test "threads auth through" do
       auth = %{scheme: :bearer, token: "t", hash: "h", header: "Authorization: Bearer t"}
       compute = Translate.pod_to_compute(fixture("running"), auth)

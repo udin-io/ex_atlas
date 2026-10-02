@@ -112,12 +112,13 @@ defmodule ExAtlas.Providers.RunPod do
       {:ok, pod} when is_map(pod) ->
         {:ok, Translate.pod_to_compute(pod)}
 
-      {:ok, other} ->
+      # `raw` stays nil: a list of pod bodies would carry every pod's env.
+      {:ok, _other} ->
         {:error,
          ExAtlas.Error.new(:provider,
            provider: :runpod,
            message: "unexpected body for GET /pods/#{id}",
-           raw: other
+           raw: nil
          )}
 
       {:error, _} = err ->

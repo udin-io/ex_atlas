@@ -7,6 +7,24 @@ defmodule ExAtlas.ErrorTest do
     assert err.message == "bad key"
   end
 
+  test "from_response keeps no body for a success status the caller did not expect" do
+    # A 200 or 202 answers with the resource, not an error: RunPod's pod body
+    # carries the pod's env.
+    body = %{"id" => "p1", "env" => %{"HF_TOKEN" => "hf-secret-5d1"}}
+
+    for status <- [200, 202] do
+      err = ExAtlas.Error.from_response(status, body, :runpod)
+      assert err.status == status
+      assert err.raw == nil
+      refute inspect(err, structs: false, limit: :infinity) =~ "hf-secret-5d1"
+    end
+
+    # Control: an error status keeps its body.
+    assert ExAtlas.Error.from_response(400, %{"detail" => "bad"}, :runpod).raw == %{
+             "detail" => "bad"
+           }
+  end
+
   test "from_response maps 404 to :not_found" do
     err = ExAtlas.Error.from_response(404, %{"message" => "gone"}, :runpod)
     assert err.kind == :not_found
