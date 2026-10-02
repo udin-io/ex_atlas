@@ -238,8 +238,13 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       :sys.resume(pid)
 
       assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
-      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
-      assert Process.alive?(pid)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      # A recorded report settles a vanished pod as finished, so it is never
+      # respawned. The dropped report leaves the replacement preemptible.
+      :ok = Mock.forget(new_id)
+      assert_receive {:atlas_compute, ^new_id, {:respawned, _third_id}}, 2_000
+      refute_received {:atlas_compute, _, {:task, :completed}}
     end
 
     defp await_mailbox(pid, tries \\ 2_000) do
