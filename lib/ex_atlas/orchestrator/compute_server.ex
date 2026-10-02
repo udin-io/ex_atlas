@@ -322,11 +322,16 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   @doc false
   def start_link(arg) do
+    arg = sealed(arg)
     name = {:via, Registry, {ComputeRegistry, {:compute, tracked_id(arg)}}}
     GenServer.start_link(__MODULE__, arg, name: name)
   end
 
   def child_spec(arg) do
+    # Sealed here too: a supervisor keeps the child spec, and a crash in
+    # `start_link/1` prints its argument.
+    arg = sealed(arg)
+
     %{
       id: {:compute_server, tracked_id(arg)},
       start: {__MODULE__, :start_link, [arg]},
@@ -334,6 +339,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       shutdown: @shutdown_timeout_ms,
       type: :worker
     }
+  end
+
+  # `Orchestrator.spawn/1` has sealed these already; a tracker started
+  # directly gets the same, so its state never holds a raw key.
+  defp sealed({:adopted, _record} = arg), do: arg
+
+  defp sealed({compute, opts}) do
+    case ExAtlas.Config.seal_credentials(opts) do
+      {:ok, opts} -> {compute, opts}
+      {:error, error} -> raise error
+    end
   end
 
   defp tracked_id({:adopted, record}), do: record.id

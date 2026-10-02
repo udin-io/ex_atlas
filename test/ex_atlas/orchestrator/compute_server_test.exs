@@ -304,9 +304,24 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       log = clause_crash_log(pid)
 
       # The crash and its stacktrace were logged, so the refute is not vacuous.
+      # Only the stacktrace frame prints the sealed key; `format_status/1`
+      # drops it from the State line.
       assert log =~ "terminating"
-      assert log =~ "handle_call"
+      assert log =~ "#ExAtlas.Secret<redacted>"
       assert log =~ compute.id
+      refute log =~ @api_key
+    end
+
+    test "a tracker started without Orchestrator.spawn/1 prints no api_key either" do
+      {:ok, compute} = ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x")
+      opts = [provider: :mock, api_key: @api_key, status_poll_ms: false]
+
+      {:ok, pid} =
+        DynamicSupervisor.start_child(ComputeSupervisor, {ComputeServer, {compute, opts}})
+
+      log = clause_crash_log(pid)
+
+      assert log =~ "#ExAtlas.Secret<redacted>"
       refute log =~ @api_key
     end
 
