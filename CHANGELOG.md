@@ -97,6 +97,7 @@ pod may exist. Lambda's launch follows the same rule
 
 `:rtx_6000` is `gpu_1x_rtx6000` and `:a100_80g` is `gpu_1x_a100_80gb_sxm4`,
 as Lambda names them. `:gh200` maps to `gpu_1x_gh200`.
+
 ### Added: `respawn_credentials:`, a respawn after a deploy (#87)
 
 A `persist: true` task with `s3:` or `env:` that was preempted after a

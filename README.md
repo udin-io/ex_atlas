@@ -83,7 +83,7 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_atlas, "~> 0.7"}
+    {:ex_atlas, "~> 0.8"}
   ]
 end
 ```

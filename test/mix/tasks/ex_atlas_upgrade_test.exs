@@ -27,6 +27,12 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
 
       assert_has_notice(igniter, &(&1 =~ "ExAtlas 0.2 introduces"))
     end
+
+    test "reaches the newest upgrader without the :ex_atlas application loaded" do
+      igniter = unloaded(fn -> upgrade() end)
+
+      assert_has_notice(igniter, &(&1 =~ "https://hexdocs.pm/ex_atlas/upgrading.html"))
+    end
   end
 
   describe "0.7.0 to 0.8.0" do

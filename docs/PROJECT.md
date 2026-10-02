@@ -8,10 +8,9 @@ structure, a risk or a decision updates the pages in the same PR.
 
 ## What ExAtlas is
 
-ExAtlas is an Elixir library (`ex_atlas`, version 0.7.0 on Hex, 0.8.0
-unreleased). It gives one API over GPU clouds, with RunPod as the only
-complete provider, plus an opt-in orchestrator that tracks, polls and
-deletes the pods you rent. It also carries Fly.io platform operations
+ExAtlas is an Elixir library (`ex_atlas`, version 0.8.0). It gives one
+API over GPU clouds, with RunPod as the only complete provider, plus an
+opt-in orchestrator that tracks, polls and deletes the pods you rent. It also carries Fly.io platform operations
 (deploys, log streaming, tokens) that are independent of the compute path.
 
 ## Public API
