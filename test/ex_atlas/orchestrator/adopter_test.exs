@@ -20,6 +20,9 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
 
   setup do
     ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
+    # Many records here are edited, so unsigned, and an unsigned record adopts
+    # only on a provider the Reaper covers (issue 138).
+    TestOrchestrator.put_env(reap_providers: [:mock])
   end
 
   defp task_opts(overrides) do

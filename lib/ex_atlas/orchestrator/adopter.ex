@@ -339,24 +339,22 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   # Whoever wrote an unsigned record chose its id, and an adopted task deletes
-  # that id at its deadline with this node's key. So it adopts only a pod this
-  # node's Reaper would delete too, by the name the provider reports: a record
-  # field proves nothing (issue 138).
+  # that id with this node's key. So it adopts only a pod this node's Reaper
+  # would delete too, judged on what the provider reports: a record field
+  # proves nothing (issue 138).
   defp unsigned_refusal(%{sealed: true}, _observation, _owner), do: nil
 
   defp unsigned_refusal(_record, {:poll_failed, _error}, _owner),
     do:
-      "its record is not signed by this node, and its pod's name could not be checked " <>
+      "its record is not signed by this node, and its pod could not be checked " <>
         "(the provider did not answer); the next boot checks again"
 
-  defp unsigned_refusal(_record, observation, owner) do
-    name = compute(observation, nil).name
-    prefix = Ownership.prefix()
+  defp unsigned_refusal(record, observation, owner) do
+    provider = Keyword.fetch!(TrackingStore.observe_opts(record), :provider)
 
-    unless Ownership.ours?(name, prefix, owner) do
-      "its record is not signed by this node, and the provider names the pod " <>
-        "#{inspect(name)}, which this node's Reaper would not delete (:reap_name_prefix " <>
-        "#{inspect(prefix)}, :reap_owner #{inspect(owner)})"
+    case Reaper.refusal(provider, compute(observation, record), owner) do
+      nil -> nil
+      why -> "its record is not signed by this node, and #{why}"
     end
   end
 

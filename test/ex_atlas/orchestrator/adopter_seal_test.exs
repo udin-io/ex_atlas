@@ -19,6 +19,12 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
 
   @moduletag :tmp_dir
 
+  # An unsigned record adopts only on a provider the Reaper covers (issue
+  # 138), and these tests rent on the Mock.
+  setup do
+    TestOrchestrator.put_env(reap_providers: [:mock])
+  end
+
   defp start_dets!(dir) do
     TestOrchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
     TrackingStore.Dets
@@ -278,6 +284,12 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
   # unsigned record under the id of a pod it wants deleted, with its deadline
   # spent. The pod's name is the provider's, so the writer cannot pick it.
   describe "an unsigned record naming a pod this node's Reaper would not delete" do
+    # The Reaper covers the providers these tests rent on, so each refusal
+    # below fires on the one clause it names.
+    setup do
+      TestOrchestrator.put_env(reap_providers: [:mock, FaultyProvider])
+    end
+
     defp rent!(name, provider \\ :mock) do
       {:ok, compute} =
         ExAtlas.spawn_compute(provider: provider, gpu: :h100, image: "postgres:16", name: name)
@@ -310,10 +322,10 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
       end)
     end
 
-    defp assert_left_alone(id, log) do
+    defp assert_left_alone(id, log, status \\ :running) do
       refute_receive {:atlas_compute, ^id, {:status, :terminated}}, 200
       assert {:error, :not_tracked} = Orchestrator.info(id)
-      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+      assert {:ok, %{status: ^status}} = ExAtlas.get_compute(id, provider: :mock)
       assert {:ok, _kept} = TrackingStore.Ecto.get(id)
       assert log =~ "not adopting #{id}"
       assert log =~ "not signed by this node"
@@ -334,6 +346,42 @@ defmodule ExAtlas.Orchestrator.AdopterSealTest do
 
       assert_left_alone(pod.id, log)
       assert log =~ ~s(names the pod "billing-db")
+    end
+
+    test "on a provider outside :reap_providers: left alone", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      TestOrchestrator.put_env(reap_providers: [:runpod])
+      pod = rent!("atlas-train")
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ ":reap_providers"
+    end
+
+    test "of a stopped pod: left alone, not deleted", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      pod = rent!("atlas-train")
+      :ok = Mock.stop(pod.id, %{})
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log, :stopped)
+      assert log =~ "reports it :stopped"
+    end
+
+    test "on a node with no owner that is connected to another: left alone", %{tmp_dir: dir} do
+      start_ecto!(dir)
+      _peer = ExAtlas.Test.Cluster.start_peer!()
+      pod = rent!("atlas-train")
+      forge!(pod)
+
+      log = adopt(pod.id)
+
+      assert_left_alone(pod.id, log)
+      assert log =~ "connected to other nodes"
     end
 
     test "named with another node's owner: left alone", %{tmp_dir: dir} do

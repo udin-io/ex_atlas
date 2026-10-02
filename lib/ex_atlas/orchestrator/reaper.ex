@@ -257,9 +257,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp ownership_gate({:error, error}), do: {{:closed, {:invalid_owner, error}}, []}
 
   defp ownership_gate({:ok, nil}) do
-    if Node.list() == [],
-      do: {{:ok, nil}, []},
-      else: {{:closed, :clustered_without_owner}, []}
+    if clustered_without_owner?(nil),
+      do: {{:closed, :clustered_without_owner}, []},
+      else: {{:ok, nil}, []}
   end
 
   defp ownership_gate({:ok, owner}) do
@@ -386,6 +386,39 @@ defmodule ExAtlas.Orchestrator.Reaper do
       grace_ms: Keyword.get(cfg, :reap_grace_ms, interval)
     }
   end
+
+  @doc false
+  # Why this node's Reaper would never delete `compute` of `provider` once
+  # nothing tracks it, or nil: the provider, the status, the cluster and the
+  # name, as a tick decides them. The Adopter adopts a record this node did not
+  # sign only when this is nil (issue 138), since an adopted task deletes its
+  # pod. A connected peer that shares `owner` is not checked here.
+  @spec refusal(atom() | module(), ExAtlas.Spec.Compute.t(), String.t() | nil) ::
+          String.t() | nil
+  def refusal(provider, compute, owner) do
+    prefix = Ownership.prefix()
+
+    cond do
+      not covers?(provider) ->
+        "#{inspect(provider)} is not in :reap_providers"
+
+      compute.status not in @billing_statuses ->
+        "the provider reports it #{inspect(compute.status)}, and the Reaper deletes only " <>
+          "a pod that bills (#{Enum.map_join(@billing_statuses, ", ", &inspect/1)})"
+
+      clustered_without_owner?(owner) ->
+        "this node has no :reap_owner and is connected to other nodes"
+
+      not Ownership.ours?(compute.name, prefix, owner) ->
+        "the provider names the pod #{inspect(compute.name)}, which the Reaper does not " <>
+          "delete (:reap_name_prefix #{inspect(prefix)}, :reap_owner #{inspect(owner)})"
+
+      true ->
+        nil
+    end
+  end
+
+  defp clustered_without_owner?(owner), do: owner == nil and Node.list() != []
 
   @doc """
   Whether a periodic Reaper reclaims `provider`'s orphans: whether it is in

@@ -336,6 +336,8 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
       tmp_dir: dir
     } do
       store = start_ecto!(dir)
+      # The record is unsigned, so its provider must be one the Reaper covers.
+      TestOrchestrator.put_env(reap_providers: [:mock])
 
       {:ok, compute} =
         ExAtlas.spawn_compute(provider: :mock, gpu: :h100, image: "x", name: @pod_name)
