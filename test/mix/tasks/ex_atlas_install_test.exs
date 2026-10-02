@@ -219,6 +219,32 @@ defmodule Mix.Tasks.ExAtlas.InstallTest do
              ]
     end
 
+    test "says which tracking store it replaced" do
+      files =
+        Map.put(host(), "config/config.exs", """
+        import Config
+        config :ex_atlas, :orchestrator, tracking_store: ExAtlas.Orchestrator.TrackingStore.Dets
+        """)
+
+      assert_has_notice(
+        install_ecto(files),
+        &(&1 =~ "ExAtlas.Orchestrator.TrackingStore.Dets" and &1 =~ "persist: true")
+      )
+    end
+
+    test "warns about another tracking store set in another config file" do
+      files =
+        Map.put(host(), "config/runtime.exs", """
+        import Config
+        config :ex_atlas, :orchestrator, tracking_store: ExAtlas.Orchestrator.TrackingStore.Dets
+        """)
+
+      assert_has_warning(
+        install_ecto(files),
+        &(&1 =~ "config/runtime.exs" and &1 =~ "tracking_store")
+      )
+    end
+
     test "turns a config.exs start_orchestrator: true off, since the supervisor refuses it" do
       files =
         Map.put(host(), "config/config.exs", """

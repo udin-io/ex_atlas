@@ -220,6 +220,7 @@ if Code.ensure_loaded?(Igniter) do
 
     defp configure_ecto_store(igniter, repo) do
       started? = OrchestratorConfig.sets_start_orchestrator?(igniter, "config.exs", true)
+      replaced = other_stores(igniter, "config.exs")
 
       igniter
       |> Config.configure("config.exs", :ex_atlas, [:start_orchestrator], false)
@@ -227,6 +228,40 @@ if Code.ensure_loaded?(Igniter) do
       |> Config.configure("config.exs", :ex_atlas, [:orchestrator, :repo], repo)
       |> notice_start_orchestrator(started?)
       |> warn_start_orchestrator()
+      |> notice_replaced_stores(replaced)
+      |> warn_other_stores()
+    end
+
+    defp other_stores(igniter, file) do
+      igniter
+      |> OrchestratorConfig.config_values(file, :ex_atlas, [:orchestrator, :tracking_store])
+      |> Enum.reject(&Common.nodes_equal?(&1, @ecto_store))
+      |> Enum.map(&Sourceror.to_string(Zipper.node(&1)))
+    end
+
+    # Records stay in the old store, so a task persisted there is not adopted.
+    defp notice_replaced_stores(igniter, replaced) do
+      Enum.reduce(replaced -- other_stores(igniter, "config.exs"), igniter, fn store, igniter ->
+        Igniter.add_notice(igniter, """
+        config/config.exs set `tracking_store: #{store}`; the installer set \
+        ExAtlas.Orchestrator.TrackingStore.Ecto. Records in #{store} are not \
+        moved: deploy the switch with no `persist: true` task running, or call \
+        `ExAtlas.Orchestrator.stop_tracked/1` on each first.
+        """)
+      end)
+    end
+
+    defp warn_other_stores(igniter) do
+      Enum.reduce(@config_files, igniter, fn file, igniter ->
+        igniter
+        |> other_stores(file)
+        |> Enum.reduce(igniter, fn store, igniter ->
+          Igniter.add_warning(igniter, """
+          config/#{file} sets `tracking_store: #{store}`, which can override the \
+          Ecto store in config/config.exs. Remove it.
+          """)
+        end)
+      end)
     end
 
     # `ExAtlas.Orchestrator.Supervisor` refuses to start beside
