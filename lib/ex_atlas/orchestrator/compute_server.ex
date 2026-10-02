@@ -561,6 +561,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         new_state(compute, opts, tracking)
         | respawns: spent_respawns(record),
           interrupted_respawn?: is_integer(interrupted_attempt(record)),
+          sealed?: Map.get(record, :sealed) == true,
           report: record.report,
           deadline_at_ms: deadline_at(remaining_ms),
           store: TrackingStore.impl(),
@@ -614,6 +615,10 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
       respawn_limit: respawn_limit(tracking[:on_failure]),
       respawns: 0,
       interrupted_respawn?: false,
+      # Whether a respawn may rent from these opts. A fresh spawn's came from
+      # the caller; an adopted task's from a record, trusted only when this
+      # node signed it.
+      sealed?: true,
       last_activity_ms: now_ms(),
       mode: tracking[:mode],
       deadline_at_ms: deadline_at(tracking[:max_runtime_ms]),
@@ -1231,6 +1236,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     needs = unstored(opts)
 
     cond do
+      # Before the resolver and the rent: an unsigned record's image, command
+      # and callback descriptor are whoever wrote the store's choice.
+      not state.sealed? ->
+        respawn_error(
+          opts,
+          "the tracking record is not signed by this node, so its image, command and " <>
+            "callback are not trusted. A record from 0.8.0, from a node with no " <>
+            "config :ex_atlas, :callback, secret:, or signed under a rotated secret reads " <>
+            "the same"
+        )
+
       needs == %{s3: false, env: nil} ->
         spawn_compute(opts, state)
 
