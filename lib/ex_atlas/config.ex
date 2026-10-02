@@ -75,7 +75,8 @@ defmodule ExAtlas.Config do
   """
   @spec seal_credentials(opts()) :: {:ok, opts()} | {:error, NimbleOptions.ValidationError.t()}
   def seal_credentials(opts) do
-    with {:ok, opts} <- seal(opts, :api_key, &seal_api_key/1) do
+    with :ok <- check_keyword(opts),
+         {:ok, opts} <- seal(opts, :api_key, &seal_api_key/1) do
       seal(opts, :req_options, &seal_req_options/1)
     end
   end
@@ -93,6 +94,26 @@ defmodule ExAtlas.Config do
   @doc "The `req_options` entries that can carry a credential."
   @spec secret_req_options() :: [atom()]
   def secret_req_options, do: @secret_req_options
+
+  @doc """
+  Raise `ArgumentError` unless `opts` is a keyword list with atom keys.
+
+  The message names no value: opts can hold credentials, and a later
+  `Keyword` call on a malformed list prints it in the stacktrace.
+  """
+  @spec keyword!(term()) :: :ok
+  def keyword!(opts) do
+    case check_keyword(opts) do
+      :ok -> :ok
+      {:error, _error} -> raise ArgumentError, "expected opts to be a keyword list with atom keys"
+    end
+  end
+
+  defp check_keyword(opts) do
+    if is_list(opts) and Keyword.keyword?(opts),
+      do: :ok,
+      else: invalid(:opts, "expected a keyword list with atom keys")
+  end
 
   defp seal(opts, key, seal_fun) do
     case Keyword.fetch(opts, key) do
@@ -138,6 +159,8 @@ defmodule ExAtlas.Config do
   @doc "Pop `:provider` from opts and return `{provider_atom_or_module, remaining_opts}`."
   @spec pop_provider!(opts()) :: {atom() | module(), opts()}
   def pop_provider!(opts) do
+    keyword!(opts)
+
     case Keyword.pop(opts, :provider) do
       {nil, rest} ->
         case Application.get_env(:ex_atlas, :default_provider) do

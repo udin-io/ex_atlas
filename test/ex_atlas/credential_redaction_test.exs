@@ -153,6 +153,63 @@ defmodule ExAtlas.CredentialRedactionTest do
     end
   end
 
+  describe "opts that are not a keyword list" do
+    @bad_opts [
+      {"a map", %{provider: :mock, api_key: "sk-shape-probe-90d2"}},
+      {"a list with a bare atom", [:x, provider: :mock, api_key: "sk-shape-probe-90d2"]},
+      {"a string key", [{"api_key", "sk-shape-probe-90d2"}, provider: :mock]}
+    ]
+
+    for {name, opts} <- @bad_opts do
+      @opts opts
+
+      test "#{name} is refused by every public entry point without printing the key" do
+        ExAtlas.Test.Orchestrator.start!()
+        req = ExAtlas.Spec.ComputeRequest.new!(gpu: :h100, image: "x")
+        job = ExAtlas.Spec.JobRequest.new!(endpoint: "e", input: %{})
+
+        calls = [
+          fn -> ExAtlas.get_compute("pod-1", @opts) end,
+          fn -> ExAtlas.terminate("pod-1", @opts) end,
+          fn -> ExAtlas.spawn_compute(@opts) end,
+          fn -> ExAtlas.spawn_compute(req, @opts) end,
+          fn -> ExAtlas.run_job(@opts) end,
+          fn -> ExAtlas.run_job(job, @opts) end,
+          fn -> ExAtlas.create_template(@opts) end,
+          fn -> ExAtlas.create_network_volume(@opts) end,
+          fn -> ExAtlas.compute_spend("pod-1", @opts) end,
+          fn -> ExAtlas.await_ready("pod-1", @opts) end,
+          fn -> ExAtlas.Orchestrator.await_ready("pod-1", @opts) end
+        ]
+
+        for call <- calls do
+          text = crash_text(call)
+          assert text =~ "ArgumentError"
+          refute text =~ "sk-shape-probe-90d2"
+        end
+
+        for spawn <- [&ExAtlas.Orchestrator.spawn/1, &ExAtlas.Orchestrator.run_task/1] do
+          assert {:error, %NimbleOptions.ValidationError{key: :opts, value: nil} = error} =
+                   spawn.(@opts)
+
+          refute inspect(error) =~ "sk-shape-probe-90d2"
+        end
+      end
+    end
+
+    test "a non-string id is refused without printing the opts" do
+      for call <- [
+            fn -> ExAtlas.await_ready(1, api_key: @key) end,
+            fn -> ExAtlas.compute_spend(1, api_key: @key) end,
+            fn -> ExAtlas.Orchestrator.await_ready(1, api_key: @key) end
+          ] do
+        text = crash_text(call)
+        assert text =~ "ArgumentError"
+        refute text =~ @key
+      end
+    end
+  end
+
   describe "the RunPod client" do
     setup do
       bypass = Bypass.open()
