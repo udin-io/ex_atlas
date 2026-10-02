@@ -47,11 +47,15 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   @doc """
   Validate `request` and build the request-only parts of the launch body.
 
-  Returns `{:error, %ExAtlas.Error{kind: :validation}}` for an env name that
-  is not a shell identifier, a value holding a NUL byte, a port that is not
-  `{1..65535, :http | :tcp}`, `:env`, `:s3`, `:auth`, `:ports` or a callback
-  without an `:image`, or a script over #{@max_user_data_bytes} bytes. No
-  error names a value.
+  Returns `{:error, %ExAtlas.Error{kind: :validation}}`, naming no value, for:
+
+    * an env name that is not a shell identifier, or starts with `DOCKER_` or
+      `LD_`, which the host's docker client and loader read;
+    * a value holding a NUL byte, or a value or `:image` that is not UTF-8;
+    * a port that is not `{1..65535, :http | :tcp}`, or ports too many for a
+      #{@max_tag_value}-character tag;
+    * `:env`, `:s3`, `:auth`, `:ports` or a callback without an `:image`;
+    * a script over #{@max_user_data_bytes} bytes.
   """
   @spec launch_parts(Spec.ComputeRequest.t(), DateTime.t()) ::
           {:ok, parts()} | {:error, Error.t()}
@@ -262,6 +266,12 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
             "env name #{inspect(name)} is not a shell identifier ([A-Za-z_][A-Za-z0-9_]*)"
           )
 
+        String.starts_with?(name, ["DOCKER_", "LD_"]) ->
+          validation(
+            "env name #{inspect(name)} would steer the host's docker client or loader; " <>
+              "Lambda's script exports each variable for docker run"
+          )
+
         String.contains?(value, <<0>>) ->
           validation("the value of #{inspect(name)} holds a NUL byte, which a shell cannot carry")
 
@@ -287,20 +297,25 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
         Enum.map(names, &" -e #{&1}")
 
     # Values reach `docker` through its environment, never its argv, so `ps`
-    # on the instance shows names only. No `set -x`: cloud-init logs the
-    # script's output.
+    # on the instance shows names only. The script finds docker and waits for
+    # its daemon first, then exports the values in a subshell that only runs
+    # `docker run`, so a container `PATH` cannot hide docker. `DOCKER_BIN`
+    # falls under the refused `DOCKER_` names. No `set -x`: cloud-init logs
+    # the script's output.
     script =
       IO.iodata_to_binary([
         "#!/bin/bash\n",
         "set -euo pipefail\n",
-        exports,
+        "DOCKER_BIN=$(command -v docker)\n",
         "for _ in $(seq 1 #{@docker_wait_tries}); do ",
-        "docker info >/dev/null 2>&1 && break; sleep 2; done\n",
-        "docker run --detach --name atlas --gpus all --restart no",
+        "\"$DOCKER_BIN\" info >/dev/null 2>&1 && break; sleep 2; done\n",
+        "(\n",
+        exports,
+        "exec \"$DOCKER_BIN\" run --detach --name atlas --gpus all --restart no",
         flags,
         " ",
         shell_quote(image),
-        "\n"
+        "\n)\n"
       ])
 
     if byte_size(script) > @max_user_data_bytes do

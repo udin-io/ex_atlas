@@ -238,7 +238,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
                  opts ++
                    [
                      ports: [{8000, :http}, {9000, :tcp}],
-                     env: %{"HF_TOKEN" => @hf_token, "TRICKY" => tricky},
+                     # A container PATH must not hide the host's docker.
+                     env: %{
+                       "HF_TOKEN" => @hf_token,
+                       "TRICKY" => tricky,
+                       "PATH" => "/opt/conda/bin"
+                     },
                      auth: :bearer
                    ]
                )
@@ -250,13 +255,18 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
       assert run.argv ==
                ~w(run --detach --name atlas --gpus all --restart no -p 8000:8000 -p 9000:9000) ++
-                 ~w(-e ATLAS_PRESHARED_KEY -e HF_TOKEN -e TRICKY vllm/vllm-openai:latest)
+                 ~w(-e ATLAS_PRESHARED_KEY -e HF_TOKEN -e PATH -e TRICKY vllm/vllm-openai:latest)
 
       assert run.env == %{
                "ATLAS_PRESHARED_KEY" => compute.auth.token,
                "HF_TOKEN" => @hf_token,
+               "PATH" => "/opt/conda/bin",
                "TRICKY" => tricky
              }
+
+      # The stub daemon answered `docker info` on the second try; the script
+      # waited for it before `docker run`.
+      assert run.info_calls == 2
 
       for value <- [@hf_token, tricky, compute.auth.token] do
         refute Enum.any?(run.argv, &String.contains?(&1, value))
@@ -264,6 +274,19 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
       # `$(id)` stayed text: the shell never ran it.
       refute File.exists?(Path.join(dir, "ran-id"))
+    end
+
+    # The values are exported for `docker run` itself, so these would steer
+    # the host's docker client or its loader, not only the container.
+    test "an env name docker or the loader reads on the host is :validation, and no launch", %{
+      opts: opts
+    } do
+      for name <- ["DOCKER_HOST", "DOCKER_CONFIG", "LD_PRELOAD", "LD_LIBRARY_PATH"] do
+        assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+                 ExAtlas.spawn_compute(opts ++ [env: %{name => "tcp://evil:2375"}])
+
+        assert message =~ inspect(name)
+      end
     end
 
     test "an env name that is not a shell identifier is :validation naming it, and no launch", %{
@@ -540,7 +563,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     File.write!(stub, ~S"""
     #!/bin/bash
-    if [ "$1" = info ]; then exit 0; fi
+    # The daemon answers `docker info` from the second call on.
+    if [ "$1" = info ]; then
+      n=$(cat "$OUT/info_calls" 2>/dev/null || echo 0)
+      echo $((n + 1)) > "$OUT/info_calls"
+      [ "$n" -ge 1 ]
+      exit $?
+    fi
     printf '%s\0' "$@" > "$OUT/argv"
     prev=""
     for arg in "$@"; do
@@ -569,6 +598,8 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
         {String.replace_prefix(file, "env.", ""), File.read!(Path.join(dir, file))}
       end
 
-    %{argv: argv, env: env}
+    info_calls = dir |> Path.join("info_calls") |> File.read!() |> String.trim()
+
+    %{argv: argv, env: env, info_calls: String.to_integer(info_calls)}
   end
 end
