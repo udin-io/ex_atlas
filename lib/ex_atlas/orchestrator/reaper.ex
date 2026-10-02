@@ -312,12 +312,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp live_dead_owners({_peer_owners, [_unsure | _]}), do: %{}
   defp live_dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
 
-  # On unless set to something other than `true`: a mistyped value leaves
+  # Off unless set to `true`: lease rows are not signed yet (issue 148), so a
+  # writer of the lease table could fake a dead owner. A mistyped value leaves
   # pods alone rather than deleting them.
   defp reap_dead_owners? do
     :ex_atlas
     |> Application.get_env(:orchestrator, [])
-    |> Keyword.get(:reap_dead_owners, true)
+    |> Keyword.get(:reap_dead_owners, false)
     |> Kernel.==(true)
   end
 

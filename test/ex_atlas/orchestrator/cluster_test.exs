@@ -323,7 +323,8 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
         repo: Repo,
         reap_owner: "m2",
         reap_grace_ms: 0,
-        reap_dead_owner_after_ms: 2 * @ttl
+        reap_dead_owner_after_ms: 2 * @ttl,
+        reap_dead_owners: true
       )
 
       :ok = EctoStore.renew_lease("m1", System.system_time(:millisecond) - 1)
