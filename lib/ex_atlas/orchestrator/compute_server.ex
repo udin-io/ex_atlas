@@ -181,6 +181,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
   use GenServer
 
+  require Logger
+
   alias ExAtlas.Orchestrator.{
     ComputeRegistry,
     CostMeter,
@@ -495,7 +497,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     Process.flag(:trap_exit, true)
 
     %{compute: compute} = record
-    opts = adopted_staging(record.opts)
+    opts = record.opts |> adopted_staging() |> adopted_resolver(record.id)
 
     tracking =
       opts |> Keyword.take(@option_keys) |> bound_timers() |> NimbleOptions.validate!(@schema)
@@ -587,6 +589,23 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
 
       other ->
         Keyword.put(opts, :s3, Spec.Staging.scrub(other))
+    end
+  end
+
+  # A host store can hand the tuple back as strings, and a deploy can rename
+  # the module. Refusing the record would leave the pod with no tracker, so it
+  # adopts without the tuple, and a respawn falls back to the app config.
+  defp adopted_resolver(opts, id) do
+    with {:ok, mfa} <- Keyword.fetch(opts, :respawn_credentials),
+         {:error, message} <- validate_respawn_credentials(mfa) do
+      Logger.warning(
+        "[ExAtlas.Orchestrator.ComputeServer] adopting #{id} without its " <>
+          "respawn_credentials: #{message}"
+      )
+
+      Keyword.delete(opts, :respawn_credentials)
+    else
+      _valid_or_absent -> opts
     end
   end
 

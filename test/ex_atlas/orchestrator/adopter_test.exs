@@ -771,6 +771,27 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  describe "a record whose respawn_credentials: no longer validates" do
+    test "still adopts, and logs the dropped resolver" do
+      for {bad, n} <-
+            Enum.with_index([
+              {"Elixir.ExAtlas.Test.CredentialResolver", "resolve", []},
+              {ExAtlas.Test.NoSuchResolver, :resolve, []}
+            ]) do
+        compute = orphaned_task(name: "atlas-bad-resolver-#{n}")
+        {:ok, record} = Memory.get(compute.id)
+        :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :respawn_credentials, bad)})
+
+        log = capture_log(fn -> :ok = Adopter.run(notify: self()) end)
+        assert_receive :adoption_complete, 2_000
+
+        assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+        assert log =~ "#{compute.id}"
+        assert log =~ "respawn_credentials"
+      end
+    end
+  end
+
   describe "records this build does not understand" do
     test "are left alone rather than adopted or deleted" do
       compute = orphaned_task()
