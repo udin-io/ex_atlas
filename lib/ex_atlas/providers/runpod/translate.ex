@@ -490,7 +490,7 @@ defmodule ExAtlas.Providers.RunPod.Translate do
       "name" => req.name,
       "image" => req.image,
       "ports" => if(req.ports == [], do: nil, else: Enum.map(req.ports, &format_port/1)),
-      "env" => if(req.env == %{}, do: nil, else: stringify_values(req.env)),
+      "env" => if(req.env == %{}, do: nil, else: stringify_values(Spec.TemplateRequest.env(req))),
       "disk" => req.container_disk_gb,
       "mounts" =>
         req.volume_gb && %{"persistent" => %{"size" => req.volume_gb, "path" => @mount_path}},

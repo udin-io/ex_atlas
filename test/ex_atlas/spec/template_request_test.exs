@@ -59,12 +59,14 @@ defmodule ExAtlas.Spec.TemplateRequestTest do
           env: %{"HF_TOKEN" => "hf-template-probe-2d6f"}
         )
 
-      text = inspect(req, limit: :infinity, printable_limit: :infinity)
-      assert text =~ "TemplateRequest"
-      refute text =~ "hf-template-probe-2d6f"
+      for opts <- [[], [structs: false]] do
+        text = inspect(req, [limit: :infinity, printable_limit: :infinity] ++ opts)
+        assert text =~ "TemplateRequest"
+        refute text =~ "hf-template-probe-2d6f"
+      end
 
       # Control: the provider still reads the value.
-      assert req.env == %{"HF_TOKEN" => "hf-template-probe-2d6f"}
+      assert TemplateRequest.env(req) == %{"HF_TOKEN" => "hf-template-probe-2d6f"}
     end
 
     test "an invalid env: names the key and holds no value" do

@@ -7,13 +7,14 @@ defmodule ExAtlas.Spec.TemplateRequest do
   `ExAtlas.Spec.ComputeRequest`. `:ssh` and `:jupyter` left at `nil` leave the
   provider's own default in force (RunPod turns both on).
 
-  `inspect/1` leaves out `:env`, which holds secrets, and an invalid `:env`
-  is an error that names the key and holds no value.
+  `new/1` holds each `:env` value as an `ExAtlas.Secret`, since any of them can
+  be a token; `env/1` returns the values. An invalid `:env` is an error that
+  names the key and holds no value.
   """
 
+  alias ExAtlas.Secret
   alias ExAtlas.Spec.Env
 
-  @derive {Inspect, except: [:env]}
   @enforce_keys [:name, :image]
   defstruct name: nil,
             image: nil,
@@ -31,7 +32,7 @@ defmodule ExAtlas.Spec.TemplateRequest do
           name: String.t(),
           image: String.t(),
           ports: [{:inet.port_number(), :http | :tcp}],
-          env: %{optional(String.t()) => String.t()},
+          env: %{optional(String.t()) => Secret.t()},
           container_disk_gb: pos_integer() | nil,
           volume_gb: pos_integer() | nil,
           command: [String.t()] | nil,
@@ -70,7 +71,13 @@ defmodule ExAtlas.Spec.TemplateRequest do
   def new(opts) when is_list(opts) do
     with {:ok, opts} <- NimbleOptions.validate(opts, @schema),
          :ok <- Env.validate(opts[:env]) do
-      {:ok, struct!(__MODULE__, opts)}
+      env = Map.new(opts[:env], fn {name, value} -> {name, Secret.wrap(value)} end)
+      {:ok, struct!(__MODULE__, Keyword.put(opts, :env, env))}
     end
   end
+
+  @doc "The container environment of `request`, as strings."
+  @spec env(t()) :: %{String.t() => String.t()}
+  def env(%__MODULE__{env: env}),
+    do: Map.new(env, fn {name, value} -> {name, Secret.reveal(value)} end)
 end
