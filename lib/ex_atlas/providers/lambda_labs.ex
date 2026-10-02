@@ -169,9 +169,12 @@ defmodule ExAtlas.Providers.LambdaLabs do
   end
 
   # Retried on a 429 only: a launch that answered 5xx or timed out may have
-  # rented an instance already.
+  # rented an instance already. A redirect is not followed: Req would send
+  # the body, `user_data` included, to the `Location` host.
   defp launch(ctx, body, ruleset) do
-    case Client.post(ctx, "/instance-operations/launch", body, retry: &HTTP.retry_rate_limited/2) do
+    opts = [retry: &HTTP.retry_rate_limited/2, redirect: false]
+
+    case Client.post(ctx, "/instance-operations/launch", body, opts) do
       {:ok, %{"instance_ids" => [id | _]}} when is_binary(id) ->
         {:ok, id}
 

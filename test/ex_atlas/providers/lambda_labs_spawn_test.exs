@@ -1252,6 +1252,27 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
   end
 
+  describe "spawn_compute/1 launch redirect" do
+    # A 307 or 308 re-sends the body, `user_data` included, to its Location.
+    test "a redirect is not followed: user_data goes to no other host", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      elsewhere = Bypass.open()
+      Bypass.down(elsewhere)
+      expect_types(bypass)
+
+      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.resp(307, "")
+      end)
+
+      assert {:error, %ExAtlas.Error{status: 307}} =
+               ExAtlas.spawn_compute(opts ++ [env: %{"HF_TOKEN" => @hf_token}])
+    end
+  end
+
   describe "spawn_compute/1 secrets" do
     test "a launch error that echoes an env value withholds the message and the body", %{
       bypass: bypass,
