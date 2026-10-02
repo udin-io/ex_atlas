@@ -278,7 +278,8 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     reconcile_spend_ms: [
       type: {:or, [Timer.option_type(), {:in, [false]}]},
       default: @default_reconcile_spend_ms
-    ]
+    ],
+    respawn_credentials: [type: {:custom, __MODULE__, :validate_respawn_credentials, []}]
   ]
 
   @option_keys Keyword.keys(@schema)
@@ -388,6 +389,26 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   def validate_max_cost(other),
     do: {:error, "expected a positive number of US dollars, got: #{inspect(other)}"}
 
+  @doc false
+  def validate_respawn_credentials({module, function, args} = mfa)
+      when is_atom(module) and is_atom(function) and is_list(args) do
+    cond do
+      List.improper?(args) ->
+        {:error, "expected {module, function, args} with args a proper list"}
+
+      Code.ensure_loaded?(module) and function_exported?(module, function, length(args) + 1) ->
+        {:ok, mfa}
+
+      true ->
+        {:error,
+         "expected #{Exception.format_mfa(module, function, length(args) + 1)} to be " <>
+           "an exported function: it is called with args ++ [info]"}
+    end
+  end
+
+  def validate_respawn_credentials(_other),
+    do: {:error, "expected {module, function, args}, with atoms and a list"}
+
   # `persist: true` is a promise that the resource can be rebuilt at boot, and
   # for an interactive session it cannot: `compute.auth.token` is a bearer
   # credential `ExAtlas.Auth.Token` promises is never written down, so an
@@ -396,19 +417,37 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # Refused here rather than silently ignored, at the same boundary as every
   # other tracking option and for the same reason: before anything is rented.
   defp validate_persist_mode(tracking) do
-    if tracking[:persist] and tracking[:mode] != :task do
-      {:error,
-       %NimbleOptions.ValidationError{
-         key: :persist,
-         value: true,
-         message:
-           "invalid value for :persist option: only mode: :task can be persisted and adopted. " <>
-             "An interactive session's auth token is never stored, so an adopted one would be " <>
-             "unreachable and would bill for another idle TTL."
-       }}
-    else
-      {:ok, tracking}
+    cond do
+      tracking[:persist] and tracking[:mode] != :task ->
+        persist_mode_error()
+
+      # A resolver serves a record alone; without one it would sit unused and
+      # hide the misconfiguration.
+      Keyword.has_key?(tracking, :respawn_credentials) and not tracking[:persist] ->
+        {:error,
+         %NimbleOptions.ValidationError{
+           key: :respawn_credentials,
+           value: nil,
+           message:
+             "invalid value for :respawn_credentials option: it needs persist: true. Only an " <>
+               "adopted task's record leaves out the s3: and env: values a resolver re-supplies."
+         }}
+
+      true ->
+        {:ok, tracking}
     end
+  end
+
+  defp persist_mode_error do
+    {:error,
+     %NimbleOptions.ValidationError{
+       key: :persist,
+       value: true,
+       message:
+         "invalid value for :persist option: only mode: :task can be persisted and adopted. " <>
+           "An interactive session's auth token is never stored, so an adopted one would be " <>
+           "unreachable and would bill for another idle TTL."
+     }}
   end
 
   @doc "Bump last-activity so the idle reaper waits another `idle_ttl_ms`."

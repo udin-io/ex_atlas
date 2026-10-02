@@ -434,6 +434,58 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
   end
 
+  describe "respawn_credentials:" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: Memory)
+    end
+
+    @resolver {ExAtlas.Test.CredentialResolver, :resolve, [{:return, {:ok, []}}]}
+
+    test "is stored in the record as the tuple itself" do
+      assert {:ok, _pid, compute} =
+               Orchestrator.run_task(task_opts(respawn_credentials: @resolver))
+
+      assert {:ok, %{opts: opts}} = Memory.get(compute.id)
+      assert opts[:respawn_credentials] == @resolver
+    end
+
+    test "without persist: true is refused before anything is rented" do
+      assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+               Orchestrator.run_task(task_opts(persist: false, respawn_credentials: @resolver))
+
+      assert Exception.message(error) =~ "persist: true"
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+      assert {:ok, []} = Memory.all()
+    end
+
+    test "a malformed tuple is refused before anything is rented" do
+      resolver = ExAtlas.Test.CredentialResolver
+
+      for bad <- [
+            {resolver, "resolve", []},
+            {resolver, :resolve},
+            {resolver, :resolve, [:a | :b]},
+            fn _info -> {:ok, []} end
+          ] do
+        assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials}} =
+                 Orchestrator.run_task(task_opts(respawn_credentials: bad)),
+               "accepted #{inspect(bad)}"
+      end
+
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+
+    test "a function the module does not export is refused, naming it" do
+      assert {:error, %NimbleOptions.ValidationError{key: :respawn_credentials} = error} =
+               Orchestrator.run_task(
+                 task_opts(respawn_credentials: {ExAtlas.Test.CredentialResolver, :resolve, []})
+               )
+
+      assert Exception.message(error) =~ "ExAtlas.Test.CredentialResolver.resolve/1"
+      assert {:ok, []} = ExAtlas.list_compute(provider: :mock)
+    end
+  end
+
   describe "secrets" do
     @describetag :tmp_dir
 
