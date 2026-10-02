@@ -103,9 +103,9 @@ defmodule AtlasTest do
       assert :http_proxy in ExAtlas.capabilities(:fly)
     end
 
-    test "Vast returns :unsupported for spot, before any request" do
+    test "Vast returns :unsupported for template_id, before any request" do
       assert {:error, %ExAtlas.Error{kind: :unsupported, provider: :vast}} =
-               ExAtlas.spawn_compute(provider: :vast, gpu: :h100, image: "x", spot: true)
+               ExAtlas.spawn_compute(provider: :vast, gpu: :h100, image: "x", template_id: "t")
     end
   end
 

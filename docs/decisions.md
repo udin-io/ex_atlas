@@ -25,6 +25,12 @@ names the PR or issue that holds the reasoning.
 | Curl reads the Bearer header from stdin (`-K -`), written by the `printf` builtin | `-H` on argv, which `ps` shows to every process in the container | #105 |
 | The wrapper checks the id (`[A-Za-z0-9_-]`) and each key or token (`[A-Za-z0-9._-]`) before it sends, and skips the request otherwise | Escape the value into curl's config syntax: one missed character class sets any curl option | #105 |
 | A SIGTERM to the wrapper's shell waits for the command, as `sh` does | Run the command in the background and forward the signal: a RunPod spot stop would then report an exit code, and read as a failed task, not a preemption to respawn | #105 |
+| A `spot: true` rent bids at the offer's `min_bid` | A margin above it: the respawn covers an outbid instance and a margin costs every hour. `provider_opts: %{bid_price: n}` is the later alternative | #112 |
+| An offer with no positive numeric `min_bid` is skipped | Rent it at `dph_total`, which bills an interruptible instance at the on-demand price | #112 |
+| `spot: true` with `provider_opts.offer_id` is `:validation` | Look the offer up first: a second request for a path that is an escape hatch | #112 |
+| `list_gpu_types/1` makes a second, `type: "bid"` search per GPU for `spot_price_per_hour`, four searches at a time; a failed bid search leaves it `nil` | Read `min_bid` off the on-demand offers: their `dph_total` is not what a bid bills. Fail the call on a bid error: it would lose the on-demand prices | #112 |
+| A spot pick sorts by `dph_total`, and `cost_per_hour` is that `dph_total` | Sort by `min_bid`: Vast's free search lists a bid offer's `dph_total` as `min_bid` plus storage and sorts by it, so a dearer disk would win on `min_bid` and bill more | #112 |
+| A spot `command:` with no `callback:` is allowed, and the docs say to pass one | `:validation` as on Lambda: a spot task with `self_terminate: false` or its own checkpoints runs fine without one | #112 |
 
 ## Docs build (#92)
 

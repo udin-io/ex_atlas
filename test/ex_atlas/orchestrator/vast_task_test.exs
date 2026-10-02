@@ -1,6 +1,7 @@
 defmodule ExAtlas.Orchestrator.VastTaskTest do
   # The orchestrator on Vast through FakeVast: run_task/1 ended by the
-  # container deleting its own instance, and max_cost.
+  # container deleting its own instance, max_cost, and an outbid spot
+  # instance replaced by a respawn.
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
@@ -80,6 +81,78 @@ defmodule ExAtlas.Orchestrator.VastTaskTest do
 
       assert_receive {:atlas_compute, ^id, {:task, {:failed, {:exit_code, 3}}}}, 2_000
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+    end
+  end
+
+  describe "spot: true" do
+    defp spot_task(vast, extra) do
+      {:ok, prepared} =
+        Callback.prepare(
+          vast ++
+            [
+              gpu: :rtx_4090,
+              image: "pytorch/pytorch",
+              command: ["python", "train.py"],
+              callback: "https://app.example.com/atlas/cb",
+              status_poll_ms: 20
+            ] ++ extra
+        )
+
+      {prepared, ExAtlas.Orchestrator.run_task(prepared)}
+    end
+
+    test "an outbid instance is replaced, the old one destroyed, and the task completes", %{
+      vast: vast
+    } do
+      {prepared, {:ok, pid, %{id: old_id, cost_per_hour: bid}}} =
+        spot_task(vast, spot: true, on_failure: {:respawn, 1})
+
+      subscribe(old_id)
+      ref = Process.monitor(pid)
+
+      # Control: the instance bills its bid and storage, exists, and is not
+      # replaced before it is outbid.
+      assert bid == 0.21
+      assert {:ok, %{id: ^old_id}} = ExAtlas.get_compute(old_id, vast)
+      refute_receive {:atlas_compute, ^old_id, {:respawned, _}}, 100
+
+      :ok = outbid(vast, old_id)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      refute new_id == old_id
+      assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute(old_id, vast)
+      assert {:ok, %{id: ^new_id, cost_per_hour: 0.21}} = ExAtlas.get_compute(new_id, vast)
+
+      subscribe(new_id)
+      :ok = Callback.ingest(prepared[:callback].task_id, :finish, %{"exit_code" => 0})
+      container_deletes_itself(vast, new_id)
+
+      assert_receive {:atlas_compute, ^new_id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+    end
+
+    test "an outbid instance with no respawn left ends the task :preempted", %{vast: vast} do
+      {_prepared, {:ok, pid, %{id: id}}} = spot_task(vast, spot: true)
+      subscribe(id)
+      ref = Process.monitor(pid)
+
+      :ok = outbid(vast, id)
+
+      assert_receive {:atlas_compute, ^id, {:task, {:failed, :preempted}}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
+    end
+
+    test "guard: an on-demand instance that exits is not respawned", %{vast: vast} do
+      {_prepared, {:ok, pid, %{id: id}}} = spot_task(vast, on_failure: {:respawn, 1})
+      subscribe(id)
+      ref = Process.monitor(pid)
+
+      :ok = outbid(vast, id)
+
+      assert_receive {:atlas_compute, ^id, {:task, :completed}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+      refute_received {:atlas_compute, ^id, {:respawned, _}}
     end
   end
 

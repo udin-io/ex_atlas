@@ -8,9 +8,12 @@ defmodule ExAtlas.Providers.VastLiveTest do
   # the search takes; whether a rent takes `env` as a JSON object; the shape
   # of an instance's `ports` and `extra_env`; what a missing instance and a
   # refused rent answer, and whether the refusal's `msg` echoes the request.
-  # Two tests spend money, each renting the cheapest on-demand RTX 4090 for a
-  # few minutes: one nginx container, and one `command:` container that
-  # deletes its own instance (issue 105).
+  # Three tests spend money, each renting the cheapest on-demand RTX 4090 for a
+  # few minutes: one nginx container, one `command:` container that deletes
+  # its own instance (issue 105), and one interruptible (`spot: true`)
+  # container (issue 112). The spot test cannot make Vast outbid the
+  # instance; it prints what Vast reports for a bid, and the outbid status
+  # (`exited`) stays read from Vast's docs.
   use ExUnit.Case, async: false
 
   @moduletag :vast_live
@@ -151,6 +154,54 @@ defmodule ExAtlas.Providers.VastLiveTest do
     assert {:dead, :vanished, nil} =
              wait_until(compute.id, opts, &match?({:dead, _, _}, &1)),
            "the instance did not delete itself; is CONTAINER_API_KEY set in args mode?"
+  end
+
+  # What only the real API shows: that a `type: "bid"` search lists a
+  # `min_bid` on its offers, that a rent with `price` = `min_bid` is taken as
+  # an interruptible instance (`is_bid`), and what `dph_total` reads on it,
+  # which `cost_per_hour` and the cost cap follow after the first poll.
+  test "a spot: true rent bids at min_bid and reads is_bid", %{opts: opts, name: name} do
+    assert {:ok, types} = ExAtlas.list_gpu_types(opts)
+    spot = for %{id: "RTX 4090", spot_price_per_hour: price} <- types, do: price
+    IO.puts("\nRTX 4090 spot_price_per_hour: #{inspect(spot)}")
+    assert [price] = spot
+    assert is_number(price) and price > 0
+
+    # A bid search lists dph_total as min_bid plus storage and sorts by it
+    # (read from Vast's free search on 2026-10-02; this checks it still holds).
+    {:ok, query} = ExAtlas.Providers.Vast.Translate.gpu_type_query(:rtx_4090, :bid)
+    {:ok, %{"offers" => offers}} = Client.post(ctx(opts), "/api/v0/bundles/", query)
+
+    totals = Enum.map(offers, & &1["dph_total"])
+    first = offers |> Enum.take(4) |> Enum.map(&Map.take(&1, ~w(min_bid dph_base dph_total)))
+    IO.puts("first bid offers: #{inspect(first)}")
+    assert Enum.all?(offers, &is_number(&1["min_bid"])), "a bid offer lists no min_bid"
+    assert totals == Enum.sort(totals), "a bid search is not sorted by dph_total"
+
+    {:ok, compute} =
+      ExAtlas.spawn_compute(
+        [gpu: :rtx_4090, name: name, image: "nginx:alpine", spot: true] ++ opts
+      )
+
+    IO.puts("\nrented #{compute.id} as a bid at $#{compute.cost_per_hour}/h")
+    assert compute.cost_per_hour > 0
+
+    {:alive, read} = wait_until(compute.id, opts, &match?({:alive, _}, &1))
+
+    assert {:ok, %{"instances" => instance}} =
+             Client.get(ctx(opts), "/api/v0/instances/#{compute.id}/")
+
+    IO.puts(
+      "actual_status #{inspect(instance["actual_status"])}, intended_status " <>
+        "#{inspect(instance["intended_status"])}, is_bid #{inspect(instance["is_bid"])}, " <>
+        "min_bid #{inspect(instance["min_bid"])}, dph_total #{inspect(instance["dph_total"])}, " <>
+        "read cost_per_hour #{inspect(read.cost_per_hour)}, the rent's #{inspect(compute.cost_per_hour)}"
+    )
+
+    assert instance["is_bid"] == true, "Vast did not take the rent as an interruptible instance"
+
+    assert :ok = ExAtlas.terminate(compute.id, opts)
+    assert {:dead, :vanished, nil} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))
   end
 
   defp search_count(ctx, name) do

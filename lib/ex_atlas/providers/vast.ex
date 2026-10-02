@@ -1,9 +1,10 @@
 defmodule ExAtlas.Providers.Vast do
   @moduledoc """
   `ExAtlas.Provider` implementation for [Vast.ai](https://vast.ai) on-demand
-  instances.
+  and interruptible instances.
 
-  Vast is a marketplace: a spawn searches the on-demand offers that match
+  Vast is a marketplace: a spawn searches the on-demand offers (interruptible
+  with `spot: true`, below) that match
   `:gpu`, `:gpu_count`, `:container_disk_gb` (default 20 GB) and the number
   of `:ports`, and rents the cheapest. It runs `:image` with its own
   entrypoint and passes `:env`, `:s3`, `:auth` and `:ports`.
@@ -41,8 +42,18 @@ defmodule ExAtlas.Providers.Vast do
   needs `sh` and `curl`, and an ENTRYPOINT, if any, that runs its arguments
   (`exec "$@"`).
 
-  Not yet on Vast: `spot: true`, `:template_id` and `:network_volume_id` are
-  `:unsupported`, and so are `stop/2` and `start/2`.
+  `spot: true` searches interruptible (`type: "bid"`) offers and rents the
+  cheapest by `dph_total` (a bid search lists it as the offer's `min_bid` plus
+  storage), bidding exactly its `min_bid`, so `cost_per_hour` is the bid plus
+  the disk. An offer with no `min_bid` is skipped, and `provider_opts.offer_id`
+  with `spot: true` is `:validation`: it searches nothing to bid on. An
+  outbid instance reads `exited`, which `ExAtlas.Orchestrator` classes as
+  `:preempted`; `on_failure: {:respawn, n}` rents a replacement. A finished
+  task also vanishes, which reads the same on spot capacity, so pass a
+  `:callback` to a spot task you respawn (see `ExAtlas.Orchestrator.TaskOutcome`).
+
+  Not yet on Vast: `:template_id` and `:network_volume_id` are `:unsupported`,
+  and so are `stop/2` and `start/2`.
   """
 
   @behaviour ExAtlas.Provider
@@ -53,16 +64,20 @@ defmodule ExAtlas.Providers.Vast do
 
   @bundles "/api/v0/bundles/"
 
+  # Searches in flight at once in `list_gpu_types/1`.
+  @search_concurrency 4
+
   @impl true
-  def capabilities, do: [:raw_tcp, :self_terminate]
+  def capabilities, do: [:raw_tcp, :self_terminate, :spot]
 
   @impl true
   def spawn_compute(%Spec.ComputeRequest{} = request, ctx) do
     with :ok <- check_supported(request),
+         :ok <- check_bid(request),
          {:ok, parts} <- Translate.launch_parts(request),
          body = Translate.launch_body(request, parts),
          {:ok, offers} <- offers(request, ctx),
-         {:ok, id, offer} <- rent_first(ctx, offers, body) do
+         {:ok, id, offer} <- rent_first(ctx, request, offers, body) do
       {:ok, Translate.launched_compute(id, request, parts, offer)}
     end
   end
@@ -111,24 +126,41 @@ defmodule ExAtlas.Providers.Vast do
   def start(_id, _ctx), do: unsupported("Vast start/2 is not in this ExAtlas release")
 
   @impl true
-  # One search per catalog GPU: Vast returns at most 64 offers a search, so
-  # one search across every GPU would list only the cheapest few.
+  # Two searches per catalog GPU, on-demand and interruptible, four at a
+  # time: Vast returns at most 64 offers a search, so one search across every
+  # GPU would list only the cheapest few. A failed on-demand search fails the
+  # call; a failed bid search leaves that GPU without a spot price.
   def list_gpu_types(ctx) do
-    :vast
-    |> Spec.GpuCatalog.supported_gpus()
-    |> Enum.sort()
-    |> Enum.reduce_while({:ok, []}, fn canonical, {:ok, acc} ->
-      {:ok, query} = Translate.gpu_type_query(canonical)
+    searches =
+      for canonical <- :vast |> Spec.GpuCatalog.supported_gpus() |> Enum.sort(),
+          type <- [:ondemand, :bid],
+          do: {canonical, type}
 
-      case search(ctx, query) do
-        {:ok, offers} -> {:cont, {:ok, [{canonical, offers} | acc]}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, found} -> {:ok, Translate.gpu_types(found)}
-      error -> error
+    results =
+      searches
+      |> Task.async_stream(&gpu_search(ctx, &1),
+        max_concurrency: @search_concurrency,
+        timeout: :infinity
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    with {:ok, on_demand} <- found(results, :ondemand, :fail) do
+      {:ok, bid} = found(results, :bid, :skip)
+      {:ok, Translate.gpu_types(on_demand, bid)}
     end
+  end
+
+  defp gpu_search(ctx, {canonical, type}) do
+    {:ok, query} = Translate.gpu_type_query(canonical, type)
+    {type, canonical, search(ctx, query)}
+  end
+
+  defp found(results, type, on_error) do
+    Enum.reduce_while(results, {:ok, []}, fn
+      {^type, canonical, {:ok, offers}}, {:ok, acc} -> {:cont, {:ok, [{canonical, offers} | acc]}}
+      {^type, _canonical, {:error, _} = err}, _acc when on_error == :fail -> {:halt, err}
+      _other, acc -> {:cont, acc}
+    end)
   end
 
   # --- spawn ---
@@ -136,7 +168,6 @@ defmodule ExAtlas.Providers.Vast do
   defp check_supported(%Spec.ComputeRequest{} = request) do
     unsupported =
       [
-        spot: request.spot,
         template_id: request.template_id != nil,
         network_volume_id: request.network_volume_id != nil
       ]
@@ -147,6 +178,20 @@ defmodule ExAtlas.Providers.Vast do
       {field, _} -> unsupported("Vast does not take #{inspect(field)} in this ExAtlas release")
     end
   end
+
+  # An `offer_id` rent searches nothing, so it has no `min_bid` to bid.
+  defp check_bid(%Spec.ComputeRequest{spot: true, provider_opts: %{offer_id: id}})
+       when not is_nil(id) do
+    {:error,
+     Error.new(:validation,
+       provider: :vast,
+       message:
+         "spot: true bids at a searched offer's min_bid, so it cannot rent " <>
+           "provider_opts.offer_id; remove one"
+     )}
+  end
+
+  defp check_bid(_request), do: :ok
 
   defp offers(request, ctx) do
     case offer_id(request) do
@@ -164,7 +209,7 @@ defmodule ExAtlas.Providers.Vast do
   defp searched_offers(request, ctx) do
     with {:ok, query} <- Translate.offer_query(request),
          {:ok, found} <- search(ctx, query) do
-      case Translate.pick(found, request.region_hints) do
+      case Translate.pick(found, request.region_hints, request.spot) do
         [] -> no_offer(request)
         picked -> {:ok, picked}
       end
@@ -202,22 +247,23 @@ defmodule ExAtlas.Providers.Vast do
      Error.new(:provider,
        provider: :vast,
        message:
-         "Vast has no on-demand offer for #{request.gpu_count}x #{inspect(request.gpu)} " <>
-           "with the disk and ports asked for"
+         "Vast has no #{if request.spot, do: "interruptible (with a min_bid)", else: "on-demand"} " <>
+           "offer for #{request.gpu_count}x #{inspect(request.gpu)} with the disk and ports asked for"
      )}
   end
 
   # Tries each offer in turn. Only a refusal (a 4xx other than 401, 403 and
   # 429) moves on: it means Vast rented nothing, and offers are taken within
   # seconds. A 5xx or a timeout may have rented, so it stops the spawn.
-  defp rent_first(ctx, [offer | rest], body) do
-    case rent(ctx, offer, body) do
+  defp rent_first(ctx, request, [offer | rest], body) do
+    case rent(ctx, offer, Translate.priced(body, request, offer)) do
       {:ok, id} ->
-        {:ok, id, if(Map.has_key?(offer, "dph_total"), do: offer)}
+        # A searched offer has fields; the `offer_id` stub holds only its id.
+        {:ok, id, if(map_size(offer) > 1, do: offer)}
 
       {:error, error} ->
         if rest != [] and next_offer?(error),
-          do: rent_first(ctx, rest, body),
+          do: rent_first(ctx, request, rest, body),
           else: {:error, error}
     end
   end

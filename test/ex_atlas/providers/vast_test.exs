@@ -285,7 +285,7 @@ defmodule ExAtlas.Providers.VastTest do
   end
 
   describe "list_gpu_types/1" do
-    test "returns one GpuType per Vast name at its lowest on-demand price", %{
+    test "returns one GpuType per Vast name at its lowest on-demand and bid prices", %{
       bypass: bypass,
       opts: opts
     } do
@@ -336,6 +336,19 @@ defmodule ExAtlas.Providers.VastTest do
               []
           end
 
+        # A bid search answers with the same offers, each with a min_bid at a
+        # third of its on-demand price and a dph_total of that bid plus 0.01 of
+        # storage; the H100 NVL has none.
+        offers =
+          if query["type"] == "bid" do
+            for o <- offers, o["gpu_name"] != "H100 NVL" do
+              bid = Float.round(o["dph_total"] / 3, 4)
+              Map.merge(o, %{"min_bid" => bid, "dph_total" => Float.round(bid + 0.01, 4)})
+            end
+          else
+            offers
+          end
+
         json(conn, 200, %{"offers" => offers})
       end)
 
@@ -345,22 +358,87 @@ defmodule ExAtlas.Providers.VastTest do
       assert %Spec.GpuType{id: "RTX 4090", canonical: :rtx_4090, provider: :vast} = rtx_4090
       assert rtx_4090.lowest_price_per_hour == 0.39
       assert rtx_4090.memory_gb == 24
+      assert rtx_4090.spot_price_per_hour == 0.14
+      assert %{spot_price_per_hour: nil} = h100_nvl
+      assert %{spot_price_per_hour: 0.71} = h100_sxm
       assert %{id: "H100 SXM", canonical: :h100, memory_gb: 80} = h100_sxm
       assert %{id: "H100 NVL", canonical: :h100, lowest_price_per_hour: 2.4} = h100_nvl
       assert %{id: "A100 SXM4", canonical: :a100_40g, memory_gb: 40} = a100_40
       assert %{id: "A100 SXM4", canonical: :a100_80g, memory_gb: 80} = a100_80
 
-      # One on-demand search per catalog GPU.
+      # One on-demand and one bid search per catalog GPU.
       queries =
-        for _ <- Spec.GpuCatalog.supported_gpus(:vast) do
+        for _ <- Spec.GpuCatalog.supported_gpus(:vast), _type <- 1..2 do
           assert_received {:query, query}
           query
         end
 
-      assert Enum.all?(queries, &(&1["type"] == "ondemand"))
+      assert Enum.frequencies_by(queries, & &1["type"]) ==
+               %{
+                 "ondemand" => length(Spec.GpuCatalog.supported_gpus(:vast)),
+                 "bid" => length(Spec.GpuCatalog.supported_gpus(:vast))
+               }
     end
 
-    test "a failed search fails the call", %{bypass: bypass, opts: opts} do
+    test "a failed bid search leaves the on-demand prices and no spot prices", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+        {query, conn} = read_json(conn)
+
+        if query["type"] == "bid" do
+          json(conn, 400, %{"success" => false, "error" => "invalid_args", "msg" => "no"})
+        else
+          json(conn, 200, %{"offers" => [offer(%{"dph_total" => 0.39})]})
+        end
+      end)
+
+      assert {:ok, [_ | _] = types} = ExAtlas.list_gpu_types(opts)
+      assert Enum.all?(types, &(&1.lowest_price_per_hour == 0.39))
+      assert Enum.all?(types, &(&1.spot_price_per_hour == nil))
+    end
+
+    test "a GPU offered only as a bid is listed with a spot price and no on-demand price", %{
+      bypass: bypass,
+      opts: opts
+    } do
+      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+        {query, conn} = read_json(conn)
+
+        offers =
+          case {query["gpu_name"]["in"], query["type"]} do
+            {["RTX 4090"], "bid"} -> [offer(%{"min_bid" => 0.12, "dph_total" => 0.13})]
+            _ -> []
+          end
+
+        json(conn, 200, %{"offers" => offers})
+      end)
+
+      assert {:ok, [type]} = ExAtlas.list_gpu_types(opts)
+
+      assert %Spec.GpuType{id: "RTX 4090", lowest_price_per_hour: nil, spot_price_per_hour: 0.13} =
+               type
+
+      assert type.memory_gb == 24
+    end
+
+    test "searches run in parallel, at most 4 at once", %{bypass: bypass, opts: opts} do
+      {:ok, counter} = Agent.start_link(fn -> {0, 0} end)
+
+      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+        Agent.update(counter, fn {now, peak} -> {now + 1, max(peak, now + 1)} end)
+        Process.sleep(30)
+        Agent.update(counter, fn {now, peak} -> {now - 1, peak} end)
+        json(conn, 200, %{"offers" => []})
+      end)
+
+      assert {:ok, []} = ExAtlas.list_gpu_types(opts)
+      assert {0, peak} = Agent.get(counter, & &1)
+      assert peak in 2..4
+    end
+
+    test "a failed on-demand search fails the call", %{bypass: bypass, opts: opts} do
       Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
         json(conn, 401, %{
           "success" => false,

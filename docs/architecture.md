@@ -237,7 +237,9 @@ sequenceDiagram
 Vast is a marketplace. `Providers.Vast` searches the on-demand offers and
 rents the cheapest in the first hinted country, trying the next of three
 only when Vast refused the rent. Added in #99. With `command:` the container
-deletes its own instance when the command ends (#105).
+deletes its own instance when the command ends (#105). With `spot: true` the
+search is `type: "bid"` and the rent carries `price`, the offer's `min_bid`
+(#112); see "A Vast.ai spot respawn" below.
 
 ```mermaid
 sequenceDiagram
@@ -274,6 +276,33 @@ sequenceDiagram
   V-->>Host: Compute running, http://ip:host_port, raw from an allow-list
   Host->>V: ExAtlas.terminate(id)
   V->>API: DELETE /api/v0/instances/id/
+```
+
+## A Vast.ai spot respawn
+
+`spot: true` changes the search and the rent, and nothing in the orchestrator
+(#112). An outbid instance reads `exited`; `UpstreamStatus.classify/2` maps
+`:stopped` to `:preempted` for a spot task, and `ComputeServer.respawn/2`
+rents a replacement before `release_old/1` destroys the old instance. A
+`callback:`'s finish report keeps a task that finished from reading as outbid.
+
+```mermaid
+sequenceDiagram
+  participant T as ComputeServer tracker
+  participant V as Providers.Vast
+  participant API as console.vast.ai
+  T->>V: spawn_compute(spot true)
+  V->>API: POST /api/v0/bundles/ type bid
+  API-->>V: offers with min_bid
+  V->>API: PUT /api/v0/asks/offer_id/ price = min_bid
+  API-->>T: Compute provisioning, cost_per_hour = min_bid
+  Note over API: another renter outbids the instance
+  T->>V: get_compute(id)
+  V->>API: GET /api/v0/instances/id/
+  API-->>V: actual_status exited
+  V-->>T: Compute stopped, classified preempted
+  T->>V: spawn_compute(spot true), the replacement
+  T->>V: terminate(old id), then {:respawned, new_id}
 ```
 
 ## A Lambda task, ended by the host's report
@@ -364,7 +393,7 @@ classDiagram
     delete_request(url, key_var)
   }
   class Vast["Providers.Vast"] {
-    capabilities: raw_tcp, self_terminate
+    capabilities: raw_tcp, self_terminate, spot
     spawn_compute, get_compute, list_compute
     terminate, list_gpu_types
     stop and start return unsupported
@@ -379,11 +408,12 @@ classDiagram
   class VastTranslate["Vast.Translate"] {
     launch_parts(request)
     offer_query(request)
-    pick(offers, region_hints)
+    pick(offers, region_hints, spot)
     launch_body(request, parts)
+    priced(body, request, offer)
     launched_compute(id, request, parts, offer)
     instance_to_compute(instance)
-    gpu_types(offers_by_gpu)
+    gpu_types(offers_by_gpu, bid_offers_by_gpu)
   }
   class RunPodTranslate["RunPod.Translate"]
   RunPodClient ..> HTTP
