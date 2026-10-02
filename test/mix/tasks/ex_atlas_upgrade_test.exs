@@ -228,4 +228,91 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       refute Enum.any?(igniter.notices, &(&1 =~ "ExAtlas 0.2 introduces"))
     end
   end
+
+  describe "0.8.0 to 0.9.0" do
+    @guide "https://hexdocs.pm/ex_atlas/upgrading.html"
+
+    defp upgrade_0_8(files), do: upgrade(["0.8.0", "0.9.0"], files)
+
+    defp secret_notice?(igniter), do: Enum.any?(igniter.notices, &(&1 =~ ":callback, secret:"))
+
+    test "tells a host that starts the orchestrator with no callback secret" do
+      igniter =
+        upgrade_0_8(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, start_orchestrator: true
+          """
+        })
+
+      assert_has_notice(igniter, fn notice ->
+        notice =~ ":callback, secret:" and notice =~ "cannot respawn" and
+          notice =~ "Reaper would delete" and notice =~ @guide
+      end)
+    end
+
+    test "tells a host that starts ExAtlas.Orchestrator.Supervisor with no callback secret" do
+      igniter = upgrade_0_8(IgniterProject.app_with_children("ExAtlas.Orchestrator.Supervisor"))
+
+      assert secret_notice?(igniter)
+    end
+
+    test "finds a callback secret inside a runtime.exs block" do
+      igniter =
+        upgrade_0_8(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, start_orchestrator: true
+          """,
+          "config/runtime.exs" => """
+          import Config
+
+          if config_env() == :prod do
+            config :ex_atlas, :callback, secret: System.fetch_env!("ATLAS_CALLBACK_SECRET")
+          end
+          """
+        })
+
+      refute secret_notice?(igniter)
+    end
+
+    test "finds a callback secret in the keyword form" do
+      igniter =
+        upgrade_0_8(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, start_orchestrator: true
+          config :ex_atlas, callback: [secret: "a-long-secret"]
+          """
+        })
+
+      refute secret_notice?(igniter)
+    end
+
+    test "stays quiet about the callback secret when the orchestrator is not started" do
+      igniter =
+        upgrade_0_8(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, start_orchestrator: false
+          """
+        })
+
+      refute secret_notice?(igniter)
+    end
+
+    test "links the 0.9.0 guide and changes no file" do
+      igniter =
+        upgrade_0_8(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, start_orchestrator: true
+          """
+        })
+
+      assert_has_notice(igniter, &(&1 == "Upgrading to 0.9.0: #{@guide}"))
+      assert_unchanged(igniter)
+      refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
+    end
+  end
 end

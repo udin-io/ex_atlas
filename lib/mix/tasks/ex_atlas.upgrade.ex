@@ -36,6 +36,12 @@ if Code.ensure_loaded?(Igniter) do
     `ExAtlas.Orchestrator.Supervisor` in a module) and no config file sets
     `:reap_owner`. Always adds a notice linking the
     [upgrading guide](upgrading.html).
+
+    `0.9.0` — edits no file. Adds a notice when the host starts the
+    orchestrator and no config file sets `config :ex_atlas, :callback,
+    secret:`: without it tracking records are unsigned, so an adopted task
+    cannot respawn and adopts only a pod the Reaper would delete. Always adds a
+    notice linking the [upgrading guide](upgrading.html).
     """
 
     use Igniter.Mix.Task
@@ -77,7 +83,8 @@ if Code.ensure_loaded?(Igniter) do
     defp upgraders do
       %{
         "0.2.0" => &upgrade_0_1_to_0_2/2,
-        "0.8.0" => &upgrade_0_7_to_0_8/2
+        "0.8.0" => &upgrade_0_7_to_0_8/2,
+        "0.9.0" => &upgrade_0_8_to_0_9/2
       }
     end
 
@@ -110,6 +117,17 @@ if Code.ensure_loaded?(Igniter) do
       |> warn_provider_modules()
       |> OrchestratorConfig.notice_reap_owner()
       |> Igniter.add_notice("Upgrading to 0.8.0: #{@guide_url}")
+    end
+
+    # 0.8 → 0.9 migration.
+    #
+    # Edits no file. The callback secret now decides whether an adopted task
+    # can respawn and which pods it adopts, and the secret usually comes from
+    # the environment at runtime, so the upgrader names it and sets nothing.
+    defp upgrade_0_8_to_0_9(igniter, _opts) do
+      igniter
+      |> OrchestratorConfig.notice_callback_secret()
+      |> Igniter.add_notice("Upgrading to 0.9.0: #{@guide_url}")
     end
 
     defp warn_provider_modules(igniter) do
