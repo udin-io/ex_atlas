@@ -1336,12 +1336,12 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
     end
   end
 
+  # The returned env replaces the stored one whole. A record left out every
+  # value, so there is nothing of it to keep.
   defp resolved_env(resolved, needs, opts) do
-    stored = Keyword.get(opts, :env)
-
     case {Keyword.fetch(resolved, :env), needs.env} do
       {:error, nil} ->
-        {:ok, stored}
+        {:ok, Keyword.get(opts, :env)}
 
       {:error, _names} ->
         {:error, "returned no :env, and the record holds no env: values"}
@@ -1350,19 +1350,13 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         missing = if is_list(names), do: Enum.reject(names, &Map.has_key?(env, &1)), else: []
 
         if missing == [],
-          do: {:ok, Map.merge(kept_env(stored), env)},
+          do: {:ok, env},
           else: {:error, "left out the :env values for #{Enum.join(missing, ", ")}"}
 
       {{:ok, _env}, _names} ->
         {:error, "returned an :env that is not a map"}
     end
   end
-
-  # The values a record written before env names-only still holds, sealed.
-  defp kept_env(env) when is_map(env),
-    do: Map.reject(env, fn {_name, value} -> value in @not_stored end)
-
-  defp kept_env(_marker_or_nil), do: %{}
 
   defp validated(env, s3) do
     case Spec.ComputeRequest.validate_env_and_s3(env || %{}, s3) do
