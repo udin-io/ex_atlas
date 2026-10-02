@@ -52,6 +52,7 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
     * an env name that is not a shell identifier, or starts with `DOCKER_` or
       `LD_`, which the host's docker client and loader read;
     * a value holding a NUL byte, or a value or `:image` that is not UTF-8;
+    * an `:image` that starts with `-`;
     * a port that is not `{1..65535, :http | :tcp}`, or ports too many for a
       #{@max_tag_value}-character tag;
     * `:env`, `:s3`, `:auth`, `:ports` or a callback without an `:image`;
@@ -216,7 +217,16 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
   # --- launch parts ---
 
   defp check_container_fields(%Spec.ComputeRequest{image: image}) when is_binary(image) do
-    if String.valid?(image), do: :ok, else: validation(":image is not valid UTF-8")
+    cond do
+      not String.valid?(image) ->
+        validation(":image is not valid UTF-8")
+
+      String.starts_with?(image, "-") ->
+        validation(":image starts with -, which docker reads as a flag")
+
+      true ->
+        :ok
+    end
   end
 
   defp check_container_fields(request) do

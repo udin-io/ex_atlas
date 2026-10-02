@@ -325,6 +325,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert message =~ ":image"
     end
 
+    # Quoting keeps it out of the shell, but docker still reads it as a flag.
+    test "an image that starts with - is :validation, and no launch", %{opts: opts} do
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+               ExAtlas.spawn_compute(Keyword.put(opts, :image, "--privileged"))
+
+      assert message =~ ":image"
+    end
+
     test "env:, s3:, ports: or auth: without image: is :validation, and no launch", %{opts: opts} do
       opts = Keyword.delete(opts, :image)
 
