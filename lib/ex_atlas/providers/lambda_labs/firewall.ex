@@ -82,8 +82,8 @@ defmodule ExAtlas.Providers.LambdaLabs.Firewall do
   end
 
   @doc """
-  Delete a ruleset. Always `:ok`: an in-use refusal is expected right after a terminate, and
-  the next spawn's sweep deletes the ruleset.
+  Delete a ruleset. Always `:ok`: an in-use refusal is expected right after a
+  terminate, and the next spawn's sweep deletes the ruleset.
   """
   @spec delete(ExAtlas.Provider.ctx(), String.t() | nil) :: :ok
   def delete(_ctx, nil), do: :ok
