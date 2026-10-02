@@ -22,6 +22,26 @@ if Code.ensure_loaded?(Igniter) do
       * Creates `priv/ex_atlas_fly/` so DETS has somewhere to write on first run.
       * Adds `.gitignore` rules for the DETS files (`priv/ex_atlas_fly/*.dets`).
 
+    ## Keep tracking records in your database
+
+        mix ex_atlas.install --tracking-store ecto [--repo MyApp.Repo]
+
+    Sets up `ExAtlas.Orchestrator.TrackingStore.Ecto`, so `persist: true` tasks
+    survive a deploy on a machine with no volume:
+
+      * Writes `<timestamp>_add_atlas_tracking.exs` in the repo's migrations
+        (`priv/repo/migrations` for `MyApp.Repo`), which calls
+        `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration`. A migration
+        that already calls it stops a second one.
+      * Sets `start_orchestrator: false` and the orchestrator's `tracking_store:`
+        and `repo:` in `config/config.exs`. Warns about a
+        `start_orchestrator: true` in any other config file.
+      * Puts `ExAtlas.Orchestrator.Supervisor` in your application's children,
+        right after the repo.
+
+    `--repo` picks the repo when the project has several. With none, or with
+    a store other than `ecto`, the task stops and changes nothing.
+
     Idempotent — re-running is safe; `mix ex_atlas.upgrade` handles version-over-version
     migrations.
     """
