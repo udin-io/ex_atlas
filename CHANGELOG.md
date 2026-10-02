@@ -134,6 +134,15 @@ e.raw   # before: the whole body   after: %{"detail" => "in use", "conflict" => 
 - An atom-keyed error body now gives `Error.message` its `detail`, `message`
   or `errors[]` text, as a string-keyed one does; it read `nil` before.
   `errors[].value` stays out of the text either way.
+- `errors[].value` goes from an `errors` list at any depth, under a string or
+  an atom key, not only from the top-level list.
+- A Req exception that can hold the response body (`Req.DecompressError`,
+  `Req.HTTPError`, a caller decoder's error) now reaches `ExAtlas.Error` as its
+  module name only, with `raw: nil`. Before, `raw` kept the exception, and a
+  bad gzip body echoing the request printed in full. A transport error
+  (`Req.TransportError`, `Mint.TransportError`, `Finch.Error`) and a redirect
+  loop keep their message and `raw`. A `JSON.DecodeError` is withheld as a
+  `Jason.DecodeError` already was.
 - A plain-text error body that echoes the request stays in `Error.message`:
   nothing can tell the secret from the text.
 
