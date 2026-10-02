@@ -1498,7 +1498,17 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp carry_record(%{store: store} = state, old_id, new_id) do
     case store.get(old_id) do
       {:ok, record} ->
-        store.put(TrackingStore.scrub_env(%{record | id: new_id, respawns: state.respawns + 1}))
+        attempt = state.respawns + 1
+
+        store.put(
+          TrackingStore.scrub_env(%{
+            record
+            | id: new_id,
+              respawns: attempt,
+              opts: next_attempt(record.opts, attempt)
+          })
+        )
+
         store.delete(old_id)
 
       :error ->
@@ -1725,7 +1735,7 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   # the token minted from it. A respawn writes one (`next_attempt/2`).
   defp callback_value(%{opts: opts, respawns: respawns}) do
     case Keyword.get(opts, :callback) do
-      %{attempt: _} -> respawns
+      %{attempt: attempt} when is_integer(attempt) -> respawns
       _no_attempt -> :claimless
     end
   end
@@ -1740,7 +1750,9 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   end
 
   # The replacement's token signs its attempt, so its reports pass the check
-  # that refuses the pod it replaced.
+  # that refuses the pod it replaced. The record says so too: one that kept the
+  # descriptor 0.8.0 wrote would read as claim-less at the next adoption, and
+  # accept the replaced pod while refusing the replacement.
   defp next_attempt(opts, attempt) do
     case Keyword.get(opts, :callback) do
       %{task_id: _} = callback ->

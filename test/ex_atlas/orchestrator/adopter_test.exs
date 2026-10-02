@@ -213,6 +213,52 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
     end
 
+    test "a restart after the respawn still refuses the replaced pod and accepts the replacement" do
+      {compute, claimless} = orphaned_0_8_0_task(0, status_poll_ms: 30)
+      old_id = compute.id
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+
+      :ok = Mock.forget(old_id)
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      {:ok, pod_b} = Mock.get_compute(new_id, %{})
+      assert {:ok, %{respawns: 1}} = Memory.get(new_id)
+
+      {:ok, pid} = Orchestrator.lookup(new_id)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 2_000
+      TestOrchestrator.sync_registry()
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(new_id))
+
+      assert post_finish(claimless, 0).status == 410
+      refute_receive {:atlas_compute, ^new_id, {:task_report, _}}, 200
+
+      assert post_finish(pod_token(pod_b), 4).status == 202
+      assert_receive {:atlas_compute, ^new_id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
+    # A host store that nils a field it does not know returns `attempt: nil`,
+    # and `Callback.env/2` mints no attempt for it.
+    test "a record whose attempt is nil reads as a pod with no attempt" do
+      {compute, claimless} = orphaned_0_8_0_task(0)
+      {:ok, record} = Memory.get(compute.id)
+      callback = Map.put(Keyword.fetch!(record.opts, :callback), :attempt, nil)
+      :ok = Memory.put(%{record | opts: Keyword.put(record.opts, :callback, callback)})
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+
+      assert post_finish(claimless, 4).status == 202
+      assert_receive {:atlas_compute, ^id, {:task_report, %{exit_code: 4}}}, 2_000
+    end
+
     # The report passes the Registry check while the pod is the current one,
     # then waits in the tracker's mailbox behind the poll that respawns.
     test "a report queued behind the respawn is dropped" do
