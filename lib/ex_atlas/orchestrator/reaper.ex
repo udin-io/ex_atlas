@@ -283,18 +283,19 @@ defmodule ExAtlas.Orchestrator.Reaper do
   end
 
   defp ownership_gate({:ok, owner}) do
-    %{same: same, silent: silent, owners: owners} = ask_peers(owner)
+    %{same: same, silent: silent, owners: owners, unsure: unsure} = ask_peers(owner)
 
     case same do
-      [] -> {{:ok, owner, dead_owners(owners, silent)}, silent}
+      [] -> {{:ok, owner, dead_owners(owners, unsure)}, silent}
       nodes -> {{:closed, {:duplicate_owner, owner, nodes}}, silent}
     end
   end
 
   # A connected node that reports an owner is alive, whatever its lease says.
-  # One that cannot report may be the owner itself, slow or on an old
-  # release, so with any such peer no owner reads as dead this tick.
-  defp dead_owners(_peer_owners, [_silent | _]), do: %{}
+  # One that reports no owner, an invalid one, or cannot report may be the
+  # dead owner itself (slow, misconfigured, on an old release), so with any
+  # such peer no owner reads as dead this tick.
+  defp dead_owners(_peer_owners, [_unsure | _]), do: %{}
   defp dead_owners(peer_owners, []), do: Map.drop(Lease.dead_owners(), peer_owners)
 
   # Two nodes with one owner each read the other's pods as their own. Only a
@@ -307,11 +308,18 @@ defmodule ExAtlas.Orchestrator.Reaper do
     peers
     |> :erpc.multicall(Ownership, :owner, [], @peer_owner_timeout_ms)
     |> Enum.zip(peers)
-    |> Enum.reduce(%{same: [], silent: [], owners: []}, fn
-      {{:ok, {:ok, ^owner}}, node}, acc -> %{acc | same: acc.same ++ [node]}
-      {{:ok, {:ok, other}}, _node}, acc -> %{acc | owners: [other | acc.owners]}
-      {{:error, _reason}, node}, acc -> %{acc | silent: acc.silent ++ [node]}
-      _answered, acc -> acc
+    |> Enum.reduce(%{same: [], silent: [], owners: [], unsure: []}, fn
+      {{:ok, {:ok, ^owner}}, node}, acc ->
+        %{acc | same: acc.same ++ [node]}
+
+      {{:ok, {:ok, other}}, _node}, acc when is_binary(other) ->
+        %{acc | owners: [other | acc.owners]}
+
+      {{:error, _reason}, node}, acc ->
+        %{acc | silent: acc.silent ++ [node], unsure: [node | acc.unsure]}
+
+      {_no_or_invalid_owner, node}, acc ->
+        %{acc | unsure: [node | acc.unsure]}
     end)
   end
 

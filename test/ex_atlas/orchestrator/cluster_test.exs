@@ -351,6 +351,20 @@ defmodule ExAtlas.Orchestrator.ClusterTest do
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
 
+    # Neither names an owner, so neither proves the dead owner is not that peer.
+    for {label, peer_env} <- [
+          {"no owner", [reap_owner: nil]},
+          {"an invalid owner", [reap_owner: "Not Valid"]}
+        ] do
+      test "a peer with #{label} keeps it too", %{node_b: node_b, compute: compute} do
+        Cluster.put_orchestrator_env(node_b, unquote(peer_env))
+
+        :ok = Reaper.reap_now("atlas-", [:mock])
+
+        assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      end
+    end
+
     test "control: a peer that reports another owner leaves the pod to the Reaper",
          %{node_b: node_b, compute: compute} do
       Cluster.put_orchestrator_env(node_b, reap_owner: "m3")
