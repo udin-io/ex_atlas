@@ -368,6 +368,22 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(error, structs: false) =~ @echo
     end
 
+    test "a 429 is retried, and the second answer counts", %{bypass: bypass, opts: opts} do
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+      Bypass.expect(bypass, "PUT", "/api/v0/instances/28411907", fn conn ->
+        conn = Plug.Conn.put_resp_header(conn, "retry-after", "0")
+
+        case Agent.get_and_update(calls, &{&1 + 1, &1 + 1}) do
+          1 -> json(conn, 429, %{"detail" => "API requests too frequent endpoint threshold=1.0"})
+          _ -> json(conn, 200, %{"success" => true})
+        end
+      end)
+
+      assert :ok = ExAtlas.stop("28411907", opts)
+      assert Agent.get(calls, & &1) == 2
+    end
+
     test "a 5xx withholds msg and is sent once", %{bypass: bypass, opts: opts} do
       expect_state(bypass, &json(&1, 500, refused(@echo, "boom #{@echo}")))
 

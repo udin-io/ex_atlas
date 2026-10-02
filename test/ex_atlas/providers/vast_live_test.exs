@@ -239,17 +239,11 @@ defmodule ExAtlas.Providers.VastLiveTest do
     assert :ok = start
     {:alive, _} = wait_until(compute.id, opts, &match?({:alive, %{status: :running}}, &1))
 
-    from = DateTime.add(DateTime.utc_now(), -86_400)
-
-    assert {:ok, rows} =
-             Client.instance_charges(
-               ctx(opts),
-               "instance-#{compute.id}",
-               DateTime.to_unix(from),
-               DateTime.to_unix(DateTime.utc_now())
-             )
-
+    rows = wait_for_charges(ctx(opts), compute.id)
     IO.puts("charges rows for the instance: #{inspect(rows)}")
+
+    assert rows != [],
+           "no charges row has source instance-#{compute.id}; check the source format"
 
     assert {:ok, spend} = ExAtlas.compute_spend(compute.id, opts)
     IO.puts("spend: #{inspect(Map.delete(spend, :raw))}")
@@ -257,6 +251,23 @@ defmodule ExAtlas.Providers.VastLiveTest do
 
     assert :ok = ExAtlas.terminate(compute.id, opts)
     assert {:dead, :vanished, nil} = wait_until(compute.id, opts, &match?({:dead, _, _}, &1))
+  end
+
+  # Billing can lag the rent; a row that never shows means the `source`
+  # filter does not match Vast's format, and every bill would read zero.
+  defp wait_for_charges(ctx, id, tries \\ 20) do
+    from = DateTime.add(DateTime.utc_now(), -86_400)
+    to = DateTime.utc_now()
+
+    {:ok, rows} =
+      Client.instance_charges(ctx, "instance-#{id}", DateTime.to_unix(from), DateTime.to_unix(to))
+
+    if rows == [] and tries > 1 do
+      Process.sleep(30_000)
+      wait_for_charges(ctx, id, tries - 1)
+    else
+      rows
+    end
   end
 
   defp search_count(ctx, name) do

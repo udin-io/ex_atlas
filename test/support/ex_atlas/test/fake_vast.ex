@@ -192,7 +192,7 @@ defmodule ExAtlas.Test.FakeVast do
         end
 
       if Agent.get(store, &Map.has_key?(&1, id)) do
-        Agent.update(store, &update_in(&1[id], fn i -> Map.put(i, "actual_status", status) end))
+        Agent.update(store, &put_in(&1[id]["actual_status"], status))
         json(conn, 200, %{"success" => true})
       else
         json(conn, 404, refused("not_found", "Instance not found"))

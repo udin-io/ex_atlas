@@ -36,15 +36,15 @@ defmodule ExAtlas.Providers.VastSpendTest do
       conn = Plug.Conn.fetch_query_params(conn)
       send(test_pid, {:charges_query, conn.query_params})
 
-      case Agent.get_and_update(remaining, fn
-             [page | rest] -> {page, rest}
-             [] -> {nil, []}
-           end) do
+      case Agent.get_and_update(remaining, &next_page/1) do
         {status, body} -> json(conn, status, body)
         nil -> flunk("more charges pages requested than the test gave")
       end
     end)
   end
+
+  defp next_page([page | rest]), do: {page, rest}
+  defp next_page([]), do: {nil, []}
 
   defp page(rows, next \\ nil),
     do: {200, %{"success" => true, "results" => rows, "next_token" => next}}
