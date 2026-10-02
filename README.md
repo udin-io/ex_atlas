@@ -46,6 +46,7 @@ Two concerns under one roof:
 - [Quick start — transient per-user GPU pod](#quick-start--transient-per-user-gpu-pod)
 - [Waiting until a pod is usable](#waiting-until-a-pod-is-usable)
 - [Quick start — batch task on a GPU pod](#quick-start--batch-task-on-a-gpu-pod)
+- [Data staging — S3 credentials and URIs in the pod](#data-staging--s3-credentials-and-uris-in-the-pod)
 - [Pod callbacks — progress, logs, exit codes](#pod-callbacks--progress-logs-exit-codes)
 - [Quick start — serverless inference](#quick-start--serverless-inference)
 - [Swapping providers](#swapping-providers)
@@ -336,6 +337,47 @@ wall-clock deadline fires, or when it dies — and it is always destroyed. See
 [`run_task/1`](#exatlasorchestratorrun_task1--run-a-container-to-completion)
 for why exit detection needs the container's cooperation, and why
 `:completed` does not mean "succeeded" — unless you add a callback.
+
+## Data staging — S3 credentials and URIs in the pod
+
+Pass `s3:` and ExAtlas writes the standard `AWS_*` variables and two ExAtlas
+variables into the container: where to read the dataset and where to write
+artifacts. ExAtlas makes no S3 call itself.
+
+```elixir
+{:ok, _pid, compute} =
+  ExAtlas.Orchestrator.run_task(
+    provider: :runpod,
+    gpu: :rtx_4090,
+    image: "ghcr.io/acme/trainer:latest",
+    command: ["/app/train.sh"],
+    s3: %{
+      endpoint: "https://t3.storage.dev",
+      region: "auto",
+      access_key_id: System.fetch_env!("TIGRIS_KEY_ID"),
+      secret_access_key: System.fetch_env!("TIGRIS_SECRET"),
+      dataset_uri: "s3://bucket/datasets/abc/",
+      artifact_uri: "s3://bucket/artifacts/run-123/"
+    }
+  )
+```
+
+| `s3:` key | Variable(s) in the container |
+|---|---|
+| `endpoint` | `AWS_ENDPOINT_URL_S3` |
+| `region` | `AWS_REGION`, `AWS_DEFAULT_REGION` |
+| `access_key_id`, `secret_access_key` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (both or neither) |
+| `session_token` | `AWS_SESSION_TOKEN` (needs both keys) |
+| `dataset_uri`, `artifact_uri` | `ATLAS_DATASET_URI`, `ATLAS_ARTIFACT_URI` (`s3://bucket/...`; at least one) |
+
+- A key left out sets no variable. No `endpoint` means AWS S3 itself.
+- An `env:` entry that `s3:` would also set raises, naming the variable.
+- A bad `s3:` raises `NimbleOptions.ValidationError` with `key: :s3` before
+  any provider call. The error names the key and the rule, never a value.
+- The credentials never appear in `inspect/1` of an ExAtlas struct, in a
+  tracker's crash report, or in a tracking record. A respawn re-injects them.
+- `persist: true` with `s3:` is refused for now: a tracking record never holds
+  the credentials, so an adopted task would respawn without them.
 
 ## Pod callbacks — progress, logs, exit codes
 
@@ -672,10 +714,15 @@ to know each provider's native shape.
   `:gpu`, `:gpu_count`, `:image`, `:cloud_type`, `:spot`, `:region_hints`,
   `:ports`, `:env`, `:volume_gb`, `:container_disk_gb`, `:network_volume_id`,
   `:name`, `:template_id`, `:auth`, `:idle_ttl_ms`, `:command`,
-  `:self_terminate`, `:provider_opts`.
+  `:self_terminate`, `:callback`, `:s3`, `:provider_opts`.
+  `ComputeRequest.container_env/1` returns the env a provider sends to the
+  container.
+- `ExAtlas.Spec.Staging` — the validated `s3:` option. `inspect/1` shows the
+  endpoint, region and URIs, never a credential.
 - `ExAtlas.Spec.Compute` — output. Fields: `:id`, `:provider`, `:status`,
   `:public_ip`, `:ports`, `:gpu_type`, `:gpu_count`, `:cost_per_hour`,
   `:region`, `:image`, `:name`, `:auth`, `:created_at`, `:raw`.
+  `inspect/1` leaves out `:raw`: RunPod echoes the container env there.
 - `ExAtlas.Spec.JobRequest` / `ExAtlas.Spec.Job` — serverless jobs.
 - `ExAtlas.Spec.Endpoint` — serverless endpoint from `list_endpoints/1`.
 - `ExAtlas.Spec.GpuType` — catalog entries returned by `list_gpu_types/1`.
@@ -1354,6 +1401,11 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
   `config :ex_atlas, :orchestrator, scrub_keys: [:env]` (accepting that a
   respawn then loses them) or supply a store that encrypts at rest. The DETS
   default is `0700`/`0600`.
+- **`s3:` credentials go to a third-party GPU host.** They sit in the pod's
+  environment, where anyone with access to the pod can read them. Give the
+  pod keys scoped to the dataset and artifact prefixes, with a short life
+  (`session_token`). ExAtlas keeps them out of its own structs, crash reports
+  and tracking records.
 - **Outbound egress.** RunPod's `*.proxy.runpod.net` is world-reachable.
   If the pod inside doesn't validate `ATLAS_PRESHARED_KEY` on every request,
   anyone with the URL can hit it.

@@ -7,6 +7,28 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased (v0.8.0)
 
+### Added: `s3:` puts storage credentials and URIs into the container (#71, slice 1 of #26)
+
+`spawn_compute/1`, `Orchestrator.spawn/1` and `run_task/1` take `s3:` with
+`endpoint`, `region`, `access_key_id`, `secret_access_key`, `session_token`,
+`dataset_uri` and `artifact_uri`. RunPod pods get `AWS_ENDPOINT_URL_S3`,
+`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `ATLAS_DATASET_URI` and
+`ATLAS_ARTIFACT_URI`. The new `ExAtlas.Spec.Staging` validates the option, and
+its `inspect/1` shows no credential. Validation errors carry `key: :s3`,
+`value: nil` and no value in the message. An `env:` entry that `s3:` also sets
+is an error. Tracking records and tracker crash reports drop `s3:`, and
+`persist: true` with `s3:` is refused until slice 4 (#74). A provider builds its
+container env from the new `ComputeRequest.container_env/1`.
+
+### Fixed: secrets in `inspect/1` and in `env:` errors (#71)
+
+- `inspect/1` of an `ExAtlas.Spec.Compute` no longer prints `:raw`. RunPod's
+  pod body echoes the container env, so every env secret printed.
+- `ComputeRequest.new/1` with an invalid `env:` returns `value: nil` and a
+  message naming the variable at fault. Before, the error's `value` held the
+  whole env map and its message echoed the bad value.
+
 ### Added: the cost cap reads the provider's bill (#66, slice 3 of #28)
 
 A tracked session with `max_cost` reads the current pod's bill every
