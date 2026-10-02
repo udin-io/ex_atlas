@@ -211,7 +211,9 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
   # --- launch parts ---
 
-  defp check_container_fields(%Spec.ComputeRequest{image: image}) when is_binary(image), do: :ok
+  defp check_container_fields(%Spec.ComputeRequest{image: image}) when is_binary(image) do
+    if String.valid?(image), do: :ok, else: validation(":image is not valid UTF-8")
+  end
 
   defp check_container_fields(request) do
     used =
@@ -262,6 +264,10 @@ defmodule ExAtlas.Providers.LambdaLabs.Translate do
 
         String.contains?(value, <<0>>) ->
           validation("the value of #{inspect(name)} holds a NUL byte, which a shell cannot carry")
+
+        # Lambda's body is JSON, which carries UTF-8 only.
+        not String.valid?(value) ->
+          validation("the value of #{inspect(name)} is not valid UTF-8")
 
         true ->
           nil

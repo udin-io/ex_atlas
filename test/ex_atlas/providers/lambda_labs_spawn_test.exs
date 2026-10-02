@@ -285,6 +285,23 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert message =~ "NULLY"
     end
 
+    # Lambda's body is JSON, which holds UTF-8 only; Jason raised with the
+    # script's first bytes in its message.
+    test "a value or image that is not UTF-8 is :validation naming it, before any request", %{
+      opts: opts
+    } do
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message} = error} =
+               ExAtlas.spawn_compute(opts ++ [env: %{"BIN" => "sk-" <> <<0xFF, 1>>}])
+
+      assert message =~ ~s("BIN")
+      refute inspect(error) =~ "sk-"
+
+      assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
+               ExAtlas.spawn_compute(Keyword.put(opts, :image, "img" <> <<0xFF>>))
+
+      assert message =~ ":image"
+    end
+
     test "env:, s3:, ports: or auth: without image: is :validation, and no launch", %{opts: opts} do
       opts = Keyword.delete(opts, :image)
 
