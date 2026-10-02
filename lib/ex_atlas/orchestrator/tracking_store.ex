@@ -376,8 +376,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   A record written before env values were left out still holds them; every
   rewrite of it goes through here, so no write lays them down again.
   """
-  @spec scrub_env(record()) :: record()
-  def scrub_env(%{opts: opts} = record) do
+  @spec scrub_record(record()) :: record()
+  def scrub_record(%{opts: opts} = record) do
     %{record | opts: put_env(opts, Keyword.get(opts, :env), :env in configured_scrub_keys())}
   end
 
