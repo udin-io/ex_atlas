@@ -337,7 +337,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     # not that owner's to hand over.
     defp claim_row(repo, {id, old_owner, blob}, claimer, now, rewrite) do
       with {:ok, %{owner: ^old_owner} = record} <- decode(id, blob),
-           {:ok, %{id: ^id, owner: ^claimer} = claimed} <- rewrite.(record),
+           {:ok, %{id: ^id, owner: ^claimer} = claimed} <- safe_rewrite(rewrite, record),
            new_blob = :erlang.term_to_binary(claimed),
            true <- byte_size(new_blob) <= @max_record_bytes,
            1 <- update_claimed(repo, id, old_owner, claimer, new_blob, now) do
@@ -345,6 +345,16 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       else
         _skipped_or_lost -> []
       end
+    end
+
+    # Rows claimed before a raise are already written; one bad record must not
+    # turn the whole claim into an error that hides them.
+    defp safe_rewrite(rewrite, record) do
+      rewrite.(record)
+    rescue
+      _error -> :skip
+    catch
+      _kind, _reason -> :skip
     end
 
     defp update_claimed(repo, id, old_owner, claimer, blob, now) do

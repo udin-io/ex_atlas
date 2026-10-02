@@ -417,6 +417,24 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       assert owner_column("pod-a") == "ghost"
     end
 
+    # Rows claimed before the raise are committed; the caller must get them
+    # back, or no one adopts them.
+    test "answers the rows it claimed when the rewrite raises on another", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      owned!("pod-b", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+
+      raises_on_b = fn
+        %{id: "pod-b"} -> raise "malformed record"
+        record -> {:ok, Map.put(record, :owner, "m2")}
+      end
+
+      assert {:ok, [%{id: "pod-a", owner: "m2"}]} = Store.claim_expired("m2", 2_000, raises_on_b)
+      assert {:ok, %{owner: "m2"}} = Store.get("pod-a")
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-b")
+    end
+
     test "two nodes claiming at once leave each record with exactly one owner", %{
       tmp_dir: dir
     } do
