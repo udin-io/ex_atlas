@@ -377,7 +377,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
 
       Repo.query!("""
       CREATE TRIGGER refuse_signed BEFORE UPDATE ON atlas_owner_leases
-      WHEN NEW.mac IS NOT NULL BEGIN SELECT RAISE(ABORT, 'refused'); END
+      WHEN NEW.mac IS NOT OLD.mac BEGIN SELECT RAISE(ABORT, 'refused'); END
       """)
 
       assert {:error, _reason} = Store.renew_lease("m1", 2_000_000)
