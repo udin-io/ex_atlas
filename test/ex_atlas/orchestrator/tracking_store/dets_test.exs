@@ -320,6 +320,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
       assert error.message =~ "bad_object"
       refute error.message =~ dir
     end
+
+    test "all/0 answers {:error, _} when the file under an open table reads as garbage",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-garbled"))
+      assert {:ok, [_]} = Dets.all()
+
+      path = Path.join(dir, "tracked.dets")
+      File.write!(path, :binary.copy(<<0xFF>>, File.stat!(path).size))
+
+      assert {:error, _} = Dets.all()
+    end
   end
 
   describe "on-disk permissions" do

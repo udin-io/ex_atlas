@@ -248,8 +248,22 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     do: {:reply, {:error, reason}, state}
 
   def handle_call(:all, _from, state) do
-    records = :dets.foldl(fn {_id, record}, acc -> [record | acc] end, [], state.table)
-    {:reply, {:ok, records}, state}
+    {:reply, fold(state.table), state}
+  end
+
+  # A file garbled under the open table folds to fewer records than DETS
+  # counts in memory, often none, or to an error. Either is a store that
+  # cannot account for its contents, never `{:ok, fewer}`.
+  defp fold(table) do
+    case :dets.foldl(fn {_id, record}, acc -> [record | acc] end, [], table) do
+      {:error, reason} ->
+        {:error, {:store_unreadable, reason}}
+
+      records ->
+        if length(records) == :dets.info(table, :size),
+          do: {:ok, records},
+          else: {:error, {:store_unreadable, :count_mismatch}}
+    end
   end
 
   # A linked process other than the parent (the `:dets` server) exited
