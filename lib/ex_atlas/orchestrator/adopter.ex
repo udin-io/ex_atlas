@@ -276,12 +276,32 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # One unreadable record must not cost the others their trackers. A record a
   # live tracker holds is that tracker's: a 404 for it means a respawn is
   # renting the replacement, and the tracker carries the record over itself.
-  defp adopt_one(record, owner, store) do
-    if tracked?(record), do: :tracked, else: adopt(record, owner, store)
+  #
+  # A record that changed in the store since `all/0` read it is adopted again
+  # from what the store holds now, once; a record gone from the store was
+  # removed by its tracker.
+  defp adopt_one(record, owner, store, rereads \\ 1) do
+    if tracked?(record) do
+      :tracked
+    else
+      case adopt(record, owner, store) do
+        {:changed, fresh} when rereads > 0 -> adopt_one(fresh, owner, store, rereads - 1)
+        {:changed, _fresh} -> log_changing(record)
+        result -> result
+      end
+    end
   rescue
     error -> log_skipped(record, error)
   catch
     :exit, reason -> log_skipped(record, {:exit, reason})
+  end
+
+  defp log_changing(record) do
+    Logger.warning(
+      "[ExAtlas.Orchestrator.Adopter] not adopting #{inspect(record.id)}: its record changed " <>
+        "twice while this node adopted it. The record is kept, so the Reaper still treats " <>
+        "the resource as ours."
+    )
   end
 
   defp log_skipped(record, error) do
@@ -292,17 +312,17 @@ defmodule ExAtlas.Orchestrator.Adopter do
     )
   end
 
-  defp adopt(record, owner, store) do
-    case refusal(record) do
+  defp adopt(stored, owner, store) do
+    case refusal(stored) do
       nil ->
-        warn_stored_endpoint(record)
+        warn_stored_endpoint(stored)
         # Checked on the record as stored, before anything changes it. A
         # tracker respawns only from a record this node signed.
-        record = Map.put(TrackingStore.upgrade(record), :sealed, TrackingStore.sealed?(record))
-        adopt_by_owner(record, record[:owner], owner, store)
+        record = Map.put(TrackingStore.upgrade(stored), :sealed, TrackingStore.sealed?(stored))
+        adopt_by_owner(record, record[:owner], owner, store, stored)
 
       why ->
-        skip(record, why)
+        skip(stored, why)
     end
   end
 
@@ -363,15 +383,17 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   # Same owner, or no owner on either side: ours, as before.
-  defp adopt_by_owner(record, owner, owner, store), do: reconcile(record, owner, store, false)
+  defp adopt_by_owner(record, owner, owner, store, stored),
+    do: reconcile(record, owner, store, false, stored)
 
   # An unowned record: the first node to adopt it claims it, so later boots on
   # other nodes skip it.
-  defp adopt_by_owner(record, nil, owner, store),
-    do: reconcile(Map.put(record, :owner, owner), owner, store, true)
+  defp adopt_by_owner(record, nil, owner, store, stored),
+    do: reconcile(Map.put(record, :owner, owner), owner, store, true, stored)
 
   # Another node's task: no provider call, no delete, no tracker.
-  defp adopt_by_owner(record, other, _owner, _store), do: {:other_owner, other, record.id}
+  defp adopt_by_owner(record, other, _owner, _store, _stored),
+    do: {:other_owner, other, record.id}
 
   # Skipped, but never deleted: the store entry is the only thing telling the
   # Reaper that a live, prefix-matching pod belongs to this app, and a record
@@ -384,25 +406,42 @@ defmodule ExAtlas.Orchestrator.Adopter do
     )
   end
 
-  defp reconcile(record, owner, store, claim?) do
+  defp reconcile(record, owner, store, claim?, stored) do
     observation = observe(record)
 
-    cond do
-      # A tracker started while the provider answered (a Lease claim, a second
-      # adoption): the record is its own now.
-      tracked?(record) ->
-        :tracked
-
-      # The provider has forgotten the id entirely: `{:dead, _, nil}` is
-      # `UpstreamStatus`'s way of saying there is nothing left to terminate,
-      # whether that reads as `:vanished` or, on spot capacity, `:preempted`.
-      match?({:dead, _reason, nil}, observation) ->
-        store.delete(record.id)
-
-      true ->
-        track(record, observation, owner, store, claim?)
+    # A tracker started while the provider answered (a Lease claim, a second
+    # adoption): the record is its own now. Otherwise act only on the record
+    # the store holds now: `all/0` read it before this record's turn, and on a
+    # retry minutes before.
+    if tracked?(record) do
+      :tracked
+    else
+      reconcile_current(store.get(record.id), record, observation, owner, store, claim?, stored)
     end
   end
+
+  # The provider has forgotten the id entirely: `{:dead, _, nil}` is
+  # `UpstreamStatus`'s way of saying there is nothing left to terminate,
+  # whether that reads as `:vanished` or, on spot capacity, `:preempted`.
+  defp reconcile_current(
+         {:ok, stored},
+         record,
+         {:dead, _reason, nil},
+         _owner,
+         store,
+         _claim?,
+         stored
+       ),
+       do: store.delete(record.id)
+
+  defp reconcile_current({:ok, stored}, record, observation, owner, store, claim?, stored),
+    do: track(record, observation, owner, store, claim?)
+
+  defp reconcile_current({:ok, fresh}, _record, _observation, _owner, _store, _claim?, _stale),
+    do: {:changed, fresh}
+
+  defp reconcile_current(:error, _record, _observation, _owner, _store, _claim?, _stale),
+    do: :gone
 
   defp tracked?(record), do: match?({:ok, _pid}, Orchestrator.lookup(Map.get(record, :id)))
 

@@ -712,6 +712,91 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  # Review of issue 155: a retry acts on an `all/0` snapshot that can be minutes
+  # old, and each record waits behind the provider calls of the ones before it.
+  describe "a record that changed after the read" do
+    test "is not adopted once its tracker finished and deleted it" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+      :ok = Memory.delete(compute.id)
+      :ok = Mock.set_status(compute.id, :terminated)
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert :error = Memory.get(compute.id)
+    end
+
+    test "is left alone once another node claimed it" do
+      compute = orphaned_task_of("m1", name: "atlas-m1-job")
+      {:ok, stale} = Memory.all()
+      {:ok, record} = Memory.get(compute.id)
+      :ok = put_signed(%{record | owner: "m2"})
+
+      :ok = Adopter.adopt_claimed(stale, "m1", Memory)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{owner: "m2"}} = Memory.get(compute.id)
+    end
+
+    test "is adopted from what the store holds now" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+      backdate!(compute.id, 2 * 60 * 60 * 1_000)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task, :timed_out}}, 2_000
+    end
+
+    defmodule ChangingStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, whose `get/1` answers a record that
+      # changed since the last read, every time.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate put(record), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+      @impl true
+      defdelegate all(), to: Memory
+
+      @impl true
+      def get(id) do
+        with {:ok, record} <- Memory.get(id),
+             do: {:ok, Map.put(record, :spent_usd, System.unique_integer([:positive]) * 1.0)}
+      end
+    end
+
+    test "that keeps changing is kept, untracked, after one more read" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+
+      log = capture_log(fn -> :ok = Adopter.adopt_claimed(stale, nil, ChangingStore) end)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+      assert log =~ "changed twice"
+    end
+
+    test "control: an unchanged record is adopted" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+    end
+  end
+
   # A process registered under the tracker's name, as a tracker is from its
   # start. Returns once the entry is in place.
   defp hold_registry_entry(id) do
