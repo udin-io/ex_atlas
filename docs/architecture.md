@@ -46,7 +46,7 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.UpstreamStatus` | Pure | Classifies a provider answer: `{:alive, _}`, `{:dead, reason, _}`, `{:poll_failed, _}` |
 | `Orchestrator.Timer` | Constants | `max_ms/0` (4,294,967,295) and `option_type/0` for every timer option |
 | `Orchestrator.Events` | Functions | PubSub broadcasts `{:atlas_compute, id, event}` |
-| `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`; optional `renew_lease/2` and `claim_expired/3`. Default `TrackingStore.Dets` |
+| `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`; optional `renew_lease/2`, `claim_expired/3`, `expired_leases/1` and `delete_expired/3`. Default `TrackingStore.Dets` |
 | `Orchestrator.TrackingStore.Ecto` | Functions, no process | Records as `term_to_binary` blobs in the host repo's `atlas_tracking_records`, decoded with `[:safe]`; owner leases in `atlas_owner_leases`. `Ecto.Migration` step 1 creates the records table, step 2 the lease table |
 | `Orchestrator.Supervisor` | `Supervisor` | The orchestrator's tree for a host to start after its repo; `children/0` is the one child list |
 | `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper. `adopt_claimed/3` adopts records a Lease claimed, the same way |
@@ -112,6 +112,7 @@ classDiagram
     renew_lease(owner, expires_at_ms)
     claim_expired(claimer, now_ms, rewrite)
     expired_leases(now_ms) expiry and mac per owner
+    delete_expired(id, owner, expires_at_ms) ok, kept or error
   }
   class Migration {
     up(opts)
@@ -139,6 +140,8 @@ classDiagram
   Supervisor ..> Lease : starts with a lease store and reap_owner
   Lease ..> Ecto : renew_lease, claim_expired, expired_leases
   Lease ..> TrackingStore : lease_signed? on each expired row
+  Reaper ..> Ecto : delete_expired, then terminate the pod
+  Reaper ..> Lease : dead_owners, takeover_refusal
 ```
 
 When the store cannot answer, nothing is reaped: `all/0` returns an error and
@@ -220,8 +223,44 @@ sequenceDiagram
   end
 ```
 
-A pod whose record still names m1 stays: the store shields it (slice 2,
-#145).
+### A dead owner's record
+
+A record m1 still holds shields its pod while m1 lives. Once m1 is dead, the
+record stops shielding the pod when m2's Lease would not take it over
+(`Lease.takeover_refusal/1`: unsigned by m2's key, or refused by
+`Adopter.refusal/1`) and the pod's name carries m1 (#145). The Reaper
+deletes the record first, in one conditional `DELETE`, then the pod:
+
+```mermaid
+sequenceDiagram
+  participant L2 as Lease on m2
+  participant Store as TrackingStore.Ecto
+  participant R2 as Reaper on m2
+  participant P as Provider
+  R2->>P: list_compute()
+  P-->>R2: atlas-m1-train-2 billing, untracked, past grace
+  R2->>Store: get(id)
+  Store-->>R2: record, owner m1, unsigned or refused
+  R2->>L2: dead_owners(), after the list
+  L2-->>R2: m1 with expiry T
+  alt record owner m1, name carries m1, takeover_refusal non-nil
+    R2->>Store: delete_expired(id, m1, T)
+    alt row still m1 and m1 still expires at T
+      Store-->>R2: ok
+      R2->>P: ExAtlas.terminate(id)
+      R2->>R2: warning, deleted pod and its tracking record
+    else claimed by m3, or m1 renewed
+      Store-->>R2: kept
+      R2->>R2: leave pod and record
+    end
+  else adoptable, other owner, or m1 not dead
+    R2->>R2: record shields pod
+  end
+```
+
+A terminate that fails after the record went leaves an untracked pod named
+with m1, and a later tick deletes it on the path above. A store without
+`delete_expired/3`, and DETS, keep every record's pod.
 
 ## The orchestrator at runtime
 

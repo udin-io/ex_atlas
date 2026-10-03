@@ -7,6 +7,25 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: a dead owner's record no longer keeps its pod billing (#145)
+
+A record a dead owner still held kept the Reaper off its pod, even when no
+node would ever take it over: an unsigned record, or one this build would
+not adopt. Now, once that owner reads as dead and the pod's name carries
+it, the Reaper deletes the record, then the pod:
+
+    [warning] [ExAtlas.Orchestrator.Reaper] deleted pod-4 (atlas-m1-train-2)
+    and its tracking record: owner "m1" has not renewed its lease since
+    2026-10-02T21:00:00Z, and no connected node reports it
+
+A record the Lease would take over stays the Lease's. The record goes
+through the new optional `TrackingStore.delete_expired/3`, which deletes it
+only while its row still names that owner and the owner's lease still has
+the expiry read as dead, so a record another node just claimed keeps its
+pod. `TrackingStore.Ecto` implements it; a custom store without it keeps
+every record's pod, as before. `reap_dead_owners: false` turns this off
+with the rest of dead-owner deletion.
+
 ### Changed: owner lease rows are signed, and dead-owner deletion is on by default (#148)
 
 Each `TrackingStore.Ecto` lease renewal writes an HMAC of the owner and

@@ -43,7 +43,8 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   So an id recorded in the `ExAtlas.Orchestrator.TrackingStore` is ours too,
   whether or not `ExAtlas.Orchestrator.Adopter` has reached it yet. An id in
-  neither is an orphan.
+  neither is an orphan. One record stops shielding its pod: a dead owner's
+  record that no node takes over (below).
 
   ## The adoption gate
 
@@ -134,8 +135,19 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
       config :ex_atlas, :orchestrator, reap_dead_owners: false
 
-  Unset or `true` turns it on; any other value leaves it off. A pod a dead
-  owner's record still names stays, as today.
+  Unset or `true` turns it on; any other value leaves it off.
+
+  A record still shields its pod, with one exception (issue 145). The record
+  names the dead owner the pod's name carries, and
+  `ExAtlas.Orchestrator.Lease` would not take it over: it is not signed by
+  this node's key, or this build would not adopt it (a newer version, say).
+  Then the Reaper deletes the record first, through the store's
+  `delete_expired/3`. That call removes the row only while it still names
+  that owner and the owner's lease still has the expiry read as dead, so a
+  record another node just claimed, or an owner that just renewed, keeps
+  both. Then it deletes the pod. If that fails, the pod has no record left,
+  and a later tick deletes it as a dead owner's untracked pod. A store
+  without `delete_expired/3` keeps every record's pod.
 
   ## The grace window
 

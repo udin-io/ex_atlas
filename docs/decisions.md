@@ -29,6 +29,12 @@ names the PR or issue that holds the reasoning.
 | Window default 15 minutes, or two ttls when that is longer; bounds two ttls to 24 hours | A fixed 15-minute default: at a ttl over 7.5 minutes it is under the floor, and the Lease would refuse to start with no window set | #144 |
 | `dead_owners/0` answers `%{owner => expires_at_ms}` | A list: the deletion log names the expiry | #144 |
 | The Ecto store only | DETS: it has no shared lease table, so no node sees another's liveness | #143 |
+| Accept the residual risk that a writer of `atlas_owner_leases` replays an old signed row of a live unclustered node, or holds a row lock that blocks its renewals, for the whole window: that node's untracked pods go. Clustering closes it; `reap_dead_owners: false` turns deletion off (coordinator's decision on PR #149, the recommended option) | Keep deletion off by default until replay is closed: no signature stops a writer who puts back a row it once read, and only clustering does | #148, PR #149 review finding 1 |
+| A dead owner's record stops shielding its pod only when the Lease would not take it over (`Lease.takeover_refusal/1`) and the pod's name carries the owner the record names | Any record of a dead owner: an adoptable record is the Lease's to claim, and a live node cut off from the database would lose its normal tasks | #145 |
+| Delete a signed record this build refuses (`Adopter.refusal/1`, a newer version) too | Unsigned records only: such a record holds no task this build can adopt, and left alone its pod bills with no bound | #145 |
+| The record first, through a new optional `delete_expired/3` that re-checks the row's owner and the exact expiry read as dead in one `DELETE`; then the pod | The pod first, then `delete/1`: a claim or renewal landing between `get/1` and the delete would cost a live node its pod, and a deleted pod is no longer listed, so a failed record delete would strand the record | #145 |
+| A pod whose delete fails after its record went is left to the untracked dead-owner path on a later tick | Put the record back: a second write that can fail too, for a pod that the next tick deletes anyway | #145 |
+| A store without `delete_expired/3` keeps every record's pod | Fall back to `get/1` then `delete/1`: the race above | #145 |
 
 ## Release 0.9.0 (#141)
 

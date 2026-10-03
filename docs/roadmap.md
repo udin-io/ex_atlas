@@ -1,8 +1,8 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #147 (#144, slice
-1 of milestone 11). It feeds the choice of the next feature. Dates
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #150 (#145, slice
+2 of milestone 11). It feeds the choice of the next feature. Dates
 are merge dates.
 
 ## Next
@@ -16,12 +16,12 @@ has open issues, and risk 6 is the open risk with the largest cost a feature
 can retire. Its cost has no bound: an interactive session a destroyed
 machine ran has no tracker, no deadline, and no Reaper that touches it. We
 left out risk 2 (cowlib, waits on an upstream release) and the risks only
-the owner's live tests settle. The ranking is on #143. Two slices:
+the owner's live tests settle. The ranking is on #143. Three slices:
 
 | Slice | What it adds | Ticket |
 |---|---|---|
-| 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods, opt-in with `reap_dead_owners: true` | #144, PR #147 |
-| 2 | A record a dead owner still holds after the window no longer shields its pod: the Reaper deletes the pod, then the record | #145 |
+| 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods, opt-in with `reap_dead_owners: true` until slice 3 | #144, PR #147 |
+| 2 | A record a dead owner still holds after the window, and no node would take over, no longer shields its pod: the Reaper deletes the record, then the pod | #145, PR #150 |
 | 3 | Owner lease rows are signed, so a database writer cannot forge a dead owner's row (review finding on PR #147; replaying an old signed row for the whole window stays a risk); dead-owner deletion then turns on by default | #148, PR #149 |
 
 Vast.ai (#98) shipped with slice 4. Its templates, network volumes,
@@ -31,7 +31,7 @@ serverless, and SSH and Jupyter modes stay out of scope.
 
 | Feature | Ticket | State |
 |---|---|---|
-| Dead owner's pods, slice 3 (milestone 11) | #148 | PR #149: lease rows signed (migration step 3), dead-owner deletion on by default |
+| Dead owner's pods, slice 2 (milestone 11) | #145 | PR #150: a dead owner's record that no node takes over no longer shields its pod. The last slice: milestone 11 is complete once it merges, and release 0.10.0 comes next |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -40,6 +40,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Dead owner's pods, slices 1 and 3 (milestone 11, risk 6) | #147 (#144): the Reaper deletes a dead owner's untracked pods. #149 (#148): lease rows signed (migration step 3), dead-owner deletion on by default | 2026-10-03 |
 | Release 0.9.0 (milestone 10) | #142 (#141): version bump, the 0.9.0 section of `guides/upgrading.md`, and a `"0.9.0"` step in `mix ex_atlas.upgrade`. The owner publishes to Hex and pushes tag `v0.9.0` | 2026-10-02 |
 | Release 0.8.0 (milestone 7) | #95 (#94): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. Published to Hex from tag `v0.8.0` on `939cf2e` | 2026-10-02 |
 | An unsigned tracking record adopts only a pod this node's Reaper would delete (milestone 9, risk 64) | #140 (#138) | 2026-10-02 |

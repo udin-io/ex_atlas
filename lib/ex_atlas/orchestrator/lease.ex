@@ -37,6 +37,10 @@ defmodule ExAtlas.Orchestrator.Lease do
   column no longer matches the record's signed `:owner`. An owner that never
   renewed a lease (a node on an older release) never expires.
 
+  The Reaper deletes the pod and the record of the first two kinds once the
+  owner is dead (`dead_owners/0`) and the pod's name carries that owner; the
+  log line says so.
+
   ## A record lost to another node
 
   A node can lose a record while it still tracks it: its renewal came late,
