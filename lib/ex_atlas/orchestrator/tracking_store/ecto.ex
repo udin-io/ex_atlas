@@ -326,10 +326,13 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       # table without step 3 has no `mac`: renew unsigned rather than not
       # at all, or this node would lose its records to a claimer.
       outside_transaction(fn ->
-        with {:error, _reason} = error <- upsert_lease(repo, signed, [:expires_at, :mac]) do
-          if readable?(repo, :mac), do: error, else: upsert_lease(repo, row, [:expires_at])
-        end
+        with {:error, _reason} = error <- upsert_lease(repo, signed, [:expires_at, :mac]),
+             do: renew_unsigned(repo, row, error)
       end)
+    end
+
+    defp renew_unsigned(repo, row, error) do
+      if readable?(repo, :mac), do: error, else: upsert_lease(repo, row, [:expires_at])
     end
 
     defp upsert_lease(repo, row, columns) do
