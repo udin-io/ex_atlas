@@ -1438,6 +1438,21 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert info =~ "reaps again"
     end
 
+    test "a delay below 1 ms waits 1 ms, and still reports the failure once" do
+      orphaned_task()
+      Memory.fail_all(:database_down)
+
+      capture_log(fn ->
+        start_retrying(retry_after_ms: -5, max_retry_after_ms: -5)
+        await_failed_reads(3)
+        Memory.fail_all(nil)
+        assert_receive :adoption_complete, 2_000
+      end)
+
+      assert_received :adoption_failed
+      refute_received :adoption_failed
+    end
+
     test "stopping it while it waits returns, and keeps every record" do
       compute = orphaned_task()
       Memory.fail_all(:database_down)

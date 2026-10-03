@@ -153,8 +153,9 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   defp retry_plan(opts) do
     if Keyword.get(opts, :retry, false) do
-      max = Keyword.get(opts, :max_retry_after_ms, @max_retry_after_ms)
-      %{delay: min(Keyword.get(opts, :retry_after_ms, @retry_after_ms), max), max: max}
+      # At least 1 ms: `Process.sleep/1` raises on a negative wait.
+      max = max(Keyword.get(opts, :max_retry_after_ms, @max_retry_after_ms), 1)
+      %{delay: max(min(Keyword.get(opts, :retry_after_ms, @retry_after_ms), max), 1), max: max}
     end
   end
 
