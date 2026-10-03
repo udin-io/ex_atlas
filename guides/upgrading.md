@@ -1,14 +1,15 @@
 # Upgrading
 
-## Upgrading to the next release (unreleased)
+## Upgrading to 0.10.0
 
-The Ecto store signs owner lease rows, and a live node now deletes a dead
-owner's untracked pods by default.
+0.10.0 signs owner lease rows on the Ecto store, and a live node now deletes a
+dead owner's pods by default.
 
 | Change | Who acts | Section |
 |---|---|---|
 | `Migration` step 3 adds a `mac` column to `atlas_owner_leases` | You use `TrackingStore.Ecto` and your migrations ran before this release | [Run step 3](#ecto-store-run-step-3) |
 | Dead-owner deletion is on by default | You use `TrackingStore.Ecto` and want it off | [Run step 3](#ecto-store-run-step-3) |
+| A replayed row or a held row lock can end a live node's pods | You use `TrackingStore.Ecto` without clustering | [Accepted risk](#accepted-risk-replay-and-a-held-row-lock) |
 
 `mix igniter.upgrade ex_atlas` prints a notice when a config file sets the
 Ecto store. It writes no migration.
@@ -49,6 +50,17 @@ your install migration (`up/0`, every step) and then this one works.
   the Reaper deletes the record, then the pod. A custom tracking store gets
   this only by implementing `delete_expired/3`; without it, those pods stay
   as in 0.9.0.
+
+### Accepted risk: replay and a held row lock
+
+The signature stops a writer from forging a row. It does not stop a writer
+of `atlas_owner_leases` from putting back an old signed row of a live
+unclustered node, or from holding a lock on that row so its renewals block.
+Either leaves the row expired for the whole `:reap_dead_owner_after_ms`
+window (15 minutes by default), and a live node then deletes that node's
+untracked pods. Cluster the nodes, so a connected node reports its owner and
+keeps its pods, or set `reap_dead_owners: false`. Let only the app write the
+table.
 
 ## Upgrading to 0.9.0
 
