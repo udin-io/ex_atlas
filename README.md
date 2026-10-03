@@ -117,9 +117,10 @@ task runs only the steps between them. Run directly, `mix ex_atlas.upgrade`
 starts at 0.1.0 and runs every step; each step is idempotent.
 `mix ex_atlas.upgrade 0.9.0 0.10.0` runs one range.
 
-Coming from 0.8? Read [guides/upgrading.md](guides/upgrading.md): five changes
-in 0.9.0 decide which persisted tasks a node adopts after a restart. Coming from
-0.7, read its 0.8.0 section too.
+Coming from 0.9? Read [guides/upgrading.md](guides/upgrading.md): on
+`TrackingStore.Ecto`, 0.10.0 needs a migration for signed lease rows, and a
+live node now deletes a dead owner's pods by default. Coming from 0.8, read
+its 0.9.0 section too, and from 0.7 its 0.8.0 section.
 
 ## Architecture at a glance
 
@@ -1761,6 +1762,10 @@ mandate Req — it's an implementation choice of the bundled providers.
   `mix ex_atlas.install --tracking-store ecto`), owner leases so a live node
   takes over a dead node's tasks, and signed records. See
   [Upgrading](guides/upgrading.md).
+- **v0.10** — a live node deletes the pods a dead owner left billing, with or
+  without a tracking record (`:reap_dead_owner_after_ms`, default 15 minutes;
+  `reap_dead_owners: false` turns it off). Owner lease rows are signed
+  (migration step 3). See [Upgrading](guides/upgrading.md).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.
