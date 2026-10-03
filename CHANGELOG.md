@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed: a DETS store down or recreated no longer lets the Reaper delete a recorded pod (#154)
+
+- `TrackingStore.Dets.get/1` raises `ArgumentError` while its table is not
+  open (the store process is down or restarting, or its file would not
+  open), where it answered `:error`. `:error` means "not stored", and a
+  Reaper tick in that window deleted a pod that had a record. Every caller
+  rescues the raise: the Reaper keeps the pod, and a tracker keeps its pod on
+  a supervisor stop.
+- A DETS store that recreated a corrupt file, or could not open it, answers
+  `{:error, _}` from `all/0` until the VM restarts. A restart of its process
+  answered `{:ok, records}` with the lost records missing. While marked, its
+  `get/1` raises on a miss, so a Reaper whose adoption settled before the
+  loss keeps the pod.
+- A DETS file deleted after the VM opened it, and a file garbled under the
+  open table, answer `{:error, _}` from `all/0`, where they answered
+  `{:ok, []}`.
+- The DETS store closes its table before its process exits on a shutdown,
+  and ignores a stray message instead of crashing.
+- A tracker whose tracking store call exits (a store process that died
+  mid-call) carries on and keeps its pod, as it does on a raise. It crashed,
+  and the crash deleted the pod.
+- A custom `TrackingStore` raises from `get/1` when it cannot answer; the
+  callback doc now says so.
+
 ## v0.10.0 — 2026-10-03
 
 ### Upgrading

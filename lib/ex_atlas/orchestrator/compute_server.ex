@@ -1624,19 +1624,25 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
   defp forget(%{store: nil}, _id), do: :ok
   defp forget(%{store: store}, id), do: contain_store(id, :ok, fn -> store.delete(id) end)
 
-  # A host store raises when its database is down or a row will not decode. A
-  # tracker that crashed on that would delete a pod the store may still hold,
-  # so the raise is logged and the call answers `fallback`.
+  # A host store raises when its database is down or a row will not decode, and
+  # a store behind `GenServer.call/2` exits when its process dies mid-call. A
+  # tracker that crashed on either would delete a pod the store may still
+  # hold, so the fault is logged and the call answers `fallback`.
   defp contain_store(id, fallback, fun) do
     fun.()
   rescue
-    error ->
-      Logger.error(
-        "[ExAtlas.Orchestrator.ComputeServer] tracking store raised for #{id} " <>
-          "(#{inspect(error)}); the tracker carries on and its record may be stale"
-      )
+    error -> store_fault(id, inspect(error), fallback)
+  catch
+    :exit, reason -> store_fault(id, inspect({:exit, reason}), fallback)
+  end
 
-      fallback
+  defp store_fault(id, what, fallback) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.ComputeServer] tracking store raised for #{id} " <>
+        "(#{what}); the tracker carries on and its record may be stale"
+    )
+
+    fallback
   end
 
   # --- teardown ---

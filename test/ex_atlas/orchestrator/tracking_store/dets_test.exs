@@ -50,6 +50,59 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
 
       assert {:ok, []} = Dets.all()
     end
+
+    # A supervisor shutdown runs `terminate/2`, which closes the table before
+    # the process exits. Left to the owner's death, DETS closes it a moment
+    # later, and a store started in that moment finds the table name taken
+    # or the file not closed. The table process is held suspended across the
+    # stop, so that moment lasts 100 ms, every run.
+    test "a stopped store has closed its file: the next open needs no repair",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      table = :dets.info(:ex_atlas_tracked, :pid)
+      :ok = :sys.suspend(table)
+      _ = spawn(fn -> Process.sleep(100) && :sys.resume(table) end)
+
+      :ok = stop_supervised!(Dets)
+
+      file = String.to_charlist(Path.join(dir, "tracked.dets"))
+      assert {:ok, check} = :dets.open_file(:ex_atlas_close_check, file: file, repair: false)
+      :ok = :dets.close(check)
+    end
+  end
+
+  # The store traps exits so its shutdown closes the table. It is linked to
+  # OTP's `:dets` server too, and must still stop when that server dies,
+  # rather than run on with a table nothing serves. On a peer node, so the
+  # test VM keeps its own `:dets` server.
+  # Each crash opens a restart window, so a message nobody expects is ignored,
+  # as GenServer's default `handle_info/2` ignores it.
+  test "keeps running past a stray message and a linked process's normal exit",
+       %{tmp_dir: dir} do
+    pid = start_store!(dir)
+    :ok = Dets.put(record("compute-stray"))
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(pid, :stray)
+        send(pid, {:EXIT, self(), :normal})
+        send(self(), {:alive?, survives?(pid)})
+      end)
+
+    assert_received {:alive?, true}
+    assert Process.whereis(Dets) == pid
+    assert {:ok, [%{id: "compute-stray"}]} = Dets.all()
+    refute log =~ "terminating"
+  end
+
+  test "stops when the DETS server dies", %{tmp_dir: dir} do
+    {_peer, node} = ExAtlas.Test.Cluster.start_peer!()
+    {:ok, store} = :erpc.call(node, GenServer, :start, [Dets, [storage_path: dir], [name: Dets]])
+    ref = Process.monitor(store)
+
+    :erpc.call(node, Process, :exit, [:erpc.call(node, Process, :whereis, [:dets]), :kill])
+
+    assert_receive {:DOWN, ^ref, :process, ^store, :killed}, 2_000
   end
 
   describe "a corrupt store" do
@@ -77,6 +130,225 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
     end
   end
 
+  # Issue 154: the records a recreate lost stay lost when the store process
+  # restarts, so `all/0` must not turn "lost" into "these are all of them".
+  # The mark lasts for the life of the VM.
+  describe "a store that lost records, after its process restarts" do
+    defp corrupt!(dir),
+      do: File.write!(Path.join(dir, "tracked.dets"), :crypto.strong_rand_bytes(4_096))
+
+    defp restart_store!(dir) do
+      :ok = stop_supervised!(Dets)
+      start_store!(dir)
+    end
+
+    test "still answers {:error, _} from all/0, restart after restart, and logs why",
+         %{tmp_dir: dir} do
+      corrupt!(dir)
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(dir) end)
+      :ok = Dets.put(record("compute-after-recreate"))
+      assert {:error, {:store_recreated, _}} = Dets.all()
+
+      log = ExUnit.CaptureLog.capture_log(fn -> restart_store!(dir) end)
+
+      assert {:error, {:store_recreated, _}} = Dets.all()
+      assert log =~ Path.join(dir, "tracked.dets")
+      assert log =~ "until the VM restarts"
+
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(dir) end)
+
+      assert {:error, {:store_recreated, _}} = Dets.all()
+      # The file itself opened intact: writes made after the recreate survive.
+      assert {:ok, %{id: "compute-after-recreate"}} = Dets.get("compute-after-recreate")
+    end
+
+    test "a store killed and restarted by its supervisor still answers {:error, _}",
+         %{tmp_dir: dir} do
+      corrupt!(dir)
+      old = ExUnit.CaptureLog.capture_log(fn -> send(self(), {:pid, start_store!(dir)}) end)
+      assert old =~ "recreating"
+      assert_received {:pid, pid}
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(pid, :kill)
+        assert await_restart(pid)
+      end)
+
+      assert {:error, {:store_recreated, _}} = Dets.all()
+    end
+
+    test "raises on a miss, since the record may be among the lost, and answers a hit",
+         %{tmp_dir: dir} do
+      lost = Path.join(dir, "lost")
+      intact = Path.join(dir, "intact")
+      File.mkdir_p!(lost)
+      File.mkdir_p!(intact)
+      corrupt!(lost)
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(lost) end)
+      :ok = Dets.put(record("compute-after-recreate"))
+
+      assert {:ok, %{id: "compute-after-recreate"}} = Dets.get("compute-after-recreate")
+      error = assert_raise ArgumentError, fn -> Dets.get("compute-lost") end
+      assert error.message =~ "store_recreated"
+
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(lost) end)
+      assert_raise ArgumentError, fn -> Dets.get("compute-lost") end
+
+      # Control: a store on an intact file answers a miss as "not stored".
+      :ok = stop_supervised!(Dets)
+      start_store!(intact)
+      assert :error = Dets.get("compute-lost")
+    end
+
+    # A tmp cleaner, or a volume that came up unmounted: the file this VM
+    # opened is gone, and a fresh one would read as "nothing was stored".
+    test "a file deleted after this VM opened it reads as lost; control: a first start reads {:ok, []}",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      assert {:ok, []} = Dets.all()
+      :ok = Dets.put(record("compute-vanished"))
+      :ok = stop_supervised!(Dets)
+      File.rm!(Path.join(dir, "tracked.dets"))
+
+      log = ExUnit.CaptureLog.capture_log(fn -> start_store!(dir) end)
+
+      assert {:error, {:store_vanished, _}} = Dets.all()
+      assert_raise ArgumentError, fn -> Dets.get("compute-vanished") end
+      assert log =~ "tracked.dets"
+
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(dir) end)
+      assert {:error, {:store_vanished, _}} = Dets.all()
+    end
+
+    test "control: an intact store restarted logs no lost records", %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-intact"))
+
+      log = ExUnit.CaptureLog.capture_log(fn -> restart_store!(dir) end)
+
+      assert {:ok, [%{id: "compute-intact"}]} = Dets.all()
+      refute log =~ "until the VM restarts"
+    end
+
+    test "marks only its own path: an intact store elsewhere in the same VM reads {:ok, _}",
+         %{tmp_dir: dir} do
+      lost = Path.join(dir, "lost")
+      intact = Path.join(dir, "intact")
+      File.mkdir_p!(lost)
+      File.mkdir_p!(intact)
+
+      start_store!(intact)
+      :ok = Dets.put(record("compute-elsewhere"))
+      :ok = stop_supervised!(Dets)
+
+      corrupt!(lost)
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(lost) end)
+      assert {:error, _} = Dets.all()
+      :ok = stop_supervised!(Dets)
+
+      start_store!(intact)
+      assert {:ok, [%{id: "compute-elsewhere"}]} = Dets.all()
+      :ok = stop_supervised!(Dets)
+
+      # And the intact store did not clear the lost one's mark.
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(lost) end)
+      assert {:error, {:store_recreated, _}} = Dets.all()
+    end
+
+    test "names the same path the same way: a relative storage path reads the mark too",
+         %{tmp_dir: dir} do
+      corrupt!(dir)
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(dir) end)
+
+      relative = Path.relative_to_cwd(dir)
+      assert relative != dir
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(relative) end)
+
+      assert {:error, {:store_recreated, _}} = Dets.all()
+    end
+
+    # A directory where the file should be: the open fails, the delete fails,
+    # and the store comes up with no table. Any user reproduces it, root
+    # included, unlike a read-only dir, which `init/1` chmods back to 0700.
+    test "a file that would not open keeps its mark once it opens again", %{tmp_dir: dir} do
+      path = Path.join(dir, "tracked.dets")
+      File.mkdir_p!(path)
+
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(dir) end)
+      assert {:error, {:store_unopenable, _}} = Dets.all()
+      assert_raise ArgumentError, fn -> Dets.get("compute-any") end
+
+      File.rm_rf!(path)
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(dir) end)
+
+      assert {:error, {:store_unopenable, _}} = Dets.all()
+      # Control: the file did open this time.
+      :ok = Dets.put(record("compute-reopened"))
+      assert {:ok, %{id: "compute-reopened"}} = Dets.get("compute-reopened")
+    end
+
+    # The mark lives in the VM, not the file: the next boot reads the file as
+    # it stands, the records the recreate lost missing. `docs/risks.md` names
+    # this.
+    test "a new VM starts clean and reads the records written after the recreate",
+         %{tmp_dir: dir} do
+      corrupt!(dir)
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(dir) end)
+      :ok = Dets.put(record("compute-after-recreate"))
+      assert {:error, _} = Dets.all()
+      :ok = stop_supervised!(Dets)
+
+      {_peer, node} = ExAtlas.Test.Cluster.start_peer!()
+      {:ok, _pid} = :erpc.call(node, GenServer, :start, [Dets, [storage_path: dir], [name: Dets]])
+
+      assert {:ok, [%{id: "compute-after-recreate"}]} = :erpc.call(node, Dets, :all, [])
+    end
+  end
+
+  # `:error` means "not stored", and the Reaper deletes a pod on it. A table
+  # that cannot answer must not say that (issue 154).
+  describe "get/1 on a table that cannot answer" do
+    test "raises when the store is not running; control: answers :error for an unknown id when it is",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-closed"))
+      assert :error = Dets.get("compute-never-stored")
+
+      :ok = stop_supervised!(Dets)
+
+      error = assert_raise ArgumentError, fn -> Dets.get("compute-closed") end
+      assert error.message =~ "ExAtlas.Orchestrator.TrackingStore.Dets"
+      assert error.message =~ ~s("compute-closed")
+    end
+
+    test "raises when the file under an open table reads as garbage, naming no path",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-garbled"))
+      assert {:ok, %{id: "compute-garbled"}} = Dets.get("compute-garbled")
+
+      path = Path.join(dir, "tracked.dets")
+      File.write!(path, :binary.copy(<<0xFF>>, File.stat!(path).size))
+
+      error = assert_raise ArgumentError, fn -> Dets.get("compute-garbled") end
+      assert error.message =~ ~s("compute-garbled")
+      assert error.message =~ "bad_object"
+      refute error.message =~ dir
+    end
+
+    test "all/0 answers {:error, _} when the file under an open table reads as garbage",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-garbled"))
+      assert {:ok, [_]} = Dets.all()
+
+      path = Path.join(dir, "tracked.dets")
+      File.write!(path, :binary.copy(<<0xFF>>, File.stat!(path).size))
+
+      assert {:error, _} = Dets.all()
+    end
+  end
+
   describe "on-disk permissions" do
     @describetag :unix
 
@@ -86,6 +358,29 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
 
       assert file_mode(dir) == 0o700
       assert file_mode(Path.join(dir, "tracked.dets")) == 0o600
+    end
+  end
+
+  defp survives?(pid) do
+    _ = :sys.get_state(pid)
+    true
+  catch
+    :exit, _reason -> false
+  end
+
+  # Polls for up to 1 s until the supervisor has started a new store.
+  defp await_restart(old, tries \\ 100) do
+    case Process.whereis(Dets) do
+      pid when is_pid(pid) and pid != old ->
+        :sys.get_state(pid)
+        true
+
+      _gone_or_old when tries > 0 ->
+        Process.sleep(10)
+        await_restart(old, tries - 1)
+
+      _gone_or_old ->
+        false
     end
   end
 

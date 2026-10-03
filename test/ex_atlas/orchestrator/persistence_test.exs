@@ -540,6 +540,147 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
   end
 
+  # A store reached through `GenServer.call/2` exits when its process dies
+  # mid-call (`TrackingStore.Dets.put/1` does). A tracker that crashed on the
+  # exit would delete a pod the store may still hold.
+  defmodule ExitingGet do
+    @moduledoc false
+    defdelegate child_spec(opts), to: Memory
+    defdelegate put(record), to: Memory
+    defdelegate delete(id), to: Memory
+    defdelegate all(), to: Memory
+    def get(_id), do: exit({:noproc, {GenServer, :call, [Memory, :get]}})
+  end
+
+  # Whether `pid` handled every message sent to it so far and is still alive.
+  defp handled?(pid) do
+    _ = :sys.get_state(pid)
+    true
+  catch
+    :exit, _reason -> false
+  end
+
+  describe "a store whose get/1 exits" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: ExitingGet)
+    end
+
+    test "a landed report keeps the tracker and its pod running" do
+      {:ok, pid, compute} =
+        Orchestrator.spawn(
+          task_opts(callback: "https://app.example.com/atlas/cb", finish_grace_ms: 60_000)
+        )
+
+      id = compute.id
+      {:ok, %{callback_task_id: task_id}} = Memory.get(id)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+          send(self(), {:alive?, handled?(pid)})
+        end)
+
+      assert_received {:alive?, true}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+      assert log =~ "tracking store raised for #{id}"
+    end
+
+    test "a supervisor stop keeps a persisted task's pod" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      ref = Process.monitor(pid)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+      end)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
+  # Issue 154: `TrackingStore.Dets.get/1` raises while its process is down,
+  # where it answered `:error` ("not stored"). Each tracker read of the record
+  # goes through `contain_store/3`, so the tracker carries on.
+  describe "a DETS store whose process is down" do
+    @describetag :tmp_dir
+
+    setup %{tmp_dir: dir} do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: {TrackingStore.Dets, [storage_path: dir]})
+    end
+
+    test "a supervisor stop keeps a persisted task's pod" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      :ok = stop_supervised!(TrackingStore.Dets)
+      ref = Process.monitor(pid)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+        end)
+
+      # A raise inside `terminate/2` would also skip the DELETE; the clean
+      # `:shutdown` exit shows the tracker decided to keep the pod.
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ "tracking store raised for #{compute.id}"
+    end
+
+    test "control: with the store running and no record, a supervisor stop deletes the pod" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      :ok = TrackingStore.Dets.delete(compute.id)
+
+      :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "a landed report keeps the tracker and its pod running" do
+      {:ok, pid, compute} =
+        Orchestrator.spawn(
+          task_opts(callback: "https://app.example.com/atlas/cb", finish_grace_ms: 60_000)
+        )
+
+      id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(id))
+      {:ok, %{callback_task_id: task_id}} = TrackingStore.Dets.get(id)
+      :ok = stop_supervised!(TrackingStore.Dets)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+          assert_receive {:atlas_compute, ^id, {:task_report, _}}, 2_000
+          _ = :sys.get_state(pid)
+        end)
+
+      assert Process.alive?(pid)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+      assert log =~ "tracking store raised for #{id}"
+      assert log =~ "its record may be stale"
+    end
+
+    test "a respawn rents the replacement and tracks it" do
+      {:ok, _pid, compute} =
+        Orchestrator.spawn(task_opts(spot: true, status_poll_ms: 30, on_failure: {:respawn, 1}))
+
+      old_id = compute.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      :ok = stop_supervised!(TrackingStore.Dets)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = Mock.forget(old_id)
+          assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+          send(self(), {:new_id, new_id})
+        end)
+
+      assert_received {:new_id, new_id}
+      assert {:ok, tracker} = Orchestrator.lookup(new_id)
+      assert Process.alive?(tracker)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(new_id, provider: :mock)
+      assert log =~ "tracking store raised for #{old_id}"
+    end
+  end
+
   describe "a supervisor stop with no tracking store configured" do
     setup do
       ExAtlas.Test.Orchestrator.start!()

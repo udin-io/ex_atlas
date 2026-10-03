@@ -42,7 +42,7 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 | Feature | Ticket | State |
 |---|---|---|
 | Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
-| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Designed; slices #154 and #155 filed |
+| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Slice 1 (#154) in PR #157: a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. Slice 2 (#155) next |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.

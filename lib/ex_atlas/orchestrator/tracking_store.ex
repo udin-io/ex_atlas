@@ -272,7 +272,13 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   @doc "Write `record`, replacing any record with the same `:id`."
   @callback put(record()) :: :ok
 
-  @doc "Fetch the record for `id`."
+  @doc """
+  Fetch the record for `id`.
+
+  `:error` means "not stored", and the Reaper deletes a pod on it. A store
+  that cannot answer (its database is down, its table is not open) raises
+  instead: every caller rescues the raise and keeps the pod.
+  """
   @callback get(String.t()) :: {:ok, record()} | :error
 
   @doc "Remove the record for `id`. A no-op when there is none."
@@ -282,7 +288,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   Every stored record.
 
   `{:error, reason}` means "I cannot account for my contents" — the caller
-  must then neither adopt nor reap. It is not the same as `{:ok, []}`.
+  must then neither adopt nor reap. It is not the same as `{:ok, []}`. A
+  store that lost records keeps answering `{:error, _}` until the VM
+  restarts, never `{:ok, fewer}`.
   """
   @callback all() :: {:ok, [record()]} | {:error, term()}
 

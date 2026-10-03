@@ -305,6 +305,69 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     end
   end
 
+  # Issue 154: the gate is open, so the store's answer for the pod is the only
+  # thing between it and a DELETE. Every other clause of the rule passes: a
+  # `:mock` pod in `:reap_providers`, named with the prefix, running, past
+  # grace, with no tracker.
+  describe "a DETS store whose process is down" do
+    @describetag :tmp_dir
+
+    alias ExAtlas.Orchestrator.TrackingStore.Dets
+
+    setup %{tmp_dir: dir} do
+      TestOrchestrator.put_env(
+        tracking_store: Dets,
+        reap_grace_ms: 0,
+        reap_interval_ms: 60_000,
+        reap_providers: [:mock],
+        reap_name_prefix: "atlas-"
+      )
+
+      start_supervised!({Dets, storage_path: dir})
+      reaper = start_supervised!(Reaper)
+      send(reaper, :adoption_complete)
+
+      {:ok, reaper: reaper}
+    end
+
+    test "keeps a recorded pod, and logs that it treats it as ours", %{reaper: reaper} do
+      {:ok, compute} = spawn_untracked()
+      :ok = Dets.put(record_for(compute))
+      :ok = stop_supervised!(Dets)
+
+      log = capture_log(fn -> :ok = tick(reaper) end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ "tracking store raised for #{compute.id}"
+      assert log =~ "treating it as ours"
+    end
+
+    # Adoption settled before the loss, so nothing re-reads `all/0`: the store's
+    # answer to `get/1` is all the Reaper has.
+    test "keeps a recorded pod after the store restarts over a corrupt file",
+         %{reaper: reaper, tmp_dir: dir} do
+      {:ok, compute} = spawn_untracked()
+      :ok = Dets.put(record_for(compute))
+      :ok = stop_supervised!(Dets)
+      File.write!(Path.join(dir, "tracked.dets"), :crypto.strong_rand_bytes(4_096))
+      capture_log(fn -> start_supervised!({Dets, storage_path: dir}) end)
+
+      log = capture_log(fn -> :ok = tick(reaper) end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ "treating it as ours"
+    end
+
+    test "control: with the store running, a pod it holds no record of is terminated",
+         %{reaper: reaper} do
+      {:ok, compute} = spawn_untracked()
+
+      :ok = tick(reaper)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
   # A provider whose list raises: RunPod's with no API key configured, which
   # the default `reap_providers: [:runpod]` lists on a Vast-only host.
   defmodule RaisingListProvider do
