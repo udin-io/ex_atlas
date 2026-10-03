@@ -5,7 +5,32 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.10.0 — 2026-10-03
+
+### Upgrading
+
+A live node now deletes a dead owner's pods, and the Ecto store signs owner
+lease rows. Read [the upgrading guide](guides/upgrading.md), or run
+`mix igniter.upgrade ex_atlas` to see whether your config sets the Ecto
+store.
+
+- On `TrackingStore.Ecto`, add a migration calling
+  `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)` (and
+  `down(version: 3)`). It adds the `mac` column. Until it runs, no owner reads
+  as dead and each boot logs one warning (#148).
+- Dead-owner deletion is on by default once step 3 ran (#144, #145, #148).
+  Set `config :ex_atlas, :orchestrator, reap_dead_owners: false` to turn it
+  off. Give every node the same `lease_ttl_ms`, cluster the nodes, and let
+  only the app write `atlas_owner_leases`.
+- Accepted risk: a writer of `atlas_owner_leases` can replay an old signed
+  row of a live unclustered node, or hold a row lock that blocks its
+  renewals, for the whole `:reap_dead_owner_after_ms` window. That node's
+  untracked pods go. Clustering closes it; `reap_dead_owners: false` turns
+  deletion off.
+- A custom `TrackingStore` answers `expired_leases/1` with
+  `%{owner => {expires_at_ms, mac}}`, stores `TrackingStore.lease_mac/2` in
+  `renew_lease/2`, and implements `delete_expired/3` to let a dead owner's
+  record release its pod (#144, #145, #148).
 
 ### Added: a dead owner's record no longer keeps its pod billing (#145)
 
