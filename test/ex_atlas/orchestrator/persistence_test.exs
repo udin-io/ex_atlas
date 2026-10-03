@@ -540,6 +540,64 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     end
   end
 
+  # A store reached through `GenServer.call/2` exits when its process dies
+  # mid-call (`TrackingStore.Dets.put/1` does). A tracker that crashed on the
+  # exit would delete a pod the store may still hold.
+  defmodule ExitingGet do
+    @moduledoc false
+    defdelegate child_spec(opts), to: Memory
+    defdelegate put(record), to: Memory
+    defdelegate delete(id), to: Memory
+    defdelegate all(), to: Memory
+    def get(_id), do: exit({:noproc, {GenServer, :call, [Memory, :get]}})
+  end
+
+  # Whether `pid` handled every message sent to it so far and is still alive.
+  defp handled?(pid) do
+    _ = :sys.get_state(pid)
+    true
+  catch
+    :exit, _reason -> false
+  end
+
+  describe "a store whose get/1 exits" do
+    setup do
+      ExAtlas.Test.Orchestrator.start!(tracking_store: ExitingGet)
+    end
+
+    test "a landed report keeps the tracker and its pod running" do
+      {:ok, pid, compute} =
+        Orchestrator.spawn(
+          task_opts(callback: "https://app.example.com/atlas/cb", finish_grace_ms: 60_000)
+        )
+
+      id = compute.id
+      {:ok, %{callback_task_id: task_id}} = Memory.get(id)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = ExAtlas.Callback.ingest(task_id, :finish, %{"exit_code" => 0})
+          send(self(), {:alive?, handled?(pid)})
+        end)
+
+      assert_received {:alive?, true}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+      assert log =~ "tracking store raised for #{id}"
+    end
+
+    test "a supervisor stop keeps a persisted task's pod" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts())
+      ref = Process.monitor(pid)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
+      end)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
   # Issue 154: `TrackingStore.Dets.get/1` raises while its process is down,
   # where it answered `:error` ("not stored"). Each tracker read of the record
   # goes through `contain_store/3`, so the tracker carries on.
