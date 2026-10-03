@@ -55,11 +55,19 @@ defmodule ExAtlas.Orchestrator.LeaseSigningTest do
     end
   end
 
-  # A lease MAC must never pass as a record's, nor a record's as a lease's.
+  # A lease MAC must never pass as a record's, nor a record's as a lease's:
+  # the same bytes under the record key give another MAC.
   test "the lease key is not the record key" do
-    record = TrackingStore.seal(%{id: "m1", owner: "m1"})
+    record_key =
+      Plug.Crypto.KeyGenerator.generate(@secret, "ex_atlas tracking record v1",
+        cache: Plug.Crypto.Keys
+      )
 
-    refute TrackingStore.lease_mac("m1", @at) == record.mac
-    refute TrackingStore.lease_signed?("m1", @at, record.mac)
+    bytes = :erlang.term_to_binary({"m1", @at}, [:deterministic])
+    under_record_key = :crypto.mac(:hmac, :sha256, record_key, bytes)
+
+    assert is_binary(TrackingStore.lease_mac("m1", @at))
+    refute TrackingStore.lease_mac("m1", @at) == under_record_key
+    refute TrackingStore.lease_signed?("m1", @at, under_record_key)
   end
 end
