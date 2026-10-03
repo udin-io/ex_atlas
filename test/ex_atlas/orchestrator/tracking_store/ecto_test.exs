@@ -64,6 +64,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 2)
   end
 
+  defmodule StepThree do
+    @moduledoc false
+    use Ecto.Migration
+    def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)
+    def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 3)
+  end
+
+  defp lease_columns do
+    %{rows: rows} = Repo.query!("SELECT name FROM pragma_table_info('atlas_owner_leases')")
+    rows |> List.flatten() |> Enum.sort()
+  end
+
   defp tables do
     %{rows: rows} =
       Repo.query!(
@@ -535,7 +547,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     end
 
     test "up/1 refuses a version this build does not have" do
-      assert_raise ArgumentError, ~r/version/, fn -> Store.Migration.up(version: 3) end
+      assert_raise ArgumentError, ~r/version/, fn -> Store.Migration.up(version: 4) end
     end
 
     test "step 1 creates the records table alone; step 2 adds the lease table", %{
@@ -556,6 +568,64 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       :ok = Store.put(record("pod-a"))
 
       Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :down, step: 1, log: false)
+
+      assert tables() == ["atlas_tracking_records"]
+      assert {:ok, [%{id: "pod-a"}]} = Store.all()
+    end
+
+    test "step 3 adds a nullable mac column and keeps the lease rows", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+      :ok = Store.renew_lease("m1", 1_000_000)
+      refute "mac" in lease_columns()
+
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}, {3, StepThree}], :up,
+        all: true,
+        log: false
+      )
+
+      assert "mac" in lease_columns()
+      assert lease_expiry("m1") == 1_000_000
+    end
+
+    # A fresh database runs the install migration, which runs every step,
+    # and then each upgrade migration the host added since.
+    test "step 3 after up/0 on a fresh database is harmless", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+
+      migrations = [{1, Repo.AddAtlasTracking}, {2, StepTwo}, {3, StepThree}]
+      Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+
+      assert Enum.count(lease_columns(), &(&1 == "mac")) == 1
+    end
+
+    test "down(version: 3) drops the mac column and keeps the lease rows", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      migrations = [{1, StepOne}, {2, StepTwo}, {3, StepThree}]
+      Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+      :ok = Store.renew_lease("m1", 1_000_000)
+
+      Ecto.Migrator.run(Repo, migrations, :down, step: 1, log: false)
+
+      refute "mac" in lease_columns()
+      assert lease_expiry("m1") == 1_000_000
+    end
+
+    test "rolling back steps 3, 2 and 1 in turn drops everything", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      migrations = [{1, StepOne}, {2, StepTwo}, {3, StepThree}]
+      Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+
+      for _step <- 1..3, do: Ecto.Migrator.run(Repo, migrations, :down, step: 1, log: false)
+
+      assert tables() == []
+    end
+
+    test "down(version: 2) on a step-3 database drops the lease table", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Store.put(record("pod-a"))
+
+      Ecto.Migrator.run(Repo, [{20_261_002_000_000, StepTwo}], :down, all: true, log: false)
 
       assert tables() == ["atlas_tracking_records"]
       assert {:ok, [%{id: "pod-a"}]} = Store.all()
