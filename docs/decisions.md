@@ -126,7 +126,7 @@ names the PR or issue that holds the reasoning.
 | Group every public module in the sidebar, `ExAtlas.Application` under Core API | `@moduledoc false` on internals: hiding is an API statement, and a hidden module named in prose is itself a warning | #92 |
 | Reword CHANGELOG lines that name removed functions | `skip_undefined_reference_warnings_on`: it suppresses warnings | #92 |
 | The `docs` step runs before `hex.audit` in `bin/ci` | Last step: CI stops at `hex.audit` on cowlib, so it would never run | #92 |
-| Install pins track the current `@version` major.minor, checked by `docs_test.exs` | Pin ahead to the next release: it does not resolve before publish | #92 |
+| Install pins track the current `@version` major.minor, checked by `release_pins_test.exs` | Pin ahead to the next release: it does not resolve before publish | #92 |
 
 ## Lambda Labs provider (feature #83)
 
