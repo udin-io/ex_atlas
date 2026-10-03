@@ -553,12 +553,16 @@ defmodule ExAtlas.Orchestrator.PersistenceTest do
     test "a supervisor stop keeps a persisted task's pod" do
       {:ok, pid, compute} = Orchestrator.spawn(task_opts())
       :ok = stop_supervised!(TrackingStore.Dets)
+      ref = Process.monitor(pid)
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           :ok = DynamicSupervisor.terminate_child(ComputeSupervisor, pid)
         end)
 
+      # A raise inside `terminate/2` would also skip the DELETE; the clean
+      # `:shutdown` exit shows the tracker decided to keep the pod.
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
       assert log =~ "tracking store raised for #{compute.id}"
     end
