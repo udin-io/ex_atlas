@@ -367,6 +367,23 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       assert lease_expiry("m1") == 2_000_000
     end
 
+    # Only a missing column renews unsigned: an unsigned renewal would leave
+    # the old mac beside a new expiry.
+    test "on a step-3 table, a signed write that fails is an error, not an unsigned write", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      :ok = Store.renew_lease("m1", 1_000_000)
+
+      Repo.query!("""
+      CREATE TRIGGER refuse_signed BEFORE UPDATE ON atlas_owner_leases
+      WHEN NEW.mac IS NOT NULL BEGIN SELECT RAISE(ABORT, 'refused'); END
+      """)
+
+      assert {:error, _reason} = Store.renew_lease("m1", 2_000_000)
+      assert lease_expiry("m1") == 1_000_000
+    end
+
     test "writes the owner's expiry, and a renewal moves it", %{tmp_dir: dir} do
       start!(dir)
 
@@ -407,6 +424,16 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
 
       assert {:ok, %{"m1" => {1_000, _mac}} = expired} = Store.expired_leases(2_000)
       assert map_size(expired) == 1
+    end
+
+    # Only a missing column falls back to unsigned rows; any other failure
+    # is an error the Lease logs.
+    test "answers {:error, _} for a mac that will not load, on a step-3 table", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Store.renew_lease("m1", 1_000)
+      Repo.query!("UPDATE atlas_owner_leases SET mac = 42 WHERE owner = 'm1'")
+
+      assert {:error, _reason} = Store.expired_leases(2_000)
     end
 
     test "answers a row with no mac with nil", %{tmp_dir: dir} do
