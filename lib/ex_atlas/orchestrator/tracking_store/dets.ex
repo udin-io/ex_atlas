@@ -252,10 +252,13 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     {:reply, {:ok, records}, state}
   end
 
-  # A linked process other than the parent exited: stop, as an untrapped exit
-  # would have.
+  # A linked process other than the parent (the `:dets` server) exited
+  # abnormally: stop, as an untrapped exit would have. Anything else is
+  # ignored, as GenServer's default ignores it: each crash opens a restart.
   @impl GenServer
+  def handle_info({:EXIT, _from, :normal}, state), do: {:noreply, state}
   def handle_info({:EXIT, _from, reason}, state), do: {:stop, reason, state}
+  def handle_info(_unexpected, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(_reason, %{table: nil}), do: :ok

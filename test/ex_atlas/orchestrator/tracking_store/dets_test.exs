@@ -80,6 +80,26 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
   # OTP's `:dets` server too, and must still stop when that server dies,
   # rather than run on with a table nothing serves. On a peer node, so the
   # test VM keeps its own `:dets` server.
+  # Each crash opens a restart window, so a message nobody expects is ignored,
+  # as GenServer's default `handle_info/2` ignores it.
+  test "keeps running past a stray message and a linked process's normal exit",
+       %{tmp_dir: dir} do
+    pid = start_store!(dir)
+    :ok = Dets.put(record("compute-stray"))
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(pid, :stray)
+        send(pid, {:EXIT, self(), :normal})
+        send(self(), {:alive?, survives?(pid)})
+      end)
+
+    assert_received {:alive?, true}
+    assert Process.whereis(Dets) == pid
+    assert {:ok, [%{id: "compute-stray"}]} = Dets.all()
+    refute log =~ "terminating"
+  end
+
   test "stops when the DETS server dies", %{tmp_dir: dir} do
     {_peer, node} = ExAtlas.Test.Cluster.start_peer!()
     {:ok, store} = :erpc.call(node, GenServer, :start, [Dets, [storage_path: dir], [name: Dets]])
@@ -312,6 +332,13 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
       assert file_mode(dir) == 0o700
       assert file_mode(Path.join(dir, "tracked.dets")) == 0o600
     end
+  end
+
+  defp survives?(pid) do
+    _ = :sys.get_state(pid)
+    true
+  catch
+    :exit, _reason -> false
   end
 
   # Polls for up to 1 s until the supervisor has started a new store.
