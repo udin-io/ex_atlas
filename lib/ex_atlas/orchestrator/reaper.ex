@@ -121,12 +121,14 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   Each node signs its lease row with a key from its callback secret, and a
   row this node's key does not verify is never dead (issue 148). A writer of
-  `atlas_owner_leases` without the secret therefore cannot fake a dead
-  owner. These live nodes still read as dead after the window, and lose
-  their untracked pods, unless clustered with this node: one cut off from
-  the database; one that renewed signed rows and then stopped renewing (its
-  callback secret removed, moved to DETS); and one whose old signed row a
-  writer keeps putting back. Cluster the nodes, let only the app write the
+  `atlas_owner_leases` without the secret therefore cannot forge a row, but
+  can replay an old signed one. These live nodes still read as dead after
+  the window, and lose their untracked pods, unless clustered with this
+  node: one cut off from the database; one that renewed signed rows and then
+  stopped renewing (its callback secret removed, moved to DETS); and one
+  whose old signed row a writer puts back and keeps there for the whole
+  window, by rewriting it in a loop or by holding a row lock that blocks its
+  renewals. Cluster the nodes, let only the app write the
   table, and give every node the same `lease_ttl_ms`. To turn the deletion
   off:
 

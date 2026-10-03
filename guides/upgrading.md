@@ -41,6 +41,9 @@ your install migration (`up/0`, every step) and then this one works.
   secret, read each other's rows as unsigned and never as dead.
 - To keep dead-owner deletion off:
   `config :ex_atlas, :orchestrator, reap_dead_owners: false`.
+- A 0.9.0 node with `reap_dead_owners: true` still reads unsigned rows as
+  dead. Remove that setting from old nodes before you run step 3, or finish
+  the rollout first.
 
 ## Upgrading to 0.9.0
 
