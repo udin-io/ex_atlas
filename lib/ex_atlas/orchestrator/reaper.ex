@@ -648,6 +648,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
     error -> {:error, error}
   catch
     :exit, _reason -> {:error, :exit}
+    :throw, _value -> {:error, :throw}
   end
 
   defp delete_ours(compute, provider) do
@@ -783,13 +784,18 @@ defmodule ExAtlas.Orchestrator.Reaper do
     # A store implementation that raises is not evidence that a live resource
     # belongs to somebody else. Uncertainty always resolves towards leaving it
     # alone — and a raise here must not crash-loop the Reaper either.
-    error ->
-      Logger.error(
-        "[ExAtlas.Orchestrator.Reaper] tracking store raised for #{id} " <>
-          "(#{inspect(error)}); treating it as ours and terminating nothing"
-      )
+    error -> store_failed(id, inspect(error))
+  catch
+    kind, _reason -> store_failed(id, inspect(kind))
+  end
 
-      :shield
+  defp store_failed(id, what) do
+    Logger.error(
+      "[ExAtlas.Orchestrator.Reaper] tracking store raised for #{id} " <>
+        "(#{what}); treating it as ours and terminating nothing"
+    )
+
+    :shield
   end
 
   # `created_at` is the provider's clock, so a skewed one shifts the window:

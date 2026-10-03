@@ -469,6 +469,29 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       assert status(neighbour) == :terminated
     end
 
+    test "a record read that raises, throws or exits keeps the pod, and the tick goes on" do
+      TestOrchestrator.put_env(tracking_store: Hooked)
+      compute = pod()
+      unsigned!(compute)
+
+      for fault <- [
+            fn -> raise "db down" end,
+            fn -> throw(:db_down) end,
+            fn -> exit(:db_down) end
+          ] do
+        Hooked.hook_get(fault)
+
+        log = reap()
+
+        assert status(compute) == :running
+        assert log =~ "tracking store raised for #{compute.id}"
+      end
+
+      Hooked.clear()
+      reap()
+      assert status(compute) == :terminated
+    end
+
     test "reap_dead_owners: false keeps both" do
       TestOrchestrator.put_env(reap_dead_owners: false)
       compute = pod()
@@ -544,7 +567,14 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
       unsigned!(compute)
 
-      for fault <- [fn -> {:replace, {:error, :busy}} end, fn -> raise "db down" end] do
+      faults = [
+        fn -> {:replace, {:error, :busy}} end,
+        fn -> raise "db down" end,
+        fn -> throw(:db_down) end,
+        fn -> exit(:db_down) end
+      ]
+
+      for fault <- faults do
         Hooked.hook(fault)
         log = reap()
 
