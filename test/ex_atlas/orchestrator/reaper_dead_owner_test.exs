@@ -455,6 +455,20 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       end
     end
 
+    # The column is a copy for queries; the record's own `:owner` decides.
+    test "a record naming m3 whose owner column a writer set to dead m1: both kept" do
+      :ok = Store.renew_lease("m3", now() + 10 * @window)
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute, %{owner: "m3"})
+      Repo.query!("UPDATE atlas_tracking_records SET owner = 'm1' WHERE id = ?1", [compute.id])
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m3"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
     test "reap_dead_owners: false keeps both" do
       TestOrchestrator.put_env(reap_dead_owners: false)
       compute = pod()
