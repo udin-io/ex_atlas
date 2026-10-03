@@ -8,7 +8,7 @@ structure, a risk or a decision updates the pages in the same PR.
 
 ## What ExAtlas is
 
-ExAtlas is an Elixir library (`ex_atlas`, version 0.9.0). It gives one
+ExAtlas is an Elixir library (`ex_atlas`, version 0.10.0). It gives one
 API over GPU clouds, with RunPod, Lambda Labs and Vast.ai as complete
 providers, plus an opt-in orchestrator that tracks, polls and deletes the
 pods you rent. It also carries Fly.io platform operations (deploys, log
@@ -66,6 +66,7 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Vast.ai provider (feature #98) | Shipped in four slices. Slice 1 (#99, PR #102): rent the cheapest on-demand offer; get, list, terminate and `list_gpu_types/1`. Slice 2 (#105, PR #108): `command:` with self-termination, `run_task/1`, `max_cost` and the Reaper (with `reap_providers: [:vast]`). Slice 3 (#112, PR #113): `spot: true` rents interruptible offers, and an outbid instance respawns. Slice 4 (#116, PR #117): `stop/2`, `start/2` and `compute_spend/3`, so `max_cost` reconciles against Vast's bill |
 | Release 0.8.0 (#94) | `mix ex_atlas.upgrade` has a `"0.8.0"` step that edits no file: it warns about each module with `@behaviour ExAtlas.Provider` and about `start_orchestrator: true` with no `:reap_owner`. `guides/upgrading.md` covers the six breaking changes. Published to Hex on 2026-10-02, from tag `v0.8.0` on `939cf2e` |
 | Release 0.9.0 (#141) | Merged in #142: `mix ex_atlas.upgrade`'s `"0.9.0"` step edits no file and names a missing callback secret; `guides/upgrading.md` covers the five changes. The owner publishes and tags `v0.9.0` |
+| Release 0.10.0 (#151) | PR #152: version 0.10.0, the CHANGELOG release section, `guides/upgrading.md` "Upgrading to 0.10.0" (migration step 3, dead-owner deletion on by default, `reap_dead_owners: false`, the accepted replay and row-lock risk), README pins. `mix ex_atlas.upgrade`'s `"0.10.0"` step (#148) names the step-3 migration for an Ecto-store host. The owner publishes and tags `v0.10.0` |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages

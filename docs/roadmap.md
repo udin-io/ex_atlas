@@ -1,37 +1,39 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #150 (#145, slice
-2 of milestone 11). It feeds the choice of the next feature. Dates
-are merge dates.
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #152 (release
+0.10.0). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
-Dead owner's pods (milestone 11, parent #143). With `TrackingStore.Ecto`, a
-live node's Reaper deletes the pods a dead owner left billing, once that
-owner's lease has stayed expired for `:reap_dead_owner_after_ms` (15 minutes
-by default). Today they bill until an operator reads a log line and deletes
-them (risk 6). We picked it by the same rule as milestone 9: no milestone
-has open issues, and risk 6 is the open risk with the largest cost a feature
-can retire. Its cost has no bound: an interactive session a destroyed
-machine ran has no tracker, no deadline, and no Reaper that touches it. We
-left out risk 2 (cowlib, waits on an upstream release) and the risks only
-the owner's live tests settle. The ranking is on #143. Three slices:
+The Reaper retries a store it could not read (risk 4). Today a node whose
+tracking store fails at boot (`:adoption_failed`) reaps nothing until the next
+boot, so every untracked pod it could have deleted bills for that whole time.
+A later tick that finds the store readable again should adopt and reap. This
+is a pick, not a design: no ticket is filed yet.
 
-| Slice | What it adds | Ticket |
-|---|---|---|
-| 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods, opt-in with `reap_dead_owners: true` until slice 3 | #144, PR #147 |
-| 2 | A record a dead owner still holds after the window, and no node would take over, no longer shields its pod: the Reaper deletes the record, then the pod | #145, PR #150 |
-| 3 | Owner lease rows are signed, so a database writer cannot forge a dead owner's row (review finding on PR #147; replaying an old signed row for the whole window stays a risk); dead-owner deletion then turns on by default | #148, PR #149 |
+We picked it by the same rule as milestones 9 and 11: no roadmap item or open
+milestone is left, so we take the open risk with the largest cost that a
+feature can retire. We left out risk 2 and 15 (cowlib, waits on an upstream
+release), every risk only the owner's live tests settle (1, 14, 19, 20, 33,
+44, 52, 56, 58, 61; the Lambda and Vast live runs are deferred by the owner),
+and the part of risk 6 the owner accepted (replay and a held row lock, decision
+on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 
-Vast.ai (#98) shipped with slice 4. Its templates, network volumes,
-serverless, and SSH and Jupyter modes stay out of scope.
+| Rank | Risk | What it costs when it fires | What bounds it | A feature can retire it? |
+|---|---|---|---|---|
+| 1 | 4 | A node reaps nothing for a whole boot; untracked pods bill at GPU rates | The next boot | Yes for the unreadable store (retry the read). A missing or duplicate `reap_owner` is a config fault that stays |
+| 2 | 16 | After a respawn and a restart the cap undercounts, so spend passes `max_cost` by the earlier pods' bill | One pod's spend per restart | Yes: a version 4 record with the current pod's starting spend, and a new column in host stores |
+| 3 | 11, 57, 62 | An exited pod or Vast instance bills its disk; the Reaper only lists `:provisioning` and `:running` | Nothing, until someone deletes it; a disk bill, not a GPU bill | Yes: reap stopped pods past a longer grace |
+| 4 | 3 | A DETS store on a Fly machine with no volume comes up empty each deploy, and the Reaper deletes the pods | One config line, `mix ex_atlas.install --tracking-store ecto` | Partly: a boot warning, not a new default |
+| 5 | 5 | Unclustered machines on one account delete each other's pods | One config line; the 0.8.0 upgrader warns | No: the fix is config |
+| 6 | 7, 34, 36, 47, 54 | A pod bills after its container exits or its host never answers | `max_runtime_ms`, on by default in `run_task/1` | Defaults already on |
 
 ## In progress
 
 | Feature | Ticket | State |
 |---|---|---|
-| Dead owner's pods, slice 2 (milestone 11) | #145 | PR #150: a dead owner's record that no node takes over no longer shields its pod. The last slice: milestone 11 is complete once it merges, and release 0.10.0 comes next |
+| Release 0.10.0 (milestone 12) | #151 | PR #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` after it merges |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -40,6 +42,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Dead owner's pods, slice 2 (milestone 11, risk 6) | #150 (#145): a record a dead owner still holds, and no node takes over, no longer shields its pod; the Reaper deletes the record, then the pod. Closes parent #143 and milestone 11 | 2026-10-03 |
 | Dead owner's pods, slices 1 and 3 (milestone 11, risk 6) | #147 (#144): the Reaper deletes a dead owner's untracked pods. #149 (#148): lease rows signed (migration step 3), dead-owner deletion on by default | 2026-10-03 |
 | Release 0.9.0 (milestone 10) | #142 (#141): version bump, the 0.9.0 section of `guides/upgrading.md`, and a `"0.9.0"` step in `mix ex_atlas.upgrade`. The owner publishes to Hex and pushes tag `v0.9.0` | 2026-10-02 |
 | Release 0.8.0 (milestone 7) | #95 (#94): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. Published to Hex from tag `v0.8.0` on `939cf2e` | 2026-10-02 |
