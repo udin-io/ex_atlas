@@ -68,6 +68,18 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     defp failing?(call), do: call in Application.get_env(:ex_atlas, :lease_test_failing, [])
   end
 
+  defmodule ListedExpired do
+    @moduledoc false
+    # A custom store whose expired_leases/1 answers a list, outside the contract.
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate all(), to: Store
+    defdelegate get(id), to: Store
+    defdelegate renew_lease(owner, expires_at_ms), to: Store
+    defdelegate claim_expired(claimer, now_ms, rewrite), to: Store
+    def expired_leases(_now_ms), do: {:ok, [{"m1", 1}]}
+  end
+
   defmodule NoExpiredLeases do
     @moduledoc false
     # A custom store with leases and claims, written before expired_leases/1.
@@ -576,6 +588,18 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       LeaseClock.run_for!(lease, 2 * @window)
       assert Lease.dead_owners() == %{}
+    end
+
+    test "a store whose expired_leases/1 answers a list: nothing dead, the Lease runs, logged" do
+      log =
+        capture_log(fn ->
+          lease = watching_lease!("m2", store: ListedExpired)
+          LeaseClock.run_for!(lease, 2 * @window)
+          assert Lease.dead_owners() == %{}
+        end)
+
+      assert Process.alive?(Process.whereis(Lease))
+      assert log =~ "could not read expired leases"
     end
 
     test "answers %{} when no Lease runs" do

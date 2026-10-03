@@ -58,8 +58,7 @@ defmodule ExAtlas.Orchestrator.Lease do
   under another callback secret, is never dead. An owner whose expiry stays the same for
   `:reap_dead_owner_after_ms` on this node's monotonic clock is dead
   (`dead_owners/0`), and `ExAtlas.Orchestrator.Reaper` deletes its untracked
-  pods when `reap_dead_owners: true` is set (off by default until lease rows
-  are signed, issue 148).
+  pods unless `reap_dead_owners: false` is set.
 
       config :ex_atlas, :orchestrator, reap_dead_owner_after_ms: :timer.minutes(15)
 
@@ -352,7 +351,10 @@ defmodule ExAtlas.Orchestrator.Lease do
   # table writes these rows, so an unsigned row is never dead (issue 148).
   defp signed_expired(state, now) do
     case safely(fn -> state.store.expired_leases(now) end) do
-      {:ok, expired} when is_map(expired) ->
+      {:ok, expired} when not is_map(expired) ->
+        {:error, {:bad_shape, expired}}
+
+      {:ok, expired} ->
         signed =
           for {owner, {at, mac}} <- expired,
               Ownership.valid?(owner),
