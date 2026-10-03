@@ -604,6 +604,133 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  # Issue 155, decision 10 on issue 153: a retry reads the store minutes after
+  # boot, when this node may already track some of its records. A 404 for such
+  # a record means a respawn is under way, not that the task is gone.
+  describe "a record whose id a live tracker holds" do
+    alias ExAtlas.Test.FaultyProvider
+
+    setup do
+      TestOrchestrator.put_env(reap_providers: [:mock, FaultyProvider])
+    end
+
+    test "stays in the store when its pod reads 404, and keeps its tracker" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts([]))
+      {:ok, before} = Memory.get(compute.id)
+      :ok = Mock.forget(compute.id)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert {:ok, ^before} = Memory.get(compute.id)
+      assert {:ok, ^pid} = Orchestrator.lookup(compute.id)
+    end
+
+    test "asks the provider nothing about it" do
+      {:ok, _pid, _compute} = Orchestrator.spawn(task_opts(provider: FaultyProvider))
+      FaultyProvider.arm(:get_compute, {:notify, self(), nil})
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      me = self()
+      refute_received {:called, :get_compute, ^me}
+    end
+
+    test "a list read before the tracker started keeps the record too" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, pid} = Orchestrator.lookup(compute.id)
+      :ok = Mock.forget(compute.id)
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+      assert {:ok, ^pid} = Orchestrator.lookup(compute.id)
+    end
+
+    test "a tracker that starts while the provider answers keeps the record" do
+      compute = orphaned_task(provider: FaultyProvider)
+      :ok = Mock.forget(compute.id)
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      me = self()
+      adopter = Task.async(fn -> Adopter.run(notify: me) end)
+      assert_receive {:blocked, :get_compute, observer}, 2_000
+
+      holder = hold_registry_entry(compute.id)
+      FaultyProvider.reset()
+      send(observer, :release)
+      assert :ok = Task.await(adopter)
+      assert_receive :adoption_complete, 2_000
+
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+      send(holder, :stop)
+    end
+
+    # The case the skip exists for: the old pod is gone, and the tracker is
+    # renting its replacement. Without the skip the Adopter deletes the old
+    # record, and the tracker has nothing to carry to the replacement.
+    test "a tracker mid-respawn carries its record to the replacement" do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+        )
+
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      FaultyProvider.arm(:spawn_compute, {:block, self()})
+      :ok = Mock.set_status(old_id, :stopped)
+      assert_receive {:blocked, :spawn_compute, ^pid}, 2_000
+      :ok = Mock.forget(old_id)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      FaultyProvider.reset()
+      send(pid, :release)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      assert {:ok, %{id: ^new_id}} = Memory.get(new_id)
+    end
+
+    test "control: a record with no tracker whose pod reads 404 is deleted" do
+      compute = orphaned_task()
+      :ok = Mock.forget(compute.id)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert :error = Memory.get(compute.id)
+    end
+  end
+
+  # A process registered under the tracker's name, as a tracker is from its
+  # start. Returns once the entry is in place.
+  defp hold_registry_entry(id) do
+    me = self()
+
+    holder =
+      spawn(fn ->
+        {:ok, _} = Registry.register(ExAtlas.Orchestrator.ComputeRegistry, {:compute, id}, nil)
+        send(me, :held)
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert_receive :held, 2_000
+    holder
+  end
+
   describe "a task with s3: staging" do
     @s3 %{
       access_key_id: "tid-test-4b1e",

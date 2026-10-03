@@ -103,6 +103,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   require Logger
 
+  alias ExAtlas.Orchestrator
+
   alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Ownership, Reaper, TrackingStore}
   alias ExAtlas.Config
   alias ExAtlas.Orchestrator.UpstreamStatus
@@ -204,9 +206,11 @@ defmodule ExAtlas.Orchestrator.Adopter do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  # One unreadable record must not cost the others their trackers.
+  # One unreadable record must not cost the others their trackers. A record a
+  # live tracker holds is that tracker's: a 404 for it means a respawn is
+  # renting the replacement, and the tracker carries the record over itself.
   defp adopt_one(record, owner, store) do
-    adopt(record, owner, store)
+    if tracked?(record), do: :tracked, else: adopt(record, owner, store)
   rescue
     error -> log_skipped(record, error)
   catch
@@ -314,17 +318,26 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   defp reconcile(record, owner, store, claim?) do
-    case observe(record) do
+    observation = observe(record)
+
+    cond do
+      # A tracker started while the provider answered (a Lease claim, a second
+      # adoption): the record is its own now.
+      tracked?(record) ->
+        :tracked
+
       # The provider has forgotten the id entirely: `{:dead, _, nil}` is
       # `UpstreamStatus`'s way of saying there is nothing left to terminate,
       # whether that reads as `:vanished` or, on spot capacity, `:preempted`.
-      {:dead, _reason, nil} ->
+      match?({:dead, _reason, nil}, observation) ->
         store.delete(record.id)
 
-      observation ->
+      true ->
         track(record, observation, owner, store, claim?)
     end
   end
+
+  defp tracked?(record), do: match?({:ok, _pid}, Orchestrator.lookup(Map.get(record, :id)))
 
   defp track(record, observation, owner, store, claim?) do
     case unsigned_refusal(record, observation, owner) do
