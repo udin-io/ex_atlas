@@ -354,7 +354,8 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
 
       assert_has_notice(igniter, fn notice ->
         notice =~ "ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)" and
-          notice =~ "no owner reads as dead" and notice =~ @guide
+          notice =~ "`down(version: 3)`" and notice =~ "no owner reads as dead" and
+          notice =~ "reap_dead_owners: false" and notice =~ @guide
       end)
 
       assert_unchanged(igniter)

@@ -73,8 +73,11 @@ if Code.ensure_loaded?(Igniter) do
         Igniter.add_notice(igniter, """
         Your app keeps tracking records in TrackingStore.Ecto. Add a migration calling \
         `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)` (and \
-        `down(version: 2)`): it adds the `mac` column that signs owner lease rows. \
-        Until it runs, lease rows are unsigned and no owner reads as dead. See #{@guide_url}
+        `down(version: 3)`): it adds the `mac` column that signs owner lease rows. \
+        Until it runs, lease rows are unsigned and no owner reads as dead. Once it runs, \
+        a live node deletes a dead owner's untracked pods; \
+        `config :ex_atlas, :orchestrator, reap_dead_owners: false` turns that off. \
+        See #{@guide_url}
         """)
       else
         igniter
