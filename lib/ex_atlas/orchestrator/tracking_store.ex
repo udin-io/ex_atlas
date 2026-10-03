@@ -331,7 +331,23 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   @callback expired_leases(now_ms :: integer()) ::
               {:ok, %{optional(String.t()) => {integer(), binary() | nil}}} | {:error, term()}
 
-  @optional_callbacks renew_lease: 2, claim_expired: 3, expired_leases: 1
+  @doc """
+  Remove the record for `id` only while its row names `owner` and `owner`'s
+  lease still expires at `expires_at_ms`, in one atomic statement. Answers
+  `:ok` when it removed the row, `:kept` when the row is gone, names another
+  owner, or the lease moved, and `{:error, term}` when it cannot tell.
+
+  Optional. With it, the Reaper deletes the pod of a record whose owner
+  `ExAtlas.Orchestrator.Lease.dead_owners/0` reads as dead and whose record
+  no node would take over: first the record through this call, then the pod.
+  The condition keeps a record another node claimed, or whose owner
+  renewed, since the Reaper read them. Without this callback, such a record
+  keeps its pod.
+  """
+  @callback delete_expired(id :: String.t(), owner :: String.t(), expires_at_ms :: integer()) ::
+              :ok | :kept | {:error, term()}
+
+  @optional_callbacks renew_lease: 2, claim_expired: 3, expired_leases: 1, delete_expired: 3
 
   # Bumped whenever a field is added, removed, or reinterpreted. A record whose
   # version this build does not know is dropped rather than guessed at: a

@@ -44,6 +44,11 @@ your install migration (`up/0`, every step) and then this one works.
 - A 0.9.0 node with `reap_dead_owners: true` still reads unsigned rows as
   dead. Remove that setting from old nodes before you run step 3, or finish
   the rollout first.
+- A dead owner's record that no node takes over (unsigned, or from a newer
+  release) no longer keeps its pod billing: once the owner reads as dead,
+  the Reaper deletes the record, then the pod. A custom tracking store gets
+  this only by implementing `delete_expired/3`; without it, those pods stay
+  as in 0.9.0.
 
 ## Upgrading to 0.9.0
 

@@ -691,6 +691,81 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     owner
   end
 
+  # The Reaper calls this with the expiry `Lease.dead_owners/0` confirmed,
+  # before it deletes the pod (issue 145).
+  describe "delete_expired/3" do
+    test "deletes the record while its row names the owner and the lease still expires then",
+         %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      owned!("pod-b", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+
+      assert :ok = Store.delete_expired("pod-a", "m1", 1_000)
+
+      assert Store.get("pod-a") == :error
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-b")
+    end
+
+    # The stale struct: the caller read the record before another node
+    # claimed it.
+    test "keeps a record another node claimed since", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+      {:ok, stale} = Store.get("pod-a")
+      assert {:ok, [_claimed]} = Store.claim_expired("m3", 2_000, to("m3"))
+
+      assert :kept = Store.delete_expired(stale.id, stale.owner, 1_000)
+      assert {:ok, %{owner: "m3"}} = Store.get("pod-a")
+    end
+
+    test "keeps the record of an owner that renewed since", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+      :ok = Store.renew_lease("m1", 5_000)
+
+      assert :kept = Store.delete_expired("pod-a", "m1", 1_000)
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+    end
+
+    test "keeps a record whose row names another owner", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m2")
+      :ok = Store.renew_lease("m1", 1_000)
+      :ok = Store.renew_lease("m2", 1_000)
+
+      assert :kept = Store.delete_expired("pod-a", "m1", 1_000)
+      assert {:ok, %{owner: "m2"}} = Store.get("pod-a")
+    end
+
+    test "keeps the record of an owner with no lease row", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+
+      assert :kept = Store.delete_expired("pod-a", "m1", 1_000)
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+    end
+
+    test "answers :kept for a record that is gone", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Store.renew_lease("m1", 1_000)
+
+      assert :kept = Store.delete_expired("pod-a", "m1", 1_000)
+    end
+
+    test "answers {:error, _} when the database cannot answer", %{tmp_dir: dir} do
+      start!(dir)
+      owned!("pod-a", "m1")
+      :ok = Store.renew_lease("m1", 1_000)
+      Repo.query!("DROP TABLE atlas_owner_leases")
+
+      assert {:error, _reason} = Store.delete_expired("pod-a", "m1", 1_000)
+      assert {:ok, %{owner: "m1"}} = Store.get("pod-a")
+    end
+  end
+
   describe "Migration" do
     test "down/0 outside a migration raises, and the table keeps its rows", %{tmp_dir: dir} do
       start!(dir)

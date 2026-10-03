@@ -541,8 +541,9 @@ Six constraints worth knowing before you design around it:
   store, a live machine takes over the records of a machine that never comes
   back once its lease expires (`lease_ttl_ms`, 90 s by default). It also
   deletes that machine's untracked pods once its signed lease row has stayed
-  expired for `:reap_dead_owner_after_ms` (15 minutes by default);
-  `reap_dead_owners: false` turns that off.
+  expired for `:reap_dead_owner_after_ms` (15 minutes by default), and then
+  the pod and record of each record no machine takes over (unsigned, or from
+  a newer release); `reap_dead_owners: false` turns that off.
   With any other store,
   such a record stays, with its pod, until you delete both.
 - A graceful stop (SIGTERM) keeps a persisted task's pod and record, unless

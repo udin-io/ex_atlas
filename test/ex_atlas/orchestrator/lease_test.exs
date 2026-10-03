@@ -18,6 +18,7 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
   alias ExAtlas.Test.{LeaseClock, Repo}
+  alias ExAtlas.Test.TrackingStore.NoDeleteExpired
 
   @moduletag :tmp_dir
 
@@ -581,8 +582,10 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       expire!("m1")
       lease = watching_lease!("m2")
       LeaseClock.run_for!(lease, @window)
-      {_at, mac} = lease_row("m1")
-      :ok = Repo.put_lease!("m1", now() - 2, mac)
+      # Another expiry under m1's old mac. `now() - 2` matched the old one
+      # whenever 1 ms passed since `expire!/1`, and m1 read dead.
+      {at, mac} = lease_row("m1")
+      :ok = Repo.put_lease!("m1", at - 1, mac)
 
       lease = LeaseClock.restart!(lease)
 
@@ -683,6 +686,46 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       assert {:ok, %{owner: "m1"}} = Store.get(id)
       assert pod_status(id) == :running
     end
+
+    # Issue 145: the Reaper deletes such a pod once its owner stays dead.
+    test "the skipped-record warning names the window after which the Reaper deletes both" do
+      log = skipped_log!()
+
+      assert log =~
+               ~s|Unless "m1" renews, a Reaper whose :reap_providers covers the pod deletes | <>
+                 "the pod and this record once its " <>
+                 "signed lease has stayed expired for :reap_dead_owner_after_ms (900000 ms) " <>
+                 "and the pod's name carries that owner"
+
+      refute log =~ "runs untracked until its owner returns"
+    end
+
+    test "with reap_dead_owners: false, the warning says the pod runs untracked" do
+      TestOrchestrator.put_env(reap_dead_owners: false)
+      log = skipped_log!()
+
+      assert log =~ "The pod runs untracked until its owner returns or you delete it."
+      refute log =~ "the Reaper deletes the pod and this record"
+    end
+
+    test "with a store that cannot delete a record of an expired owner, the pod runs untracked" do
+      log = skipped_log!(store: NoDeleteExpired)
+
+      assert log =~ "The pod runs untracked until its owner returns or you delete it."
+      refute log =~ "the Reaper deletes the pod and this record"
+    end
+  end
+
+  defp skipped_log!(opts \\ []) do
+    %{id: id} = orphaned_task("m1")
+    {:ok, record} = Store.get(id)
+    put_row!(Map.delete(record, :mac))
+    expire!("m1")
+
+    capture_log(fn ->
+      pid = held_lease!("m2", opts)
+      tick!(pid)
+    end)
   end
 
   describe "when a node claims" do

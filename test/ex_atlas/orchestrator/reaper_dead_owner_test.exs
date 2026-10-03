@@ -18,6 +18,7 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
   alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.{FaultyProvider, LeaseClock, Repo}
+  alias ExAtlas.Test.TrackingStore.{Hooked, NoDeleteExpired}
   alias ExAtlas.Test.Orchestrator, as: TestOrchestrator
 
   @moduletag :tmp_dir
@@ -174,16 +175,6 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
 
       TestOrchestrator.put_env(reap_owner: "m2")
       assert compute.name == @name
-
-      reap()
-
-      assert status(compute) == :running
-    end
-
-    # Slice 2 lifts this: #145.
-    test "a pod with a record in the store is left alone" do
-      compute = pod()
-      :ok = Store.put(TrackingStoreConformance.record(compute.id, %{owner: "m1"}))
 
       reap()
 
@@ -391,6 +382,349 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
 
       assert status(compute) == :running
     end
+  end
+
+  # Issue 145. Each "kept" test also has a neighbour: a pod of m1 with no
+  # record, which slice 1 deletes in the same tick. It shows the tick ran
+  # and read m1 as dead.
+  describe "a pod whose record a dead owner still holds" do
+    setup %{lease: lease} do
+      dead!(lease)
+      on_exit(&Hooked.clear/0)
+      :ok
+    end
+
+    test "an unsigned record: the record goes, then the pod, and the log names both" do
+      compute = pod()
+      unsigned!(compute)
+
+      log = reap()
+
+      assert status(compute) == :terminated
+      assert Store.get(compute.id) == :error
+
+      assert log =~
+               ~s|deleted #{compute.id} (#{@name}) and its tracking record: owner "m1" has not | <>
+                 "renewed its lease since #{expiry_iso("m1")}, and no connected node reports it"
+    end
+
+    test "a signed record this build refuses (a newer version): both go" do
+      compute = pod()
+      :ok = Store.put(TrackingStore.seal(record(compute, %{v: 99})))
+
+      reap()
+
+      assert status(compute) == :terminated
+      assert Store.get(compute.id) == :error
+    end
+
+    test "a signed record the Lease would take over is left to the Lease" do
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      :ok = Store.put(TrackingStore.seal(record(compute)))
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
+    test "a record of dead m1 on a pod named with live m3: both kept" do
+      :ok = Store.renew_lease("m3", now() + 10 * @window)
+      {compute, neighbour} = {pod("atlas-m3-notebook-3"), pod("atlas-m1-notebook-4")}
+      unsigned!(compute)
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
+    for owner <- ["m3", nil] do
+      test "a record of owner #{inspect(owner)} on a pod named with dead m1: both kept" do
+        :ok = Store.renew_lease("m3", now() + 10 * @window)
+        {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+        unsigned!(compute, %{owner: unquote(owner)})
+
+        reap()
+
+        assert status(compute) == :running
+        assert {:ok, %{owner: unquote(owner)}} = Store.get(compute.id)
+        assert status(neighbour) == :terminated
+      end
+    end
+
+    # The column is a copy for queries; the record's own `:owner` decides.
+    test "a record naming m3 whose owner column a writer set to dead m1: both kept" do
+      :ok = Store.renew_lease("m3", now() + 10 * @window)
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute, %{owner: "m3"})
+      Repo.query!("UPDATE atlas_tracking_records SET owner = 'm1' WHERE id = ?1", [compute.id])
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m3"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
+    test "a record of another provider whose id matches the pod's: both kept" do
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute, %{provider: FaultyProvider})
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
+    test "a record read that raises, throws or exits keeps the pod, and the tick goes on" do
+      TestOrchestrator.put_env(tracking_store: Hooked)
+      compute = pod()
+      unsigned!(compute)
+
+      for fault <- [
+            fn -> raise "db down" end,
+            fn -> throw(:db_down) end,
+            fn -> exit(:db_down) end
+          ] do
+        Hooked.hook_get(fault)
+
+        log = reap()
+
+        assert status(compute) == :running
+        assert log =~ "tracking store raised for #{compute.id}"
+      end
+
+      Hooked.clear()
+      reap()
+      assert status(compute) == :terminated
+    end
+
+    test "reap_dead_owners: false keeps both" do
+      TestOrchestrator.put_env(reap_dead_owners: false)
+      compute = pod()
+      unsigned!(compute)
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+    end
+
+    test "a store without delete_expired/3 keeps both" do
+      TestOrchestrator.put_env(tracking_store: NoDeleteExpired)
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute)
+
+      log = reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+      refute log =~ "could not delete the tracking record"
+    end
+
+    # The stale struct: the Reaper read the record, then m3 claimed it.
+    test "a record m3 claims after the Reaper read it: pod running, record m3's" do
+      TestOrchestrator.put_env(tracking_store: Hooked)
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute)
+
+      Hooked.hook(fn ->
+        {:ok, [_]} = Store.claim_expired("m3", now(), &{:ok, Map.put(&1, :owner, "m3")})
+        :continue
+      end)
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m3"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
+    test "m1 renews after the Reaper read it dead: both kept" do
+      TestOrchestrator.put_env(tracking_store: Hooked)
+      compute = pod()
+      unsigned!(compute)
+
+      Hooked.hook(fn ->
+        :ok = Store.renew_lease("m1", now() + @ttl)
+        :continue
+      end)
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+    end
+
+    test "control: with a hook that changes nothing, both go" do
+      TestOrchestrator.put_env(tracking_store: Hooked)
+      compute = pod()
+      unsigned!(compute)
+      Hooked.hook(fn -> :continue end)
+
+      reap()
+
+      assert status(compute) == :terminated
+      assert Store.get(compute.id) == :error
+    end
+
+    test "a record delete that fails or raises keeps both, and the next tick deletes both" do
+      TestOrchestrator.put_env(tracking_store: Hooked)
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute)
+
+      faults = [
+        fn -> {:replace, {:error, :busy}} end,
+        fn -> raise "db down" end,
+        fn -> throw(:db_down) end,
+        fn -> exit(:db_down) end
+      ]
+
+      for fault <- faults do
+        Hooked.hook(fault)
+        log = reap()
+
+        assert status(compute) == :running
+        assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+
+        assert log =~
+                 "could not delete the tracking record of #{compute.id} (#{@name}) of dead " <>
+                   ~s|owner "m1"|
+
+        refute log =~ "db down"
+      end
+
+      assert status(neighbour) == :terminated
+
+      Hooked.clear()
+      reap()
+
+      assert status(compute) == :terminated
+      assert Store.get(compute.id) == :error
+    end
+
+    test "a pod delete that fails after the record went: the next tick deletes the pod" do
+      compute = pod(@name, FaultyProvider)
+      unsigned!(compute, %{provider: FaultyProvider})
+      FaultyProvider.arm(:terminate, {:error_once, ExAtlas.Error.new(:upstream, message: "x")})
+
+      log = reap([FaultyProvider])
+
+      assert status(compute) == :running
+      assert Store.get(compute.id) == :error
+
+      assert log =~
+               "deleted the tracking record of #{compute.id} (#{@name}) of dead owner \"m1\", " <>
+                 "but could not delete the pod (:upstream); the next tick deletes it"
+
+      log = reap([FaultyProvider])
+
+      assert status(compute) == :terminated
+      assert log =~ "deleted #{compute.id} (#{@name}): owner \"m1\""
+    end
+
+    test "once this node's own last renewal is a ttl old, both kept", %{lease: lease} do
+      LeaseClock.stall!(lease, @ttl)
+      compute = pod()
+      unsigned!(compute)
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+    end
+  end
+
+  describe "a pod whose record a dead owner holds, across restarts" do
+    test "control: a ms before the window ends both stay; at the window both go",
+         %{lease: lease} do
+      LeaseClock.run_for!(lease, @window - 1)
+      compute = pod()
+      unsigned!(compute)
+
+      reap()
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+
+      LeaseClock.run_for!(lease, 1)
+      reap()
+      assert status(compute) == :terminated
+      assert Store.get(compute.id) == :error
+    end
+
+    test "a restarted Lease waits a full new window", %{lease: lease} do
+      LeaseClock.run_for!(lease, @window - 1)
+      lease = LeaseClock.restart!(lease)
+      compute = pod()
+      unsigned!(compute)
+
+      LeaseClock.run_for!(lease, @window - 1)
+      reap()
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+
+      LeaseClock.run_for!(lease, 1)
+      reap()
+      assert status(compute) == :terminated
+    end
+
+    test "record gone, pod delete failed, Reaper restarted: the next tick deletes the pod",
+         %{lease: lease} do
+      TestOrchestrator.put_env(reap_interval_ms: 60_000, reap_providers: [FaultyProvider])
+      dead!(lease)
+      compute = pod(@name, FaultyProvider)
+      unsigned!(compute, %{provider: FaultyProvider})
+      FaultyProvider.arm(:terminate, {:error_once, ExAtlas.Error.new(:upstream, message: "x")})
+
+      capture_log(fn -> :ok = tick(periodic_reaper!()) end)
+      assert Store.get(compute.id) == :error
+      assert status(compute) == :running
+
+      stop_supervised!(Reaper)
+      capture_log(fn -> :ok = tick(periodic_reaper!()) end)
+
+      assert status(compute) == :terminated
+      assert Store.get(compute.id) == :error
+    end
+
+    test "record and pod gone, Reaper restarted: the next tick deletes nothing more",
+         %{lease: lease} do
+      TestOrchestrator.put_env(reap_interval_ms: 60_000, reap_providers: [:mock])
+      dead!(lease)
+      compute = pod()
+      unsigned!(compute)
+
+      log = capture_log(fn -> :ok = tick(periodic_reaper!()) end)
+      assert [_once] = Regex.scan(~r/deleted #{compute.id}/, log)
+      assert status(compute) == :terminated
+
+      stop_supervised!(Reaper)
+      log = capture_log(fn -> :ok = tick(periodic_reaper!()) end)
+
+      refute log =~ compute.id
+      assert Store.get(compute.id) == :error
+    end
+  end
+
+  defp record(compute, overrides \\ %{}),
+    do: TrackingStoreConformance.record(compute.id, Map.merge(%{owner: "m1"}, overrides))
+
+  # The conformance record's `:mac` is no signature this node's key makes.
+  defp unsigned!(compute, overrides \\ %{}) do
+    record = record(compute, overrides)
+    refute TrackingStore.sealed?(record)
+    :ok = Store.put(record)
+  end
+
+  defp periodic_reaper! do
+    reaper = start_supervised!(Reaper)
+    send(reaper, :adoption_complete)
+    reaper
   end
 
   defp tick(reaper) do
