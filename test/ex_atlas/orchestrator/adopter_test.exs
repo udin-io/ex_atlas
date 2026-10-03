@@ -827,6 +827,69 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  # Review of issue 155: `Orchestrator.spawn/1` writes the record, then starts
+  # the tracker. A retry can read the record in between.
+  describe "a spawn whose record an adoption reads before its tracker starts" do
+    defmodule PausingStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, whose `put/1` writes and then waits
+      # for `:release` while a test listens.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      def pause(pid), do: :persistent_term.put({__MODULE__, :listener}, pid)
+      def resume, do: :persistent_term.erase({__MODULE__, :listener})
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate get(id), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+      @impl true
+      defdelegate all(), to: Memory
+
+      @impl true
+      def put(record) do
+        :ok = Memory.put(record)
+
+        case :persistent_term.get({__MODULE__, :listener}, nil) do
+          nil ->
+            :ok
+
+          pid ->
+            send(pid, {:put, record.id, self()})
+
+            receive do
+              :release -> :ok
+            end
+        end
+      end
+    end
+
+    setup do
+      TestOrchestrator.put_env(tracking_store: PausingStore)
+      on_exit(&PausingStore.resume/0)
+    end
+
+    test "keeps the pod and returns the tracker the adoption started" do
+      PausingStore.pause(self())
+      spawner = Task.async(fn -> Orchestrator.spawn(task_opts([])) end)
+      assert_receive {:put, id, putter}, 2_000
+      PausingStore.resume()
+
+      :ok = Adopter.run(store: Memory, notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, adopted} = Orchestrator.lookup(id)
+      send(putter, :release)
+
+      assert {:ok, ^adopted, %{id: ^id}} = Task.await(spawner)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+      assert {:ok, %{id: ^id}} = Memory.get(id)
+    end
+  end
+
   # A process registered under the tracker's name, as a tracker is from its
   # start. Returns once the entry is in place.
   defp hold_registry_entry(id) do

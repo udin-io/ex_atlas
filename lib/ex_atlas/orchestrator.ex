@@ -321,6 +321,11 @@ defmodule ExAtlas.Orchestrator do
       {:ok, pid, _info} ->
         {:ok, pid, compute}
 
+      # An adoption read the record written above and started the tracker
+      # first. It tracks this pod from this record, so the pod stays.
+      {:error, {:already_started, pid}} ->
+        {:ok, pid, compute}
+
       {:error, reason} ->
         # The resource exists upstream but nothing will ever track it, so it
         # would bill until the Reaper noticed. Take it down with the tracker —
