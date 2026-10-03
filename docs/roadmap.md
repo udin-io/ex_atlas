@@ -6,11 +6,19 @@ merged PRs and open issues on `udin-io/ex_atlas` as of PR #152 (release
 
 ## Next
 
-The Reaper retries a store it could not read (risk 4). Today a node whose
-tracking store fails at boot (`:adoption_failed`) reaps nothing until the next
-boot, so every untracked pod it could have deleted bills for that whole time.
-A later tick that finds the store readable again should adopt and reap. This
-is a pick, not a design: no ticket is filed yet.
+Reaper survives a failed store read (milestone 13, risk 4; parent #153).
+Today a node whose tracking store fails at boot (`:adoption_failed`) reaps
+nothing until the next boot, so every untracked pod it could have deleted
+bills for that whole time, and no persisted task gets its deadline or cost cap
+back. The Adopter will retry the read, from 5 s doubling to every 5 minutes
+with no limit, and on the first good read adopt and open the Reaper. Two
+slices, in order:
+
+1. #154: a DETS store that lost records keeps answering `{:error, _}` from
+   `all/0` after its process restarts, and `Dets.get/1` raises when its table
+   is not open, so the Reaper never deletes a recorded pod on an unread store.
+2. #155: the supervised Adopter retries `all/0`; the Reaper reopens on the
+   first good read.
 
 We picked it by the same rule as milestones 9 and 11: no roadmap item or open
 milestone is left, so we take the open risk with the largest cost that a
@@ -33,7 +41,8 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 
 | Feature | Ticket | State |
 |---|---|---|
-| Release 0.10.0 (milestone 12) | #151 | PR #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` after it merges |
+| Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
+| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Designed; slices #154 and #155 filed |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
