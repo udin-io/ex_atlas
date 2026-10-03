@@ -52,7 +52,10 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   When the store exports `expired_leases/1` (the Ecto store does), each
   successful renewal also reads the expired leases and watches every owner
-  with its expiry. An owner whose expiry stays the same for
+  with its expiry. It watches only a row this node's key signed
+  (`ExAtlas.Orchestrator.TrackingStore.lease_signed?/3`): anyone who can
+  write the lease table can insert a row, so an unsigned one, or one signed
+  under another callback secret, is never dead. An owner whose expiry stays the same for
   `:reap_dead_owner_after_ms` on this node's monotonic clock is dead
   (`dead_owners/0`), and `ExAtlas.Orchestrator.Reaper` deletes its untracked
   pods when `reap_dead_owners: true` is set (off by default until lease rows
@@ -297,14 +300,12 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   defp observe(state, watch, now, mono) do
     if function_exported?(state.store, :expired_leases, 1),
-      do: observe_expired(safely(fn -> state.store.expired_leases(now) end), watch, mono),
+      do: observe_expired(signed_expired(state, now), watch, mono),
       else: %{}
   end
 
-  defp observe_expired({:ok, expired}, watch, mono) when is_map(expired) do
+  defp observe_expired({:ok, expired}, watch, mono) do
     for {owner, at} <- expired,
-        Ownership.valid?(owner),
-        is_integer(at),
         into: %{},
         do: {owner, {at, first_seen(watch, owner, at, mono)}}
   end
@@ -339,11 +340,31 @@ defmodule ExAtlas.Orchestrator.Lease do
     still_holding? = is_integer(state.renewed_mono) and mono - state.renewed_mono < state.ttl_ms
 
     with true <- still_holding? and candidates != %{},
-         {:ok, expired} when is_map(expired) <-
-           safely(fn -> state.store.expired_leases(state.clock.()) end) do
+         {:ok, expired} <- signed_expired(state, state.clock.()) do
       Map.filter(candidates, fn {owner, at} -> Map.get(expired, owner) == at end)
     else
       _nothing_to_confirm -> %{}
+    end
+  end
+
+  # The expired owners a pod name can carry and whose row this node's key
+  # signed: `%{owner => expires_at_ms}`. Anyone who can write the lease
+  # table writes these rows, so an unsigned row is never dead (issue 148).
+  defp signed_expired(state, now) do
+    case safely(fn -> state.store.expired_leases(now) end) do
+      {:ok, expired} when is_map(expired) ->
+        signed =
+          for {owner, {at, mac}} <- expired,
+              Ownership.valid?(owner),
+              is_integer(at),
+              TrackingStore.lease_signed?(owner, at, mac),
+              into: %{},
+              do: {owner, at}
+
+        {:ok, signed}
+
+      other ->
+        other
     end
   end
 

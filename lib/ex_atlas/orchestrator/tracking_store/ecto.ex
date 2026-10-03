@@ -341,12 +341,21 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     @impl ExAtlas.Orchestrator.TrackingStore
     def expired_leases(now_ms) when is_integer(now_ms) do
-      now = usec(now_ms)
+      repo = repo!()
+      expired = from(l in Lease, where: l.expires_at < ^usec(now_ms))
 
+      # A table without step 3 has no `mac`: every row reads unsigned.
       leases =
-        repo!().all(from(l in Lease, where: l.expires_at < ^now, select: {l.owner, l.expires_at}))
+        try do
+          repo.all(from(l in expired, select: {l.owner, l.expires_at, l.mac}))
+        rescue
+          _no_mac_column -> repo.all(from(l in expired, select: {l.owner, l.expires_at, nil}))
+        end
 
-      {:ok, Map.new(leases, fn {owner, at} -> {owner, DateTime.to_unix(at, :millisecond)} end)}
+      {:ok,
+       Map.new(leases, fn {owner, at, mac} ->
+         {owner, {DateTime.to_unix(at, :millisecond), mac}}
+       end)}
     rescue
       error -> {:error, error}
     end

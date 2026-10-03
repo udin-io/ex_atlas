@@ -293,7 +293,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Optional. A store that implements it and `c:claim_expired/3` lets a live
   node take over the records of a node whose lease expired; see
-  `ExAtlas.Orchestrator.Lease`.
+  `ExAtlas.Orchestrator.Lease`. With `c:expired_leases/1`, the store also
+  keeps `lease_mac(owner, expires_at_ms)` beside the expiry, replacing the
+  last one.
   """
   @callback renew_lease(owner :: String.t(), expires_at_ms :: integer()) ::
               :ok | {:error, term()}
@@ -317,14 +319,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   @doc """
   Every owner whose lease expired before `now_ms`, with its expiry in
-  wall-clock ms.
+  wall-clock ms and the MAC `c:renew_lease/2` stored with it, byte for byte,
+  or `nil`: `%{"m1" => {1_790_000_000_000, <<...>>}}`.
 
   Optional. With it, `ExAtlas.Orchestrator.Lease` watches each expired
-  owner, and the Reaper deletes the untracked pods of one whose lease stayed
-  expired and unchanged for `:reap_dead_owner_after_ms`.
+  owner whose MAC this node's key verifies (`lease_signed?/3`), and the
+  Reaper deletes the untracked pods of one whose lease stayed expired and
+  unchanged for `:reap_dead_owner_after_ms`. A row whose MAC does not verify
+  is never dead.
   """
   @callback expired_leases(now_ms :: integer()) ::
-              {:ok, %{optional(String.t()) => integer()}} | {:error, term()}
+              {:ok, %{optional(String.t()) => {integer(), binary() | nil}}} | {:error, term()}
 
   @optional_callbacks renew_lease: 2, claim_expired: 3, expired_leases: 1
 

@@ -38,6 +38,24 @@ defmodule ExAtlas.Test.Repo do
     :ok
   end
 
+  @doc """
+  Write `owner`'s lease row as any writer of the host's database could,
+  bypassing the store: expiring at `expires_at_ms`, with `mac` as given.
+  """
+  @spec put_lease!(String.t(), integer(), binary() | nil) :: :ok
+  def put_lease!(owner, expires_at_ms, mac \\ nil) do
+    expires_at = expires_at_ms |> Kernel.*(1_000) |> DateTime.from_unix!(:microsecond)
+    now = DateTime.to_iso8601(DateTime.utc_now())
+
+    query!(
+      "INSERT OR REPLACE INTO atlas_owner_leases (owner, expires_at, mac, inserted_at, " <>
+        "updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+      [owner, DateTime.to_iso8601(expires_at), mac && {:blob, mac}, now]
+    )
+
+    :ok
+  end
+
   defmodule AddAtlasTracking do
     @moduledoc false
     # What a host writes in priv/repo/migrations.

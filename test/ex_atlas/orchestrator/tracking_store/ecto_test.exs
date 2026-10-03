@@ -64,6 +64,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
     def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 2)
   end
 
+  # The lease schema of 0.9.0, before step 3.
+  defmodule V090Lease do
+    @moduledoc false
+    use Ecto.Schema
+
+    @primary_key {:owner, :string, autogenerate: false}
+    schema "atlas_owner_leases" do
+      field(:expires_at, :utc_datetime_usec)
+      timestamps(type: :utc_datetime_usec)
+    end
+  end
+
   defmodule StepThree do
     @moduledoc false
     use Ecto.Migration
@@ -373,12 +385,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
   end
 
   describe "expired_leases/1" do
-    test "answers every owner whose lease expired before now, with its expiry", %{tmp_dir: dir} do
+    setup :callback_secret
+
+    test "answers every owner whose lease expired before now, with its expiry and mac", %{
+      tmp_dir: dir
+    } do
       start!(dir)
       :ok = Store.renew_lease("m1", 1_000)
       :ok = Store.renew_lease("m2", 1_999)
 
-      assert {:ok, %{"m1" => 1_000, "m2" => 1_999}} == Store.expired_leases(2_000)
+      assert {:ok, %{"m1" => {1_000, mac1}, "m2" => {1_999, mac2}}} = Store.expired_leases(2_000)
+      assert TrackingStore.lease_signed?("m1", 1_000, mac1)
+      assert TrackingStore.lease_signed?("m2", 1_999, mac2)
     end
 
     test "control: leaves out a lease that runs until now or later", %{tmp_dir: dir} do
@@ -387,7 +405,52 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
       :ok = Store.renew_lease("m2", 2_000)
       :ok = Store.renew_lease("m3", 9_000)
 
-      assert {:ok, %{"m1" => 1_000}} == Store.expired_leases(2_000)
+      assert {:ok, %{"m1" => {1_000, _mac}} = expired} = Store.expired_leases(2_000)
+      assert map_size(expired) == 1
+    end
+
+    test "answers a row with no mac with nil", %{tmp_dir: dir} do
+      start!(dir)
+      :ok = Repo.put_lease!("m5", 1_000)
+
+      assert {:ok, %{"m5" => {1_000, nil}}} == Store.expired_leases(2_000)
+    end
+
+    # Old bytes, new code: a database that has not run step 3.
+    test "on a step-2 table, answers each row with a nil mac", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+      :ok = Store.renew_lease("m1", 1_000)
+
+      assert {:ok, %{"m1" => {1_000, nil}}} == Store.expired_leases(2_000)
+    end
+
+    # New bytes, old code: a 0.9.0 node renews and claims on a step-3 table
+    # through the step-2 schema, and its renewal leaves the row unsigned.
+    test "a 0.9.0 renewal on a step-3 table works, and leaves the row unsigned", %{
+      tmp_dir: dir
+    } do
+      start!(dir)
+      :ok = Store.renew_lease("m1", 1_000)
+      now = DateTime.utc_now()
+
+      Repo.insert_all(
+        V090Lease,
+        [
+          %{
+            owner: "m1",
+            expires_at: ~U[1970-01-01 00:00:01.500000Z],
+            inserted_at: now,
+            updated_at: now
+          }
+        ],
+        on_conflict: {:replace, [:expires_at, :updated_at]},
+        conflict_target: [:owner]
+      )
+
+      assert [%{expires_at: ~U[1970-01-01 00:00:01.500000Z]}] = Repo.all(V090Lease)
+      assert {:ok, %{"m1" => {1_500, mac}}} = Store.expired_leases(2_000)
+      refute TrackingStore.lease_signed?("m1", 1_500, mac)
     end
 
     test "answers {:ok, %{}} with no lease rows", %{tmp_dir: dir} do

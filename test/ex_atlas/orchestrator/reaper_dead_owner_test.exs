@@ -14,7 +14,7 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
   import ExUnit.CaptureLog
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Lease, Reaper, TrackingStoreConformance}
+  alias ExAtlas.Orchestrator.{Lease, Reaper, TrackingStore, TrackingStoreConformance}
   alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Test.{FaultyProvider, LeaseClock, Repo}
@@ -61,7 +61,7 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
     do: capture_log(fn -> :ok = Reaper.reap_now("atlas-", providers) end)
 
   defp expiry_iso(owner) do
-    {:ok, %{^owner => at}} = Store.expired_leases(now() + 1)
+    {:ok, %{^owner => {at, _mac}}} = Store.expired_leases(now() + 1)
     at |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
   end
 
@@ -303,6 +303,37 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       reap()
 
       assert status(compute) == :terminated
+    end
+
+    # Issue 148: one INSERT into atlas_owner_leases by a writer without the
+    # callback secret. m1's row in the setup is signed, so these replace it.
+    test "an expired row with no mac: the pod is left alone and logged", %{lease: lease} do
+      :ok = Repo.put_lease!("m1", now() - 1)
+      # A new expiry starts a new window; restart so it runs from here.
+      lease = LeaseClock.restart!(lease)
+      dead!(lease)
+      compute = pod()
+
+      log = reap()
+
+      assert status(compute) == :running
+      assert log =~ "leaving #{compute.id} (#{@name}) alone"
+    end
+
+    test "a row signed under another callback secret: the pod is left alone", %{lease: lease} do
+      at = now() - 1
+      Application.put_env(:ex_atlas, :callback, secret: String.duplicate("b", 40))
+      mac = TrackingStore.lease_mac("m1", at)
+      Application.put_env(:ex_atlas, :callback, secret: TestOrchestrator.callback_secret())
+      :ok = Repo.put_lease!("m1", at, mac)
+      # A new expiry starts a new window; restart so it runs from here.
+      lease = LeaseClock.restart!(lease)
+      dead!(lease)
+      compute = pod()
+
+      reap()
+
+      assert status(compute) == :running
     end
 
     test "once its own last renewal is a ttl old, the pod is left alone", %{lease: lease} do
