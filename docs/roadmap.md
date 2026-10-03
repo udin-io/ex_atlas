@@ -1,27 +1,18 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #152 (release
-0.10.0). It feeds the choice of the next feature. Dates are merge dates.
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #160 (milestone
+13). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
-Reaper survives a failed store read (milestone 13, risk 4; parent #153).
-Today a node whose tracking store fails at boot (`:adoption_failed`) reaps
-nothing until the next boot, so every untracked pod it could have deleted
-bills for that whole time, and no persisted task gets its deadline or cost cap
-back. The Adopter will retry the read, from 5 s doubling to every 5 minutes
-with no limit, and on the first good read adopt and open the Reaper. Two
-slices, in order:
+No milestone is open. By the rule below, the next pick is rank 2, risk 16:
+after a respawn and a restart the cost cap undercounts. Rank 1, risk 4, is
+retired for an unreadable store by milestone 13 (#153, PRs #157 and #160); its
+config faults stay.
 
-1. #154: a DETS store that lost records keeps answering `{:error, _}` from
-   `all/0` after its process restarts, and `Dets.get/1` raises when its table
-   is not open, so the Reaper never deletes a recorded pod on an unread store.
-2. #155: the supervised Adopter retries `all/0`; the Reaper reopens on the
-   first good read.
-
-We picked it by the same rule as milestones 9 and 11: no roadmap item or open
-milestone is left, so we take the open risk with the largest cost that a
+The rule, as for milestones 9, 11 and 13: when no roadmap item or open
+milestone is left, we take the open risk with the largest cost that a
 feature can retire. We left out risk 2 and 15 (cowlib, waits on an upstream
 release), every risk only the owner's live tests settle (1, 14, 19, 20, 33,
 44, 52, 56, 58, 61; the Lambda and Vast live runs are deferred by the owner),
@@ -42,7 +33,6 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 | Feature | Ticket | State |
 |---|---|---|
 | Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
-| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Slice 1 (#154) in PR #157: a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. Slice 2 (#155) next |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -51,6 +41,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Reaper survives a failed store read (milestone 13, risk 4) | #157 (#154): a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. #160 (#155): the supervised Adopter retries an unreadable store and the Reaper reaps once it reads; every adoption leaves a live tracker's record alone. Closes parent #153 and milestone 13 | 2026-10-03 |
 | Dead owner's pods, slice 2 (milestone 11, risk 6) | #150 (#145): a record a dead owner still holds, and no node takes over, no longer shields its pod; the Reaper deletes the record, then the pod. Closes parent #143 and milestone 11 | 2026-10-03 |
 | Dead owner's pods, slices 1 and 3 (milestone 11, risk 6) | #147 (#144): the Reaper deletes a dead owner's untracked pods. #149 (#148): lease rows signed (migration step 3), dead-owner deletion on by default | 2026-10-03 |
 | Release 0.9.0 (milestone 10) | #142 (#141): version bump, the 0.9.0 section of `guides/upgrading.md`, and a `"0.9.0"` step in `mix ex_atlas.upgrade`. The owner publishes to Hex and pushes tag `v0.9.0` | 2026-10-02 |

@@ -7,6 +7,24 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed: the Reaper reaps again once an unreadable tracking store reads (#155)
+
+- The supervised `ExAtlas.Orchestrator.Adopter` reads a tracking store that
+  failed `all/0` again, from 5 s doubling to every 5 minutes, with no attempt
+  limit. On the first good read it adopts and opens the Reaper. Before, one
+  failed read at boot (a database down for ten seconds, a row that would not
+  decode) kept the Reaper off until the next boot. `Adopter.run/1` called
+  directly still reads once.
+- The Adopter logs one error on the first failure, one warning per later
+  failure with its attempt and next delay, and one info line on success. It
+  sends `:adoption_failed` once. The Reaper logs one info line when it
+  resumes.
+- Every adoption (boot, retry and a Lease's `adopt_claimed/3`) leaves a record
+  whose id a live tracker holds alone. A pod that read 404 mid-respawn had its
+  record deleted, and the replacement pod was left with no record.
+- A DETS store that lost records still keeps reaping off until the VM
+  restarts: its retries read the same `{:error, _}`.
+
 ### Fixed: a DETS store down or recreated no longer lets the Reaper delete a recorded pod (#154)
 
 - `TrackingStore.Dets.get/1` raises `ArgumentError` while its table is not
