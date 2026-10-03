@@ -581,8 +581,10 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       expire!("m1")
       lease = watching_lease!("m2")
       LeaseClock.run_for!(lease, @window)
-      {_at, mac} = lease_row("m1")
-      :ok = Repo.put_lease!("m1", now() - 2, mac)
+      # Another expiry under m1's old mac. `now() - 2` matched the old one
+      # whenever 1 ms passed since `expire!/1`, and m1 read dead.
+      {at, mac} = lease_row("m1")
+      :ok = Repo.put_lease!("m1", at - 1, mac)
 
       lease = LeaseClock.restart!(lease)
 
