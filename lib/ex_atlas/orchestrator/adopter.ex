@@ -111,7 +111,10 @@ defmodule ExAtlas.Orchestrator.Adopter do
   alias ExAtlas.Spec
 
   @doc false
-  def start_link(opts \\ []), do: Task.start_link(__MODULE__, :run, [opts])
+  # The supervised child reads until the store answers; `run/1` alone reads
+  # once.
+  def start_link(opts \\ []),
+    do: Task.start_link(__MODULE__, :run, [Keyword.put(opts, :retry, true)])
 
   @doc """
   Adopt everything in the tracking store, then signal the Reaper.
@@ -122,6 +125,11 @@ defmodule ExAtlas.Orchestrator.Adopter do
       Defaults to the configured one.
     * `:notify` — pid or registered name to send `:adoption_complete` /
       `:adoption_failed` to. Defaults to `ExAtlas.Orchestrator.Reaper`.
+    * `:retry` — read the store again after a failed read, until it answers.
+      Defaults to `false`; the child `ExAtlas.Orchestrator.Supervisor` starts
+      sets it.
+    * `:retry_after_ms` — the wait before the first retry. Defaults to 5 s.
+      Each wait doubles, up to `:max_retry_after_ms` (default 5 minutes).
   """
   @spec run(keyword()) :: :ok
   def run(opts \\ []) do
@@ -129,7 +137,17 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
     case Keyword.get(opts, :store) || TrackingStore.impl() do
       nil -> signal(notify, :adoption_complete)
-      store -> adopt_all(store, notify)
+      store -> adopt_all(store, notify, retry_plan(opts))
+    end
+  end
+
+  @retry_after_ms 5_000
+  @max_retry_after_ms 300_000
+
+  defp retry_plan(opts) do
+    if Keyword.get(opts, :retry, false) do
+      max = Keyword.get(opts, :max_retry_after_ms, @max_retry_after_ms)
+      %{delay: min(Keyword.get(opts, :retry_after_ms, @retry_after_ms), max), max: max}
     end
   end
 
@@ -143,26 +161,68 @@ defmodule ExAtlas.Orchestrator.Adopter do
     Enum.each(records, &adopt_one(&1, owner, store))
   end
 
-  defp adopt_all(store, notify) do
+  defp adopt_all(store, notify, plan) do
     case read_all(store) do
       {:ok, records} ->
-        case Ownership.owner() do
-          {:ok, owner} -> adopt_owned(records, owner, store)
-          {:error, error} -> log_invalid_owner(error)
-        end
-
-        signal(notify, :adoption_complete)
+        adopt_records(records, store, notify)
 
       {:error, reason} ->
         Logger.error(
           "[ExAtlas.Orchestrator.Adopter] tracking store could not be read " <>
-            "(#{inspect(reason)}); adopting nothing and DISABLING the Reaper for this boot. " <>
-            "Compute this node spawned before the restart is still running and billing — " <>
-            "check your provider for pods matching :reap_name_prefix."
+            "(#{inspect(reason)}); adopting nothing, and reaping is off until it reads. " <>
+            "Compute this node spawned before the restart is still running and billing. " <>
+            next_try(plan)
         )
 
         signal(notify, :adoption_failed)
+
+        if plan,
+          do: retry(store, notify, plan, 2, System.monotonic_time(:millisecond)),
+          else: :ok
     end
+  end
+
+  # No attempt limit: giving up would shut the Reaper for the rest of the boot.
+  # Once capped, a store that stays down costs one read per 5 minutes.
+  defp retry(store, notify, plan, attempt, since) do
+    Process.sleep(plan.delay)
+
+    case read_all(store) do
+      {:ok, records} ->
+        Logger.info(
+          "[ExAtlas.Orchestrator.Adopter] tracking store read on attempt #{attempt} after " <>
+            "#{span(System.monotonic_time(:millisecond) - since)}; read #{length(records)} " <>
+            "record(s). The Reaper reaps again."
+        )
+
+        adopt_records(records, store, notify)
+
+      {:error, reason} ->
+        plan = %{plan | delay: min(plan.delay * 2, plan.max)}
+
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Adopter] tracking store still unreadable (attempt #{attempt}): " <>
+            "#{inspect(reason)}; reaping stays off. #{next_try(plan)}"
+        )
+
+        retry(store, notify, plan, attempt + 1, since)
+    end
+  end
+
+  defp next_try(nil), do: "Nothing reads it again until the next boot."
+  defp next_try(%{delay: delay}), do: "Next try in #{span(delay)}."
+
+  defp span(ms) when ms < 1_000, do: "#{ms} ms"
+  defp span(ms) when ms < 60_000, do: "#{div(ms, 1_000)} s"
+  defp span(ms), do: "#{Float.round(ms / 60_000, 1)} min"
+
+  defp adopt_records(records, store, notify) do
+    case Ownership.owner() do
+      {:ok, owner} -> adopt_owned(records, owner, store)
+      {:error, error} -> log_invalid_owner(error)
+    end
+
+    signal(notify, :adoption_complete)
   end
 
   defp adopt_owned(records, owner, store) do
