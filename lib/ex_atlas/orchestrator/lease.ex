@@ -257,7 +257,7 @@ defmodule ExAtlas.Orchestrator.Lease do
 
   # Runs inside the store's claim, once per candidate record.
   defp rewrite(record, owner, lease) do
-    case skip_reason(record) do
+    case takeover_refusal(record) do
       nil ->
         {:ok, TrackingStore.rewrite(Map.put(record, :owner, owner), true)}
 
@@ -267,7 +267,12 @@ defmodule ExAtlas.Orchestrator.Lease do
     end
   end
 
-  defp skip_reason(record) do
+  @doc false
+  # Why no node of this build takes `record` over from an expired owner, or
+  # nil. The Reaper deletes the pod of a dead owner's record only when this
+  # is non-nil: a record the Lease would claim is the Lease's (issue 145).
+  @spec takeover_refusal(map()) :: String.t() | nil
+  def takeover_refusal(record) do
     if TrackingStore.sealed?(record),
       do: Adopter.refusal(record),
       else: "its record is not signed by this node's key"

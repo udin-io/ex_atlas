@@ -511,14 +511,16 @@ defmodule ExAtlas.Orchestrator.Reaper do
         store = TrackingStore.impl()
         now = DateTime.utc_now()
 
-        {ours, others} =
+        {orphans, held} =
           computes
-          |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
-          |> Enum.split_with(&Ownership.ours?(&1.name, prefix, owner))
+          |> Enum.filter(&candidate?(&1, tracked, prefix, now, grace_ms))
+          |> Enum.reduce({[], []}, &sort_by_holder(&1, &2, store, prefix, owner))
+
+        {ours, others} = Enum.split_with(orphans, &Ownership.ours?(&1.name, prefix, owner))
 
         # Read after the list, which can take tens of seconds: an owner that
         # renewed meanwhile is no longer dead.
-        dead = if others == [], do: %{}, else: dead_owners(peers)
+        dead = if others == [] and held == [], do: %{}, else: dead_owners(peers)
         {dead_owners, others} = Enum.split_with(others, &dead_owner(&1, prefix, owner, dead))
 
         Enum.each(ours, &delete_ours(&1, provider))
@@ -527,6 +529,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
           dead_owners,
           &delete_dead_owners(&1, provider, dead_owner(&1, prefix, owner, dead))
         )
+
+        for {compute, other} <- held, is_map_key(dead, other) do
+          delete_held(compute, provider, store, {other, Map.fetch!(dead, other)})
+        end
 
         Enum.reduce(others, left_alone, &leave_alone(&1, prefix, owner, &2))
 
@@ -541,6 +547,93 @@ defmodule ExAtlas.Orchestrator.Reaper do
       {:other, other} when is_map_key(dead, other) -> {other, Map.fetch!(dead, other)}
       _ours_live_or_unowned -> nil
     end
+  end
+
+  # A pod with no record is an orphan. A pod whose record names the dead
+  # owner its name carries, and that no node would take over, is `held`
+  # with that owner: its record shields it only while the owner lives
+  # (issue 145). Any other record shields its pod.
+  defp sort_by_holder(compute, {orphans, held}, store, prefix, owner) do
+    case holder(store, compute.id) do
+      :none ->
+        {[compute | orphans], held}
+
+      {:record, record} ->
+        case held_by(compute, record, store, prefix, owner) do
+          nil -> {orphans, held}
+          other -> {orphans, [{compute, other} | held]}
+        end
+
+      :shield ->
+        {orphans, held}
+    end
+  end
+
+  defp held_by(compute, record, store, prefix, owner) do
+    with {:other, other} <- Ownership.classify(compute.name, prefix, owner),
+         ^other <- Map.get(record, :owner),
+         true <- function_exported?(store, :delete_expired, 3),
+         why when is_binary(why) <- Lease.takeover_refusal(record) do
+      other
+    else
+      _shields -> nil
+    end
+  end
+
+  # The record first, in one statement that re-checks its owner and that
+  # owner's expiry: a claim or a renewal since this tick read them leaves
+  # both alone. A pod whose delete then fails has no record, and the next
+  # tick deletes it as a dead owner's untracked pod.
+  defp delete_held(compute, provider, store, {other, expired_at}) do
+    case delete_record(store, compute.id, other, expired_at) do
+      :ok ->
+        delete_held_pod(compute, provider, other, expired_at)
+
+      :kept ->
+        Logger.info(
+          "[ExAtlas.Orchestrator.Reaper] leaving #{compute.id} (#{compute.name}) and its " <>
+            "tracking record alone: another node claimed the record, or owner " <>
+            "#{inspect(other)} renewed, since this tick read them"
+        )
+
+      {:error, error} ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] could not delete the tracking record of " <>
+            "#{compute.id} (#{compute.name}) of dead owner #{inspect(other)}" <>
+            "#{failure_kind(error)}; the pod stays, and the next tick tries again"
+        )
+    end
+  end
+
+  defp delete_held_pod(compute, provider, other, expired_at) do
+    case delete_compute(compute, provider) do
+      :ok ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] deleted #{compute.id} (#{compute.name}) and its " <>
+            "tracking record: owner #{inspect(other)} has not renewed its lease since " <>
+            "#{since(expired_at)}, and no connected node reports it"
+        )
+
+      {:error, error} ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] deleted the tracking record of #{compute.id} " <>
+            "(#{compute.name}) of dead owner #{inspect(other)}, but could not delete the pod" <>
+            "#{failure_kind(error)}; the next tick deletes it as an untracked pod"
+        )
+    end
+  end
+
+  # Only the kind of a raise or exit is logged, as for a pod delete.
+  defp delete_record(store, id, owner, expired_at) do
+    case store.delete_expired(id, owner, expired_at) do
+      answer when answer in [:ok, :kept] -> answer
+      {:error, error} -> {:error, error}
+      _other -> {:error, :bad_answer}
+    end
+  rescue
+    error -> {:error, error}
+  catch
+    :exit, _reason -> {:error, :exit}
   end
 
   defp delete_ours(compute, provider) do
@@ -649,10 +742,11 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   defp describe_owner(:unowned), do: "its name carries no owner"
 
-  defp orphan?(compute, tracked, store, prefix, now, grace_ms) do
+  # Everything an orphan needs but the store's answer, which `holder/2`
+  # reads only for these.
+  defp candidate?(compute, tracked, prefix, now, grace_ms) do
     compute.status in @billing_statuses and
       not MapSet.member?(tracked, compute.id) and
-      not ours?(store, compute.id) and
       is_binary(compute.name) and
       String.starts_with?(compute.name, prefix) and
       not young?(compute, now, grace_ms)
@@ -661,11 +755,16 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # The second half of the "is this ours?" question, and the reason a deploy no
   # longer destroys a running task: in the Registry means a tracker has it, in
   # the store means we spawned it and adoption either has it or decided it was
-  # gone. Only an id in neither is an orphan.
-  defp ours?(nil, _id), do: false
+  # gone. Only an id in neither is an orphan; a record of a dead owner may
+  # still go (`held_by/5`).
+  defp holder(nil, _id), do: :none
 
-  defp ours?(store, id) do
-    match?({:ok, _record}, store.get(id))
+  defp holder(store, id) do
+    case store.get(id) do
+      {:ok, record} when is_map(record) -> {:record, record}
+      {:ok, _not_a_map} -> :shield
+      _missing -> :none
+    end
   rescue
     # A store implementation that raises is not evidence that a live resource
     # belongs to somebody else. Uncertainty always resolves towards leaving it
@@ -676,7 +775,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
           "(#{inspect(error)}); treating it as ours and terminating nothing"
       )
 
-      true
+      :shield
   end
 
   # `created_at` is the provider's clock, so a skewed one shifts the window:
