@@ -701,6 +701,36 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert {:ok, %{id: ^new_id}} = Memory.get(new_id)
     end
 
+    # The respawn has written the replacement's record and is deleting the old
+    # pod. The replacement's record must already name a live tracker.
+    test "a respawn deleting its old pod keeps the replacement's record and tracker" do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+        )
+
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      FaultyProvider.arm(:terminate, {:block, self()})
+      :ok = Mock.set_status(old_id, :stopped)
+      assert_receive {:blocked, :terminate, ^pid}, 2_000
+      FaultyProvider.reset()
+      {:ok, [%{id: new_id}]} = Memory.all()
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      send(pid, :release)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, ^new_id}}, 2_000
+      assert {:ok, ^pid} = Orchestrator.lookup(new_id)
+      assert {:ok, %{id: ^new_id}} = Memory.get(new_id)
+    end
+
     test "control: a record with no tracker whose pod reads 404 is deleted" do
       compute = orphaned_task()
       :ok = Mock.forget(compute.id)

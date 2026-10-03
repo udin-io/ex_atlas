@@ -1205,10 +1205,14 @@ defmodule ExAtlas.Orchestrator.ComputeServer do
         # record that re-anchored here would hand a task preempted three times
         # three times its budget, which is exactly what the in-memory deadline
         # already refuses to do.
+        #
+        # The replacement's name is taken before its record exists, so an
+        # adoption that reads the record finds a live tracker and leaves it
+        # alone. This server holds both names until the old pod is released.
+        {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
         carry_record(state, old_id, replacement.id)
         release_old(state)
         :ok = Registry.unregister(ComputeRegistry, {:compute, old_id})
-        {:ok, _} = Registry.register(ComputeRegistry, {:compute, replacement.id}, nil)
 
         # The meter carries over, like the deadline: a replacement continues
         # the old budget at its own price. Repriced before the broadcast, so
