@@ -288,7 +288,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   Every stored record.
 
   `{:error, reason}` means "I cannot account for my contents" — the caller
-  must then neither adopt nor reap. It is not the same as `{:ok, []}`.
+  must then neither adopt nor reap. It is not the same as `{:ok, []}`. A
+  store that lost records keeps answering `{:error, _}` until the VM
+  restarts, never `{:ok, fewer}`.
   """
   @callback all() :: {:ok, [record()]} | {:error, term()}
 

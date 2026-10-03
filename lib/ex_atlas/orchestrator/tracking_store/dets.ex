@@ -35,11 +35,20 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   tree, so refusing to start would take their app down over a file we wrote.
 
   So a file that will not open (`repair: true` already tried) is deleted and
-  recreated, loudly, and the store is marked **degraded for the rest of the
-  boot**: `all/0` answers `{:error, _}` forever after, which
-  `ExAtlas.Orchestrator.Adopter` turns into "adopt nothing, and never let the
-  Reaper DELETE anything this boot". Writes made after the recreate work
-  normally, so resources spawned by this boot are still tracked.
+  recreated, loudly, and the store is marked **degraded for the life of the
+  VM, across restarts of the store process**: `all/0` answers `{:error, _}`
+  until the VM restarts, which `ExAtlas.Orchestrator.Adopter` turns into
+  "adopt nothing, and never let the Reaper DELETE anything this boot". A file
+  that will not open even after the delete marks the store the same way.
+  Writes made after the recreate work normally, so resources spawned by this
+  boot are still tracked.
+
+  The mark lives in the VM, not the file. The next boot reads the file as it
+  stands, the lost records missing, and its Reaper deletes their pods.
+
+  While its table is not open (the process is down or restarting, or the
+  file would not open), `get/1` raises rather than answer `:error`, which
+  means "not stored".
 
   `{:ok, []}` is reserved for "the store is fine and holds nothing". Conflating
   the two is what would get a live GPU job deleted.
@@ -143,16 +152,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     dir = resolve_storage_dir(opts)
     _ = File.chmod(dir, 0o700)
 
-    path = Path.join(dir, @filename)
+    # Expanded, so every spelling of one file shares its mark.
+    path = dir |> Path.join(@filename) |> Path.expand()
 
     case open(path) do
       {:ok, table} ->
         _ = File.chmod(path, 0o600)
-        {:ok, %{dir: dir, path: path, table: table, degraded: nil}}
+        {:ok, %{dir: dir, path: path, table: table, degraded: earlier_loss(path)}}
 
       {:recreated, table, reason} ->
         _ = File.chmod(path, 0o600)
-        {:ok, %{dir: dir, path: path, table: table, degraded: {:store_recreated, reason}}}
+        degraded = mark_lost(path, {:store_recreated, reason})
+        {:ok, %{dir: dir, path: path, table: table, degraded: degraded}}
 
       {:error, reason} ->
         # Nothing left to try — come up with no table rather than take the
@@ -164,9 +175,36 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
             "the Reaper will not terminate anything"
         )
 
-        {:ok, %{dir: dir, path: path, table: nil, degraded: {:store_unopenable, reason}}}
+        degraded = mark_lost(path, {:store_unopenable, reason})
+        {:ok, %{dir: dir, path: path, table: nil, degraded: degraded}}
     end
   end
+
+  # The mark outlives this process, so a restart of the store cannot turn
+  # "records lost" into "these are all of them". It lives for the VM, keyed by
+  # the file: the next boot reads the file as it stands.
+  defp mark_lost(path, degraded) do
+    :persistent_term.put(lost_key(path), degraded)
+    degraded
+  end
+
+  defp earlier_loss(path) do
+    case :persistent_term.get(lost_key(path), nil) do
+      nil ->
+        nil
+
+      {kind, _reason} = degraded ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.TrackingStore.Dets] #{path} lost records earlier in this VM " <>
+            "(#{kind}); all/0 answers {:error, _}, so adoption and the Reaper stay off, " <>
+            "until the VM restarts"
+        )
+
+        degraded
+    end
+  end
+
+  defp lost_key(path), do: {__MODULE__, :lost_records, path}
 
   @impl GenServer
   def handle_call({:put, _record}, _from, %{table: nil} = state), do: {:reply, :ok, state}
