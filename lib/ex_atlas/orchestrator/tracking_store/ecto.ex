@@ -372,6 +372,35 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       error -> {:error, error}
     end
 
+    # One DELETE whose WHERE re-checks the owner column and the exact expiry
+    # the caller confirmed, so a claim or a renewal since the caller's read
+    # leaves the row in place (issue 145).
+    @impl ExAtlas.Orchestrator.TrackingStore
+    def delete_expired(id, owner, expires_at_ms)
+        when is_binary(id) and is_binary(owner) and is_integer(expires_at_ms) do
+      repo = repo!()
+      at = usec(expires_at_ms)
+
+      unchanged =
+        from(l in Lease, where: l.owner == ^owner and l.expires_at == ^at, select: l.owner)
+
+      query =
+        from(r in Row,
+          where: r.id == ^id and r.owner == ^owner and r.owner in subquery(unchanged)
+        )
+
+      outside_transaction(fn ->
+        try do
+          case repo.delete_all(query) do
+            {1, _} -> :ok
+            {0, _} -> :kept
+          end
+        rescue
+          error -> {:error, error}
+        end
+      end)
+    end
+
     # Each row is claimed by its own conditional UPDATE, which sets the owner
     # column and the record together: the record holds `:owner` too, under
     # its signature. The WHERE re-checks the old owner and its expired lease,
