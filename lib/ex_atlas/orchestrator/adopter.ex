@@ -1,11 +1,13 @@
 defmodule ExAtlas.Orchestrator.Adopter do
   @moduledoc """
-  Re-adopts, once at boot, the compute this node was tracking before it
+  Re-adopts, at boot, the compute this node was tracking before it
   restarted.
 
   A `Task` with `restart: :transient`: it runs, it signals
   `ExAtlas.Orchestrator.Reaper`, and it exits `:normal` — there is nothing to
-  keep alive afterwards. It starts inside `ExAtlas.Application`'s tree, so it
+  keep alive afterwards. When the store cannot be read, the supervised child
+  stays up and reads it again, from 5 s doubling to every 5 minutes, with no
+  attempt limit. It starts inside `ExAtlas.Application`'s tree, so it
   runs concurrently with the rest of the boot rather than blocking it.
 
   ## What it does per record
@@ -46,10 +48,15 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
     * `:adoption_complete` — every record was accounted for; reap normally.
     * `:adoption_failed` — the store could not be read, so **nothing is reaped
-      for the rest of this boot**. A node that cannot tell which running pods
-      are its own must never issue a DELETE.
+      until a later read succeeds**. A node that cannot tell which running
+      pods are its own must never issue a DELETE. Sent once, on the first
+      failure; the read that succeeds adopts and sends `:adoption_complete`.
 
-  It records the outcome for its supervisor before it sends it, so a Reaper
+  A record whose id a live tracker holds is left to that tracker, in every
+  adoption: a retry runs minutes after boot, when a task spawned meanwhile may
+  be renting a replacement for a pod that now reads 404.
+
+  It records each outcome for its supervisor before it sends it, so a Reaper
   that restarts later in the boot, or was down when the signal went out,
   starts with the gate in the same state.
 

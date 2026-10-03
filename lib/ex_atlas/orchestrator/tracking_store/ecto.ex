@@ -112,7 +112,8 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
       * `all/0` answers `{:error, {:undecodable, ids}}` when any row is
         refused. The Adopter then adopts nothing and the Reaper reaps nothing
-        this boot, as for a corrupt DETS file. Skipping the row instead would
+        until the row decodes or is deleted: the Adopter reads again, from 5 s
+        doubling to every 5 minutes. Skipping the row instead would
         leave its pod with no record, and the Reaper would delete it.
       * `get/1` raises on a refused row. The Reaper reads a raise as "ours,
         leave it alone"; `:error` would read as "not ours".
