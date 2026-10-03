@@ -1460,7 +1460,10 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       start_retrying(retry_after_ms: 60_000, max_retry_after_ms: 60_000)
       assert_receive :adoption_failed, 2_000
 
-      assert :ok = stop_supervised(Adopter)
+      # The supervisor kills a child that ignores the shutdown after 5 s, so a
+      # stop that returns at all proves nothing; one well under 5 s does.
+      {micros, :ok} = :timer.tc(fn -> stop_supervised(Adopter) end)
+      assert micros < 1_000_000
       assert {:ok, %{id: id}} = Memory.get(compute.id)
       assert id == compute.id
     end
