@@ -316,9 +316,11 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp live_dead_owners({_peer_owners, [_unsure | _]}), do: %{}
   defp live_dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
 
+  @doc false
   # On unless set to anything but `true`: `false` is the off switch, and a
   # mistyped value leaves pods alone rather than deleting them.
-  defp reap_dead_owners? do
+  @spec reap_dead_owners?() :: boolean()
+  def reap_dead_owners? do
     :ex_atlas
     |> Application.get_env(:orchestrator, [])
     |> Keyword.get(:reap_dead_owners, true)

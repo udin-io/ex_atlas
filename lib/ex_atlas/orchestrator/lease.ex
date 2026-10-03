@@ -85,7 +85,7 @@ defmodule ExAtlas.Orchestrator.Lease do
   require Logger
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Adopter, ComputeServer, Ownership, TrackingStore}
+  alias ExAtlas.Orchestrator.{Adopter, ComputeServer, Ownership, Reaper, TrackingStore}
 
   @default_ttl_ms 90_000
   # A dead node's tasks wait out the whole ttl before another node tracks them.
@@ -182,8 +182,7 @@ defmodule ExAtlas.Orchestrator.Lease do
     else
       Logger.warning(
         "[ExAtlas.Orchestrator.Lease] not taking over #{inspect(id)} of owner #{inspect(owner)}, " <>
-          "whose lease expired: #{why}. The pod runs untracked until its owner returns or " <>
-          "you delete it."
+          "whose lease expired: #{why}. #{skipped_outcome(state, owner)}"
       )
 
       {:noreply, %{state | skipped: MapSet.put(state.skipped, id)}}
@@ -193,6 +192,19 @@ defmodule ExAtlas.Orchestrator.Lease do
   # A crash restarts the Lease with no record of how long it held its lease,
   # so it would wait a full ttl again before claiming.
   def handle_info(_unexpected, state), do: {:noreply, state}
+
+  # What happens to a skipped record's pod: the Reaper's record branch
+  # (issue 145), or nothing.
+  defp skipped_outcome(state, owner) do
+    if Reaper.reap_dead_owners?() and function_exported?(state.store, :expired_leases, 1) and
+         function_exported?(state.store, :delete_expired, 3) do
+      "Unless #{inspect(owner)} renews, the Reaper deletes the pod and this record once its " <>
+        "signed lease has stayed expired for :reap_dead_owner_after_ms (#{state.window_ms} ms) " <>
+        "and the pod's name carries that owner."
+    else
+      "The pod runs untracked until its owner returns or you delete it."
+    end
+  end
 
   defp renew(state, now) do
     case safely(fn -> state.store.renew_lease(state.owner, now + state.ttl_ms) end) do
