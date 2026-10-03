@@ -135,6 +135,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
 
   @impl GenServer
   def init(opts) do
+    # So a supervisor's shutdown runs `terminate/2`, which closes the table
+    # before this process exits. Without it DETS closes the table only after
+    # the exit, and a `get/1` in that moment still reads the file.
+    Process.flag(:trap_exit, true)
+
     dir = resolve_storage_dir(opts)
     _ = File.chmod(dir, 0o700)
 
@@ -187,6 +192,11 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     records = :dets.foldl(fn {_id, record}, acc -> [record | acc] end, [], state.table)
     {:reply, {:ok, records}, state}
   end
+
+  # A linked process other than the parent exited: stop, as an untrapped exit
+  # would have.
+  @impl GenServer
+  def handle_info({:EXIT, _from, reason}, state), do: {:stop, reason, state}
 
   @impl GenServer
   def terminate(_reason, %{table: nil}), do: :ok

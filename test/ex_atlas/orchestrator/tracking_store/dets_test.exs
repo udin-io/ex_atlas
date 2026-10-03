@@ -50,6 +50,30 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
 
       assert {:ok, []} = Dets.all()
     end
+
+    # A supervisor shutdown runs `terminate/2`, which closes the table before
+    # the process exits. Left to the owner's death, DETS closes it a moment
+    # later, longer for a bad file, and a store started in that moment finds
+    # the table name taken and reads its own file as corrupt.
+    test "a stopped store has closed its file, a bad one included", %{tmp_dir: dir} do
+      file = Path.join(dir, "tracked.dets")
+
+      # The window is a few ms at most, so one round can miss it.
+      for _round <- 1..20 do
+        start_store!(dir)
+        :ok = Dets.put(record("compute-closing"))
+        :ok = stop_supervised!(Dets)
+        assert :dets.info(:ex_atlas_tracked) == :undefined
+
+        start_store!(dir)
+        File.write!(file, :binary.copy(<<0xFF>>, File.stat!(file).size))
+        assert_raise ArgumentError, fn -> Dets.get("compute-closing") end
+        :ok = stop_supervised!(Dets)
+        assert :dets.info(:ex_atlas_tracked) == :undefined
+
+        File.rm!(file)
+      end
+    end
   end
 
   describe "a corrupt store" do
