@@ -67,18 +67,38 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  # `:error` means "not stored", and the Reaper deletes a pod on it, so a table
+  # that cannot answer raises. Every caller rescues the raise and keeps the pod.
   @impl ExAtlas.Orchestrator.TrackingStore
   def get(id) do
-    case :dets.lookup(@table, id) do
+    case lookup(id) do
       [{^id, record}] -> {:ok, record}
-      _absent_or_unreadable -> :error
+      {:error, reason} -> cannot_answer(id, reason_kind(reason))
+      _absent -> :error
     end
-  rescue
-    # The table is not open — the store is not running, or came up with no
-    # table at all. A miss, not a crash: the caller is either the Reaper (which
-    # is disabled this boot anyway) or a tracker tidying up after itself.
-    ArgumentError -> :error
   end
+
+  defp lookup(id) do
+    :dets.lookup(@table, id)
+  rescue
+    # The table is not open: the store is not running, is restarting, or came
+    # up with no table at all.
+    ArgumentError -> {:error, :not_open}
+  end
+
+  # The message names the kind of fault only: a DETS reason carries the file
+  # path.
+  defp cannot_answer(id, kind) do
+    raise ArgumentError,
+          "#{inspect(__MODULE__)} cannot read the record of #{inspect(id)} (#{inspect(kind)})"
+  end
+
+  defp reason_kind(reason) when is_atom(reason), do: reason
+
+  defp reason_kind(reason) when is_tuple(reason) and tuple_size(reason) > 0,
+    do: reason_kind(elem(reason, 0))
+
+  defp reason_kind(_reason), do: :unknown
 
   @impl ExAtlas.Orchestrator.TrackingStore
   def put(record) do

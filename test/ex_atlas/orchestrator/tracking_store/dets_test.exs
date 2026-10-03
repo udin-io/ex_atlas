@@ -77,6 +77,38 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
     end
   end
 
+  # `:error` means "not stored", and the Reaper deletes a pod on it. A table
+  # that cannot answer must not say that (issue 154).
+  describe "get/1 on a table that cannot answer" do
+    test "raises when the store is not running; control: answers :error for an unknown id when it is",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-closed"))
+      assert :error = Dets.get("compute-never-stored")
+
+      :ok = stop_supervised!(Dets)
+
+      error = assert_raise ArgumentError, fn -> Dets.get("compute-closed") end
+      assert error.message =~ "ExAtlas.Orchestrator.TrackingStore.Dets"
+      assert error.message =~ ~s("compute-closed")
+    end
+
+    test "raises when the file under an open table reads as garbage, naming no path",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      :ok = Dets.put(record("compute-garbled"))
+      assert {:ok, %{id: "compute-garbled"}} = Dets.get("compute-garbled")
+
+      path = Path.join(dir, "tracked.dets")
+      File.write!(path, :binary.copy(<<0xFF>>, File.stat!(path).size))
+
+      error = assert_raise ArgumentError, fn -> Dets.get("compute-garbled") end
+      assert error.message =~ ~s("compute-garbled")
+      assert error.message =~ "bad_object"
+      refute error.message =~ dir
+    end
+  end
+
   describe "on-disk permissions" do
     @describetag :unix
 

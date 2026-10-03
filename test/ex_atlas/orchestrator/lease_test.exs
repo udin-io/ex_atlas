@@ -81,6 +81,18 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     def expired_leases(_now_ms), do: {:ok, [{"m1", 1}]}
   end
 
+  defmodule GetRaises do
+    @moduledoc false
+    # The Ecto store whose record read raises: a row that will not decode, or
+    # a closed DETS table behind a host's own lease store (issue 154).
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate all(), to: Store
+    defdelegate renew_lease(owner, expires_at_ms), to: Store
+    defdelegate claim_expired(claimer, now_ms, rewrite), to: Store
+    def get(_id), do: raise(ArgumentError, "simulated tracking store outage on get/1")
+  end
+
   defmodule NoExpiredLeases do
     @moduledoc false
     # A custom store with leases and claims, written before expired_leases/1.
@@ -909,6 +921,22 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
 
       refute Process.alive?(tracker)
       assert {:ok, %{owner: "m3"}} = Store.get(id)
+    end
+
+    # The record names m3, so a read that answered would release the tracker.
+    # A read that raises cannot tell, and stopping a tracker is the
+    # irreversible choice.
+    test "keeps its tracker when the record read raises, and the Lease runs on" do
+      {tracker, id} = own_task()
+      lease = start_lease!("m2", store: GetRaises)
+      expire!("m2")
+      claim_as_m3!(id)
+
+      tick!(lease)
+
+      assert Process.alive?(tracker)
+      assert Process.alive?(lease)
+      assert Orchestrator.list_ids() == [id]
     end
   end
 
