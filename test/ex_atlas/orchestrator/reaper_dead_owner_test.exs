@@ -35,8 +35,7 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       repo: Repo,
       reap_owner: "m2",
       reap_grace_ms: 0,
-      reap_dead_owner_after_ms: @window,
-      reap_dead_owners: true
+      reap_dead_owner_after_ms: @window
     )
 
     :ok = Store.renew_lease("m1", now() - 1)
@@ -258,30 +257,21 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       assert log =~ "leaving #{compute.id} (#{@name}) alone"
     end
 
-    # Off by default until lease rows are signed (#148): one INSERT into
-    # `atlas_owner_leases` must not delete a live node's pods on a host that
-    # never opted in.
-    test "with reap_dead_owners unset, the pod is left alone and logged", %{lease: lease} do
-      orchestrator = Application.get_env(:ex_atlas, :orchestrator)
-
-      Application.put_env(
-        :ex_atlas,
-        :orchestrator,
-        Keyword.delete(orchestrator, :reap_dead_owners)
-      )
-
+    # On by default since lease rows are signed (#148); the setup sets no
+    # `reap_dead_owners`.
+    test "with reap_dead_owners unset, a signed dead owner's pod is deleted", %{lease: lease} do
+      refute Keyword.has_key?(Application.get_env(:ex_atlas, :orchestrator), :reap_dead_owners)
       dead!(lease)
       compute = pod()
 
-      log = reap()
+      reap()
 
-      assert status(compute) == :running
-      assert log =~ "leaving #{compute.id} (#{@name}) alone"
+      assert status(compute) == :terminated
     end
 
-    # Anything but `true` keeps the pod, so a mistyped value fails toward
-    # leaving pods alone.
-    for value <- [false, "true", nil] do
+    # `false` is the off switch. Any value but `true` or none keeps the pod,
+    # so a mistyped value fails toward leaving pods alone.
+    for value <- [false, "true", "false", nil] do
       test "reap_dead_owners: #{inspect(value)} leaves the pod alone and logged",
            %{lease: lease} do
         TestOrchestrator.put_env(reap_dead_owners: unquote(value))
