@@ -384,10 +384,8 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       unchanged =
         from(l in Lease, where: l.owner == ^owner and l.expires_at == ^at, select: l.owner)
 
-      query =
-        from(r in Row,
-          where: r.id == ^id and r.owner == ^owner and r.owner in subquery(unchanged)
-        )
+      # `unchanged` holds `owner` or nothing, so this also matches the column.
+      query = from(r in Row, where: r.id == ^id and r.owner in subquery(unchanged))
 
       outside_transaction(fn ->
         try do
