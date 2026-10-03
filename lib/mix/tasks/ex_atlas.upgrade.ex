@@ -42,6 +42,11 @@ if Code.ensure_loaded?(Igniter) do
     secret:`: without it tracking records are unsigned, so an adopted task
     cannot respawn and adopts only a pod the Reaper would delete. Always adds a
     notice linking the [upgrading guide](upgrading.html).
+
+    `0.10.0` — edits no file. Adds a notice when a config file sets
+    `tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto`: the host adds a
+    migration calling `Migration.up(version: 3)`, which signs owner lease rows.
+    Always adds a notice linking the [upgrading guide](upgrading.html).
     """
 
     use Igniter.Mix.Task
@@ -84,7 +89,8 @@ if Code.ensure_loaded?(Igniter) do
       %{
         "0.2.0" => &upgrade_0_1_to_0_2/2,
         "0.8.0" => &upgrade_0_7_to_0_8/2,
-        "0.9.0" => &upgrade_0_8_to_0_9/2
+        "0.9.0" => &upgrade_0_8_to_0_9/2,
+        "0.10.0" => &upgrade_0_9_to_0_10/2
       }
     end
 
@@ -128,6 +134,16 @@ if Code.ensure_loaded?(Igniter) do
       igniter
       |> OrchestratorConfig.notice_callback_secret()
       |> Igniter.add_notice("Upgrading to 0.9.0: #{@guide_url}")
+    end
+
+    # 0.9 → 0.10 migration.
+    #
+    # Edits no file. Migration step 3 signs owner lease rows; the host's
+    # migrations are its own, so the upgrader names the step and writes none.
+    defp upgrade_0_9_to_0_10(igniter, _opts) do
+      igniter
+      |> OrchestratorConfig.notice_lease_mac()
+      |> Igniter.add_notice("Upgrading to 0.10.0: #{@guide_url}")
     end
 
     defp warn_provider_modules(igniter) do

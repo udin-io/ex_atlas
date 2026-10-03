@@ -20,17 +20,21 @@ if Code.ensure_loaded?(Ecto.Migration) do
     ## Versions
 
     `up/1` and `down/1` take `version:`, which names the last step to run,
-    2 by default:
+    3 by default:
 
       * Step 1 creates `atlas_tracking_records`.
       * Step 2 creates `atlas_owner_leases`: one row per `:reap_owner`, with
         the time its lease expires, so a live node can take over the records
         of a dead one.
+      * Step 3 adds a nullable `mac` column to `atlas_owner_leases`: each
+        node signs its lease row, so a database writer without the callback
+        secret cannot fake a dead owner.
 
-    A host that ran step 1 writes a new migration that calls
-    `up(version: 2)`. Every step creates only what is missing, so running
-    step 1 again is harmless. `down(version: n)` reverses the steps from the
-    newest down to `n`; `down/0` drops both tables.
+    A host whose migrations ran an earlier step writes a new migration that
+    calls `up(version: 3)`. Every step creates only what is missing, so a
+    fresh database that runs `up/0` and then that migration is fine.
+    `down(version: n)` reverses the steps from the newest down to `n`;
+    `down/0` drops both tables.
 
     Both run only inside a migration: outside `Ecto.Migrator`'s runner,
     `Ecto.Migration`'s commands raise, so a `down/0` typed into a release
@@ -41,7 +45,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     @table :atlas_tracking_records
     @leases :atlas_owner_leases
-    @current 2
+    @current 3
 
     @doc "Run the steps up to `version:` (default #{@current})."
     @spec up(keyword()) :: :ok
@@ -90,5 +94,37 @@ if Code.ensure_loaded?(Ecto.Migration) do
     end
 
     defp step(2, :down), do: drop_if_exists(table(@leases))
+
+    # SQLite has no `ADD COLUMN IF NOT EXISTS`, so it reads the table's
+    # columns first; `flush/0` runs the steps queued before this one.
+    defp step(3, :up) do
+      if sqlite?() do
+        flush()
+        unless mac_column?(), do: alter(table(@leases), do: add(:mac, :binary))
+      else
+        alter(table(@leases), do: add_if_not_exists(:mac, :binary))
+      end
+    end
+
+    defp step(3, :down) do
+      if sqlite?() do
+        if mac_column?(), do: alter(table(@leases), do: remove(:mac))
+      else
+        alter(table(@leases), do: remove_if_exists(:mac, :binary))
+      end
+    end
+
+    defp sqlite?, do: repo().__adapter__() == Ecto.Adapters.SQLite3
+
+    defp mac_column? do
+      %{rows: rows} =
+        repo().query!(
+          "SELECT 1 FROM pragma_table_info('#{@leases}') WHERE name = 'mac'",
+          [],
+          log: false
+        )
+
+      rows != []
+    end
   end
 end

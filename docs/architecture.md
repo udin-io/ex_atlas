@@ -102,6 +102,8 @@ classDiagram
     get(id) ok or error
     delete(id) ok
     all() ok or error
+    lease_mac(owner, expires_at_ms) mac or nil
+    lease_signed(owner, expires_at_ms, mac) boolean
   }
   class Ecto {
     start_link(opts) ignore
@@ -109,12 +111,14 @@ classDiagram
     record column holds term_to_binary
     renew_lease(owner, expires_at_ms)
     claim_expired(claimer, now_ms, rewrite)
+    expired_leases(now_ms) expiry and mac per owner
   }
   class Migration {
     up(opts)
     down(opts)
     step 1 creates atlas_tracking_records
     step 2 creates atlas_owner_leases
+    step 3 adds the mac column
   }
   class Lease {
     GenServer after the Adopter
@@ -133,7 +137,8 @@ classDiagram
   Ecto ..> Migration : reads the table it creates
   Application ..> Supervisor : children() when start_orchestrator is true
   Supervisor ..> Lease : starts with a lease store and reap_owner
-  Lease ..> Ecto : renew_lease and claim_expired
+  Lease ..> Ecto : renew_lease, claim_expired, expired_leases
+  Lease ..> TrackingStore : lease_signed? on each expired row
 ```
 
 When the store cannot answer, nothing is reaped: `all/0` returns an error and
@@ -178,31 +183,36 @@ m2's Registry, so the Reaper leaves it alone.
 ### A dead owner's untracked pods
 
 A pod m1 spawned without `persist: true` has no record to claim. Each
+renewal writes the lease row with a MAC of owner and expiry
+(`TrackingStore.lease_mac/2`, key from the callback secret, #148). Each
 renewal also reads the expired leases (`expired_leases/1`, #144) and watches
-each owner with its expiry on m2's monotonic clock. Once m1's expiry has
-stayed the same for `:reap_dead_owner_after_ms`, m2's Reaper deletes m1's
-untracked pods. This is off unless `reap_dead_owners: true` until lease rows
-are signed (#148):
+each owner whose MAC m2's key verifies, with its expiry, on m2's monotonic
+clock. An unsigned row, or one signed under another secret, is never
+watched. Once m1's expiry has stayed the same for
+`:reap_dead_owner_after_ms`, m2's Reaper deletes m1's untracked pods, unless
+`reap_dead_owners: false` is set:
 
 ```mermaid
 sequenceDiagram
+  participant L1 as Lease on m1
   participant L2 as Lease on m2
   participant Store as TrackingStore.Ecto
   participant R2 as Reaper on m2
   participant Peers as connected nodes
   participant P as Provider
+  L1->>Store: renew_lease(m1, T), row m1, T, mac, until m1 dies
   L2->>Store: renew_lease(m2, now + ttl), every ttl / 3
   L2->>Store: expired_leases(now)
-  Store-->>L2: m1 expires_at T
-  Note over L2: watch m1 with T on the monotonic clock. A moved T, a failed renewal or read, or a ttl gap starts it again
+  Store-->>L2: m1 with T and mac, and any row a writer inserted
+  Note over L2: keep rows whose mac lease_signed? verifies. Watch m1 with T on the monotonic clock. A moved T, a failed renewal or read, or a ttl gap starts it again
   R2->>Peers: Ownership.owner() over erpc
   Peers-->>R2: owners of live connected nodes, or no valid answer
   R2->>P: list_compute()
   P-->>R2: atlas-m1-notebook-3 billing, untracked, no record, past grace
   R2->>L2: dead_owners(), after the list
-  L2->>Store: expired_leases(now), to confirm T
+  L2->>Store: expired_leases(now), to confirm T with a verified mac
   L2-->>R2: m1 with T, or none when a window has not passed or m2 last renewed a ttl ago
-  alt m1 dead, no peer reports m1, every peer named a valid owner, reap_dead_owners on
+  alt m1 dead, no peer reports m1, every peer named a valid owner, reap_dead_owners not false
     R2->>P: ExAtlas.terminate(id)
     R2->>R2: warning, deleted pod of dead owner m1
   else otherwise

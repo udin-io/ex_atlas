@@ -293,7 +293,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   Optional. A store that implements it and `c:claim_expired/3` lets a live
   node take over the records of a node whose lease expired; see
-  `ExAtlas.Orchestrator.Lease`.
+  `ExAtlas.Orchestrator.Lease`. With `c:expired_leases/1`, the store also
+  keeps `lease_mac(owner, expires_at_ms)` beside the expiry, replacing the
+  last one.
   """
   @callback renew_lease(owner :: String.t(), expires_at_ms :: integer()) ::
               :ok | {:error, term()}
@@ -317,14 +319,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   @doc """
   Every owner whose lease expired before `now_ms`, with its expiry in
-  wall-clock ms.
+  wall-clock ms and the MAC `c:renew_lease/2` stored with it, byte for byte,
+  or `nil`: `%{"m1" => {1_790_000_000_000, <<...>>}}`.
 
   Optional. With it, `ExAtlas.Orchestrator.Lease` watches each expired
-  owner, and the Reaper deletes the untracked pods of one whose lease stayed
-  expired and unchanged for `:reap_dead_owner_after_ms`.
+  owner whose MAC this node's key verifies (`lease_signed?/3`), and the
+  Reaper deletes the untracked pods of one whose lease stayed expired and
+  unchanged for `:reap_dead_owner_after_ms`. A row whose MAC does not verify
+  is never dead.
   """
   @callback expired_leases(now_ms :: integer()) ::
-              {:ok, %{optional(String.t()) => integer()}} | {:error, term()}
+              {:ok, %{optional(String.t()) => {integer(), binary() | nil}}} | {:error, term()}
 
   @optional_callbacks renew_lease: 2, claim_expired: 3, expired_leases: 1
 
@@ -576,18 +581,59 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     if sealed?, do: seal(record), else: Map.delete(record, :mac)
   end
 
+  @seal_salt "ex_atlas tracking record v1"
+  @lease_salt "ex_atlas owner lease v1"
+
+  @doc """
+  The MAC a store writes beside `owner`'s lease expiry, or `nil` when this
+  node has no usable callback secret.
+
+  The key is derived from the callback secret like `seal/1`'s, with a salt
+  of its own, so a lease MAC never passes as a record's.
+  """
+  @spec lease_mac(String.t(), integer()) :: binary() | nil
+  def lease_mac(owner, expires_at_ms) when is_binary(owner) and is_integer(expires_at_ms) do
+    case key(@lease_salt) do
+      nil -> nil
+      key -> lease_mac(key, owner, expires_at_ms)
+    end
+  end
+
+  @doc """
+  Whether `mac` is this node's `lease_mac/2` over `owner` and `expires_at_ms`.
+
+  `false` for no MAC, and for one written under another secret or over
+  another owner or expiry.
+  """
+  @spec lease_signed?(String.t(), integer(), term()) :: boolean()
+  def lease_signed?(owner, expires_at_ms, mac)
+      when is_binary(owner) and is_integer(expires_at_ms) and is_binary(mac) do
+    case key(@lease_salt) do
+      nil -> false
+      key -> Plug.Crypto.secure_compare(mac, lease_mac(key, owner, expires_at_ms))
+    end
+  end
+
+  def lease_signed?(_owner, _expires_at_ms, _mac), do: false
+
+  defp lease_mac(key, owner, expires_at_ms) do
+    bytes = :erlang.term_to_binary({owner, expires_at_ms}, [:deterministic])
+    :crypto.mac(:hmac, :sha256, key, bytes)
+  end
+
   defp mac(key, record) do
     bytes = :erlang.term_to_binary(Map.delete(record, :mac), [:deterministic])
     :crypto.mac(:hmac, :sha256, key, bytes)
   end
 
-  # A salt of its own, so the key that signs records signs no callback token.
-  @seal_salt "ex_atlas tracking record v1"
+  defp seal_key, do: key(@seal_salt)
 
-  defp seal_key do
+  # Each use has a salt of its own, so the key that signs records signs no
+  # callback token and no lease row.
+  defp key(salt) do
     case Application.get_env(:ex_atlas, :callback, [])[:secret] do
       secret when is_binary(secret) and byte_size(secret) >= 32 ->
-        Plug.Crypto.KeyGenerator.generate(secret, @seal_salt, cache: Plug.Crypto.Keys)
+        Plug.Crypto.KeyGenerator.generate(secret, salt, cache: Plug.Crypto.Keys)
 
       _none_or_unusable ->
         nil

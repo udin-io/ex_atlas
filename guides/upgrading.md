@@ -1,5 +1,50 @@
 # Upgrading
 
+## Upgrading to the next release (unreleased)
+
+The Ecto store signs owner lease rows, and a live node now deletes a dead
+owner's untracked pods by default.
+
+| Change | Who acts | Section |
+|---|---|---|
+| `Migration` step 3 adds a `mac` column to `atlas_owner_leases` | You use `TrackingStore.Ecto` and your migrations ran before this release | [Run step 3](#ecto-store-run-step-3) |
+| Dead-owner deletion is on by default | You use `TrackingStore.Ecto` and want it off | [Run step 3](#ecto-store-run-step-3) |
+
+`mix igniter.upgrade ex_atlas` prints a notice when a config file sets the
+Ecto store. It writes no migration.
+
+### Ecto store: run step 3
+
+Add a migration:
+
+```elixir
+defmodule MyApp.Repo.Migrations.SignAtlasOwnerLeases do
+  use Ecto.Migration
+
+  def up, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)
+  def down, do: ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.down(version: 3)
+end
+```
+
+Step 3 adds the column only when it is missing, so a fresh database that runs
+your install migration (`up/0`, every step) and then this one works.
+
+- Until it runs, each node renews its lease without a signature, logs one
+  warning per boot naming `up(version: 3)`, and reads no owner as dead.
+  Takeover of a dead owner's records works as before.
+- After it runs, each live node signs its row on its next renewal, within
+  `lease_ttl_ms / 3`. A row written before that, by a node that died before
+  the upgrade, stays unsigned: that owner's untracked pods are logged and
+  left, as in 0.9.0. Delete them by hand.
+- A node signs and verifies with `config :ex_atlas, :callback, secret:`.
+  Nodes with different secrets, or rows written before you rotated the
+  secret, read each other's rows as unsigned and never as dead.
+- To keep dead-owner deletion off:
+  `config :ex_atlas, :orchestrator, reap_dead_owners: false`.
+- A 0.9.0 node with `reap_dead_owners: true` still reads unsigned rows as
+  dead. Remove that setting from old nodes before you run step 3, or finish
+  the rollout first.
+
 ## Upgrading to 0.9.0
 
 0.9.0 changes what a node adopts after a restart. Five changes need action

@@ -107,33 +107,35 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   ## A dead owner's pods
 
-  Off by default until lease rows are signed (issue 148). With
-  `reap_dead_owners: true`, `ExAtlas.Orchestrator.TrackingStore.Ecto` and a
-  running `ExAtlas.Orchestrator.Lease`, the Reaper also deletes an untracked pod
+  With `ExAtlas.Orchestrator.TrackingStore.Ecto` and a running
+  `ExAtlas.Orchestrator.Lease`, the Reaper also deletes an untracked pod
   whose name carries another owner, once `ExAtlas.Orchestrator.Lease.dead_owners/0`
-  reports that owner dead: its lease stayed expired, with the same expiry,
-  for `:reap_dead_owner_after_ms` (15 minutes by default) while this node
-  renewed its own. The rules above still hold: the pod bills, is in neither
-  the Registry nor the store, carries the prefix and is past grace. The
-  Reaper reads the dead owners again after each provider's list, just before
-  it deletes. It keeps the pod when a connected node reports that owner, and
-  when any connected node reports no valid owner or cannot report one. Each
-  deletion logs a warning with the owner and its lease's expiry.
+  reports that owner dead: its signed lease row stayed expired, with the same
+  expiry, for `:reap_dead_owner_after_ms` (15 minutes by default) while this
+  node renewed its own. The rules above still hold: the pod bills, is in
+  neither the Registry nor the store, carries the prefix and is past grace.
+  The Reaper reads the dead owners again after each provider's list, just
+  before it deletes. It keeps the pod when a connected node reports that
+  owner, and when any connected node reports no valid owner or cannot report
+  one. Each deletion logs a warning with the owner and its lease's expiry.
 
-  The deletion trusts `atlas_owner_leases`. These live nodes read as dead
-  after the window, and lose their untracked pods, unless clustered with
-  this node: one cut off from the database; one that runs no Lease (no
-  callback secret, the DETS store, an older release) and has an expired row,
-  written once by itself or by anyone who can write that table; and one
-  whose row a writer keeps pinning to an old expiry. Cluster the nodes, let
-  only the app write the table, and give every node the same
-  `lease_ttl_ms`. Issue 148 signs the rows and turns the deletion on by
-  default. Until then, opt in:
+  Each node signs its lease row with a key from its callback secret, and a
+  row this node's key does not verify is never dead (issue 148). A writer of
+  `atlas_owner_leases` without the secret therefore cannot forge a row, but
+  can replay an old signed one. These live nodes still read as dead after
+  the window, and lose their untracked pods, unless clustered with this
+  node: one cut off from the database; one that renewed signed rows and then
+  stopped renewing (its callback secret removed, moved to DETS); and one
+  whose old signed row a writer puts back and keeps there for the whole
+  window, by rewriting it in a loop or by holding a row lock that blocks its
+  renewals. Cluster the nodes, let only the app write the
+  table, and give every node the same `lease_ttl_ms`. To turn the deletion
+  off:
 
-      config :ex_atlas, :orchestrator, reap_dead_owners: true
+      config :ex_atlas, :orchestrator, reap_dead_owners: false
 
-  Any other value, or none, leaves it off. A pod a dead owner's record still
-  names stays, as today.
+  Unset or `true` turns it on; any other value leaves it off. A pod a dead
+  owner's record still names stays, as today.
 
   ## The grace window
 
@@ -314,13 +316,12 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp live_dead_owners({_peer_owners, [_unsure | _]}), do: %{}
   defp live_dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
 
-  # Off unless set to `true`: lease rows are not signed yet (issue 148), so a
-  # writer of the lease table could fake a dead owner. A mistyped value leaves
-  # pods alone rather than deleting them.
+  # On unless set to anything but `true`: `false` is the off switch, and a
+  # mistyped value leaves pods alone rather than deleting them.
   defp reap_dead_owners? do
     :ex_atlas
     |> Application.get_env(:orchestrator, [])
-    |> Keyword.get(:reap_dead_owners, false)
+    |> Keyword.get(:reap_dead_owners, true)
     |> Kernel.==(true)
   end
 

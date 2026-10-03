@@ -337,4 +337,55 @@ defmodule Mix.Tasks.ExAtlas.UpgradeTest do
       refute Enum.any?(igniter.notices, &(&1 =~ ":reap_owner"))
     end
   end
+
+  describe "0.9.0 to 0.10.0" do
+    defp upgrade_0_9(files), do: upgrade(["0.9.0", "0.10.0"], files)
+
+    defp mac_notice?(igniter), do: Enum.any?(igniter.notices, &(&1 =~ "up(version: 3)"))
+
+    test "tells a host on the Ecto store to run migration step 3" do
+      igniter =
+        upgrade_0_9(%{
+          "config/config.exs" => """
+          import Config
+          config :ex_atlas, :orchestrator, tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto
+          """
+        })
+
+      assert_has_notice(igniter, fn notice ->
+        notice =~ "ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)" and
+          notice =~ "`down(version: 3)`" and notice =~ "no owner reads as dead" and
+          notice =~ "reap_dead_owners: false" and notice =~ @guide
+      end)
+
+      assert_unchanged(igniter)
+    end
+
+    test "finds the Ecto store inside a runtime.exs block, in the keyword form" do
+      igniter =
+        upgrade_0_9(%{
+          "config/runtime.exs" => """
+          import Config
+
+          if config_env() == :prod do
+            config :ex_atlas, orchestrator: [tracking_store: ExAtlas.Orchestrator.TrackingStore.Ecto]
+          end
+          """
+        })
+
+      assert mac_notice?(igniter)
+    end
+
+    test "control: stays quiet on the DETS store, and with no store set" do
+      for config <- [
+            "config :ex_atlas, :orchestrator, tracking_store: ExAtlas.Orchestrator.TrackingStore.Dets",
+            "config :ex_atlas, start_orchestrator: true"
+          ] do
+        igniter = upgrade_0_9(%{"config/config.exs" => "import Config\n" <> config <> "\n"})
+
+        refute mac_notice?(igniter)
+        assert_has_notice(igniter, &(&1 == "Upgrading to 0.10.0: #{@guide}"))
+      end
+    end
+  end
 end

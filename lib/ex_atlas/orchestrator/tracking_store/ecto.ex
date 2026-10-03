@@ -15,13 +15,15 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
   defmodule ExAtlas.Orchestrator.TrackingStore.Ecto.Lease do
     @moduledoc false
-    # The table migration step 2 creates: one row per `:reap_owner`.
+    # The table migration step 2 creates: one row per `:reap_owner`. Step 3
+    # adds `mac`.
 
     use Ecto.Schema
 
     @primary_key {:owner, :string, autogenerate: false}
     schema "atlas_owner_leases" do
       field(:expires_at, :utc_datetime_usec)
+      field(:mac, :binary)
       timestamps(type: :utc_datetime_usec)
     end
   end
@@ -70,12 +72,18 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     records of an owner whose lease expired. Each record is claimed by one
     conditional `UPDATE` that re-checks the old owner and its expired lease,
     so two live nodes never both adopt it. `expired_leases/1` lists the
-    expired rows for the Lease's dead-owner watch, and with
-    `reap_dead_owners: true` the Reaper deletes the untracked pods of an owner
-    that stays dead (`:reap_dead_owner_after_ms`).
+    expired rows for the Lease's dead-owner watch, and the Reaper deletes the
+    untracked pods of an owner that stays dead (`:reap_dead_owner_after_ms`).
     A host that ran step 1 adds a
     migration calling `Migration.up(version: 2)`; until then the lease
     renewal logs a warning every tick and claims nothing.
+
+    Step 3 adds a `mac` column: each renewal writes
+    `ExAtlas.Orchestrator.TrackingStore.lease_mac/2` beside the expiry, and
+    the Lease reads an owner as dead only from a row its key verifies. On a
+    table without step 3 the renewal writes no `mac`, every row reads
+    unsigned so no owner is dead, and `start_link/1` logs one warning per
+    boot.
 
     ## What a row holds
 
@@ -121,6 +129,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     require Logger
 
+    alias ExAtlas.Orchestrator.TrackingStore
     alias ExAtlas.Orchestrator.TrackingStore.Ecto.{Lease, Row}
 
     # A record is a few KB. The cap bounds what one row costs to decode.
@@ -151,7 +160,28 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
                 "application's children."
       end
 
+      warn_unsigned_leases(repo)
       :ignore
+    end
+
+    # Once per boot: a lease table from step 2 renews unsigned rows, and no
+    # owner reads as dead. Silent when the table is missing or unreadable;
+    # the lease's own calls log that.
+    defp warn_unsigned_leases(repo) do
+      if readable?(repo, :owner) and not readable?(repo, :mac) do
+        Logger.warning(
+          "[ExAtlas.Orchestrator.TrackingStore.Ecto] atlas_owner_leases has no mac column, so " <>
+            "lease rows are unsigned and no owner reads as dead. Add a migration calling " <>
+            "ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)."
+        )
+      end
+    end
+
+    defp readable?(repo, column) do
+      _ = repo.all(from(l in Lease, select: field(l, ^column), limit: 0), log: false)
+      true
+    rescue
+      _error -> false
     end
 
     @impl ExAtlas.Orchestrator.TrackingStore
@@ -290,32 +320,54 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       now = DateTime.utc_now()
       expires_at = usec(expires_at_ms)
       row = %{owner: owner, expires_at: expires_at, inserted_at: now, updated_at: now}
+      signed = Map.put(row, :mac, TrackingStore.lease_mac(owner, expires_at_ms))
 
-      # The write runs in a linked task, so its raise is caught there.
+      # The write runs in a linked task, so its raise is caught there. A
+      # table without step 3 has no `mac`: renew unsigned rather than not
+      # at all, or this node would lose its records to a claimer.
       outside_transaction(fn ->
-        try do
-          repo.insert_all(Lease, [row],
-            on_conflict: {:replace, [:expires_at, :updated_at]},
-            conflict_target: [:owner]
-          )
-
-          :ok
-        rescue
-          error -> {:error, error}
-        end
+        with {:error, _reason} = error <- upsert_lease(repo, signed, [:expires_at, :mac]),
+             do: renew_unsigned(repo, row, error)
       end)
+    end
+
+    defp renew_unsigned(repo, row, error) do
+      if readable?(repo, :mac), do: error, else: upsert_lease(repo, row, [:expires_at])
+    end
+
+    defp upsert_lease(repo, row, columns) do
+      repo.insert_all(Lease, [row],
+        on_conflict: {:replace, columns ++ [:updated_at]},
+        conflict_target: [:owner]
+      )
+
+      :ok
+    rescue
+      error -> {:error, error}
     end
 
     defp usec(ms), do: DateTime.from_unix!(ms * 1_000, :microsecond)
 
     @impl ExAtlas.Orchestrator.TrackingStore
     def expired_leases(now_ms) when is_integer(now_ms) do
-      now = usec(now_ms)
+      repo = repo!()
+      expired = from(l in Lease, where: l.expires_at < ^usec(now_ms))
 
+      # A table without step 3 has no `mac`: every row reads unsigned. Any
+      # other failure, such as a `mac` that will not load, is an error.
       leases =
-        repo!().all(from(l in Lease, where: l.expires_at < ^now, select: {l.owner, l.expires_at}))
+        try do
+          repo.all(from(l in expired, select: {l.owner, l.expires_at, l.mac}))
+        rescue
+          error ->
+            if readable?(repo, :mac), do: reraise(error, __STACKTRACE__)
+            repo.all(from(l in expired, select: {l.owner, l.expires_at, nil}))
+        end
 
-      {:ok, Map.new(leases, fn {owner, at} -> {owner, DateTime.to_unix(at, :millisecond)} end)}
+      {:ok,
+       Map.new(leases, fn {owner, at, mac} ->
+         {owner, {DateTime.to_unix(at, :millisecond), mac}}
+       end)}
     rescue
       error -> {:error, error}
     end

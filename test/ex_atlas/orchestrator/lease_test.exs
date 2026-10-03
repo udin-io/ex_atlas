@@ -68,6 +68,18 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
     defp failing?(call), do: call in Application.get_env(:ex_atlas, :lease_test_failing, [])
   end
 
+  defmodule ListedExpired do
+    @moduledoc false
+    # A custom store whose expired_leases/1 answers a list, outside the contract.
+    alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
+
+    defdelegate all(), to: Store
+    defdelegate get(id), to: Store
+    defdelegate renew_lease(owner, expires_at_ms), to: Store
+    defdelegate claim_expired(claimer, now_ms, rewrite), to: Store
+    def expired_leases(_now_ms), do: {:ok, [{"m1", 1}]}
+  end
+
   defmodule NoExpiredLeases do
     @moduledoc false
     # A custom store with leases and claims, written before expired_leases/1.
@@ -159,6 +171,22 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
   end
 
   defp expire!(owner), do: :ok = Store.renew_lease(owner, now() - 1)
+
+  defp lease_row(owner) do
+    {:ok, %{^owner => {at, mac}}} = Store.expired_leases(now() + 3_600_000)
+    {at, mac}
+  end
+
+  defp with_secret(secret, fun) do
+    previous = Application.get_env(:ex_atlas, :callback)
+    Application.put_env(:ex_atlas, :callback, secret: secret)
+
+    try do
+      fun.()
+    after
+      Application.put_env(:ex_atlas, :callback, previous)
+    end
+  end
 
   defp lease_expiry(owner) do
     %{rows: [[expires_at]]} =
@@ -471,6 +499,107 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       LeaseClock.run_for!(lease, 2 * @window)
 
       assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    # Issue 148: anyone who can write `atlas_owner_leases` writes these rows.
+    # Each row below differs from m1's own signed row in one thing only.
+    test "an expired row with no mac is never dead; control: m1's own signed row is" do
+      expire!("m1")
+      :ok = Repo.put_lease!("m5", now() - 1)
+      lease = watching_lease!("m2")
+
+      LeaseClock.run_for!(lease, 2 * @window)
+
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "a row signed under another callback secret is never dead" do
+      at = now() - 1
+      mac = with_secret(String.duplicate("b", 40), fn -> TrackingStore.lease_mac("m5", at) end)
+      :ok = Repo.put_lease!("m5", at, mac)
+      expire!("m1")
+      lease = watching_lease!("m2")
+
+      LeaseClock.run_for!(lease, 2 * @window)
+
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "m1's mac copied onto another owner's row is never dead" do
+      expire!("m1")
+      {at, mac} = lease_row("m1")
+      :ok = Repo.put_lease!("m5", at, mac)
+      lease = watching_lease!("m2")
+
+      LeaseClock.run_for!(lease, 2 * @window)
+
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    # A stale copy: m1's signed row, its expiry moved and its mac kept.
+    test "m1's row with its expiry moved and its mac kept is never dead" do
+      expire!("m1")
+      {at, mac} = lease_row("m1")
+      :ok = Repo.put_lease!("m1", at - 60_000, mac)
+      lease = watching_lease!("m2")
+
+      LeaseClock.run_for!(lease, 2 * @window)
+
+      assert Lease.dead_owners() == %{}
+    end
+
+    # The confirming read at the call verifies too: m1 dies signed, then a
+    # writer swaps in an unsigned row with the same expiry.
+    test "a row that loses its mac after the window is not dead at the call" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      LeaseClock.run_for!(lease, @window)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+
+      {at, _mac} = lease_row("m1")
+      :ok = Repo.put_lease!("m1", at)
+
+      assert Lease.dead_owners() == %{}
+    end
+
+    # Each rewrite of m1's row, then a restart: the verdict holds.
+    test "after a signed renewal and a restart, m1 is dead after a full window" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      LeaseClock.run_for!(lease, @step)
+      :ok = Store.renew_lease("m1", now() - 2)
+
+      lease = LeaseClock.restart!(lease)
+
+      LeaseClock.run_for!(lease, @window - 1)
+      assert Lease.dead_owners() == %{}
+      LeaseClock.run_for!(lease, 1)
+      assert Map.keys(Lease.dead_owners()) == ["m1"]
+    end
+
+    test "after a 0.9.0-style renewal and a restart, m1 is never dead" do
+      expire!("m1")
+      lease = watching_lease!("m2")
+      LeaseClock.run_for!(lease, @window)
+      {_at, mac} = lease_row("m1")
+      :ok = Repo.put_lease!("m1", now() - 2, mac)
+
+      lease = LeaseClock.restart!(lease)
+
+      LeaseClock.run_for!(lease, 2 * @window)
+      assert Lease.dead_owners() == %{}
+    end
+
+    test "a store whose expired_leases/1 answers a list: nothing dead, the Lease runs, logged" do
+      log =
+        capture_log(fn ->
+          lease = watching_lease!("m2", store: ListedExpired)
+          LeaseClock.run_for!(lease, 2 * @window)
+          assert Lease.dead_owners() == %{}
+        end)
+
+      assert Process.alive?(Process.whereis(Lease))
+      assert log =~ "could not read expired leases"
     end
 
     test "answers %{} when no Lease runs" do
