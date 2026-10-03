@@ -1,8 +1,8 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #140 (#138, the
-last ticket of milestone 9). It feeds the choice of the next feature. Dates
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #147 (#144, slice
+1 of milestone 11). It feeds the choice of the next feature. Dates
 are merge dates.
 
 ## Next
@@ -20,10 +20,9 @@ the owner's live tests settle. The ranking is on #143. Two slices:
 
 | Slice | What it adds | Ticket |
 |---|---|---|
-| 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods | #144 |
+| 1 | `expired_leases/1` on the store, `Lease.dead_owners/0` and `:reap_dead_owner_after_ms`; the Reaper deletes a dead owner's untracked pods, opt-in with `reap_dead_owners: true` | #144, PR #147 |
 | 2 | A record a dead owner still holds after the window no longer shields its pod: the Reaper deletes the pod, then the record | #145 |
-
-Release 0.9.0 (#141) goes out first.
+| 3 | Owner lease rows are signed, so a database writer cannot fake a dead owner (review finding on PR #147); dead-owner deletion then turns on by default | #148 |
 
 Vast.ai (#98) shipped with slice 4. Its templates, network volumes,
 serverless, and SSH and Jupyter modes stay out of scope.
@@ -32,7 +31,7 @@ serverless, and SSH and Jupyter modes stay out of scope.
 
 | Feature | Ticket | State |
 |---|---|---|
-| Release 0.9.0 (milestone 10) | #141 | PR #142 open: version bump, the 0.9.0 section of `guides/upgrading.md`, and a `"0.9.0"` step in `mix ex_atlas.upgrade`. The owner publishes to Hex and pushes tag `v0.9.0` after the merge |
+| Dead owner's pods, slice 1 (milestone 11) | #144 | PR #147: the Reaper deletes a dead owner's untracked pods on the Ecto store, opt-in until #148 |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -41,6 +40,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Release 0.9.0 (milestone 10) | #142 (#141): version bump, the 0.9.0 section of `guides/upgrading.md`, and a `"0.9.0"` step in `mix ex_atlas.upgrade`. The owner publishes to Hex and pushes tag `v0.9.0` | 2026-10-02 |
 | Release 0.8.0 (milestone 7) | #95 (#94): version bump, `guides/upgrading.md`, and a `"0.8.0"` step in `mix ex_atlas.upgrade`. Published to Hex from tag `v0.8.0` on `939cf2e` | 2026-10-02 |
 | An unsigned tracking record adopts only a pod this node's Reaper would delete (milestone 9, risk 64) | #140 (#138) | 2026-10-02 |
 | A forged tracking record no longer steers an adopted task's calls, and an adopted task respawns only from a record this node signed (milestone 9, risk 63) | #130 (#125), #135 (#131) | 2026-10-02 |

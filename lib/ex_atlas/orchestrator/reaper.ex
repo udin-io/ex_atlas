@@ -83,8 +83,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
   (`atlas-train-42` becomes `atlas-m1-train-42`), and the Reaper deletes only
   untracked pods named with its own owner. It leaves every other pod alone and
   logs each one once per boot: another node's pods, pods named before the
-  owner was set, and pods of a node that is gone. Those last ones are the
-  operator's to delete. See `ExAtlas.Orchestrator.Ownership`.
+  owner was set, and pods of a node that is gone. With the Ecto store it
+  deletes that last kind once their owner is dead (below); otherwise they are
+  the operator's to delete. See `ExAtlas.Orchestrator.Ownership`.
 
   The Reaper reaps nothing, and logs an error, when:
 
@@ -103,6 +104,36 @@ defmodule ExAtlas.Orchestrator.Reaper do
   pods of machines that share the account without clustering. An owner set
   on only some machines therefore protects nothing: the machines without one
   still delete the others' pods.
+
+  ## A dead owner's pods
+
+  Off by default until lease rows are signed (issue 148). With
+  `reap_dead_owners: true`, `ExAtlas.Orchestrator.TrackingStore.Ecto` and a
+  running `ExAtlas.Orchestrator.Lease`, the Reaper also deletes an untracked pod
+  whose name carries another owner, once `ExAtlas.Orchestrator.Lease.dead_owners/0`
+  reports that owner dead: its lease stayed expired, with the same expiry,
+  for `:reap_dead_owner_after_ms` (15 minutes by default) while this node
+  renewed its own. The rules above still hold: the pod bills, is in neither
+  the Registry nor the store, carries the prefix and is past grace. The
+  Reaper reads the dead owners again after each provider's list, just before
+  it deletes. It keeps the pod when a connected node reports that owner, and
+  when any connected node reports no valid owner or cannot report one. Each
+  deletion logs a warning with the owner and its lease's expiry.
+
+  The deletion trusts `atlas_owner_leases`. These live nodes read as dead
+  after the window, and lose their untracked pods, unless clustered with
+  this node: one cut off from the database; one that runs no Lease (no
+  callback secret, the DETS store, an older release) and has an expired row,
+  written once by itself or by anyone who can write that table; and one
+  whose row a writer keeps pinning to an old expiry. Cluster the nodes, let
+  only the app write the table, and give every node the same
+  `lease_ttl_ms`. Issue 148 signs the rows and turns the deletion on by
+  default. Until then, opt in:
+
+      config :ex_atlas, :orchestrator, reap_dead_owners: true
+
+  Any other value, or none, leaves it off. A pod a dead owner's record still
+  names stays, as today.
 
   ## The grace window
 
@@ -128,7 +159,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
   require Logger
 
   alias ExAtlas.Config
-  alias ExAtlas.Orchestrator.{ComputeRegistry, Ownership, TrackingStore}
+  alias ExAtlas.Orchestrator.{ComputeRegistry, Lease, Ownership, TrackingStore}
 
   @default_interval_ms 60 * 1_000
 
@@ -222,10 +253,10 @@ defmodule ExAtlas.Orchestrator.Reaper do
     state = warn_silent_once(state, silent)
 
     case result do
-      {:ok, owner} ->
+      {:ok, owner, peers} ->
         left_alone =
           Enum.reduce(state.providers, state.left_alone, fn provider, seen ->
-            reap_provider(provider, state.prefix, state.grace_ms, owner, seen)
+            reap_provider(provider, state.prefix, state.grace_ms, {owner, peers}, seen)
           end)
 
         {:noreply, %{state | left_alone: left_alone, announced: nil}}
@@ -259,16 +290,38 @@ defmodule ExAtlas.Orchestrator.Reaper do
   defp ownership_gate({:ok, nil}) do
     if clustered_without_owner?(nil),
       do: {{:closed, :clustered_without_owner}, []},
-      else: {{:ok, nil}, []}
+      else: {{:ok, nil, :no_owner}, []}
   end
 
   defp ownership_gate({:ok, owner}) do
-    %{same: same, silent: silent} = ask_peers(owner)
+    %{same: same, silent: silent, owners: owners, unsure: unsure} = ask_peers(owner)
 
     case same do
-      [] -> {{:ok, owner}, silent}
+      [] -> {{:ok, owner, {owners, unsure}}, silent}
       nodes -> {{:closed, {:duplicate_owner, owner, nodes}}, silent}
     end
+  end
+
+  # A connected node that reports an owner is alive, whatever its lease says.
+  # One that reports no owner, an invalid one, or cannot report may be the
+  # dead owner itself (slow, misconfigured, on an old release), so with any
+  # such peer no owner reads as dead this tick.
+  defp dead_owners(peers) do
+    if reap_dead_owners?(), do: live_dead_owners(peers), else: %{}
+  end
+
+  defp live_dead_owners(:no_owner), do: %{}
+  defp live_dead_owners({_peer_owners, [_unsure | _]}), do: %{}
+  defp live_dead_owners({peer_owners, []}), do: Map.drop(Lease.dead_owners(), peer_owners)
+
+  # Off unless set to `true`: lease rows are not signed yet (issue 148), so a
+  # writer of the lease table could fake a dead owner. A mistyped value leaves
+  # pods alone rather than deleting them.
+  defp reap_dead_owners? do
+    :ex_atlas
+    |> Application.get_env(:orchestrator, [])
+    |> Keyword.get(:reap_dead_owners, false)
+    |> Kernel.==(true)
   end
 
   # Two nodes with one owner each read the other's pods as their own. Only a
@@ -281,10 +334,18 @@ defmodule ExAtlas.Orchestrator.Reaper do
     peers
     |> :erpc.multicall(Ownership, :owner, [], @peer_owner_timeout_ms)
     |> Enum.zip(peers)
-    |> Enum.reduce(%{same: [], silent: []}, fn
-      {{:ok, {:ok, ^owner}}, node}, acc -> %{acc | same: acc.same ++ [node]}
-      {{:error, _reason}, node}, acc -> %{acc | silent: acc.silent ++ [node]}
-      _answered, acc -> acc
+    |> Enum.reduce(%{same: [], silent: [], owners: [], unsure: []}, fn
+      {{:ok, {:ok, ^owner}}, node}, acc ->
+        %{acc | same: acc.same ++ [node]}
+
+      {{:ok, {:ok, other}}, _node}, acc when is_binary(other) ->
+        %{acc | owners: [other | acc.owners]}
+
+      {{:error, _reason}, node}, acc ->
+        %{acc | silent: acc.silent ++ [node], unsure: [node | acc.unsure]}
+
+      {_no_or_invalid_owner, node}, acc ->
+        %{acc | unsure: [node | acc.unsure]}
     end)
   end
 
@@ -365,8 +426,8 @@ defmodule ExAtlas.Orchestrator.Reaper do
     Enum.each(silent, &warn_silent/1)
 
     case result do
-      {:ok, owner} ->
-        Enum.each(providers, &reap_provider(&1, prefix, grace_ms, owner, MapSet.new()))
+      {:ok, owner, peers} ->
+        Enum.each(providers, &reap_provider(&1, prefix, grace_ms, {owner, peers}, MapSet.new()))
 
       {:closed, reason} ->
         log_closed(reason)
@@ -442,7 +503,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   # Returns the ids left alone so far, so a periodic Reaper logs each one once
   # per boot rather than once per tick.
-  defp reap_provider(provider, prefix, grace_ms, owner, left_alone) do
+  defp reap_provider(provider, prefix, grace_ms, {owner, peers}, left_alone) do
     case list_compute(provider) do
       {:ok, computes} ->
         tracked = registered_ids()
@@ -454,14 +515,84 @@ defmodule ExAtlas.Orchestrator.Reaper do
           |> Enum.filter(&orphan?(&1, tracked, store, prefix, now, grace_ms))
           |> Enum.split_with(&Ownership.ours?(&1.name, prefix, owner))
 
-        Enum.each(ours, fn compute ->
-          _ = ExAtlas.terminate(compute.id, provider: provider)
-        end)
+        # Read after the list, which can take tens of seconds: an owner that
+        # renewed meanwhile is no longer dead.
+        dead = if others == [], do: %{}, else: dead_owners(peers)
+        {dead_owners, others} = Enum.split_with(others, &dead_owner(&1, prefix, owner, dead))
+
+        Enum.each(ours, &delete_ours(&1, provider))
+
+        Enum.each(
+          dead_owners,
+          &delete_dead_owners(&1, provider, dead_owner(&1, prefix, owner, dead))
+        )
 
         Enum.reduce(others, left_alone, &leave_alone(&1, prefix, owner, &2))
 
       _ ->
         left_alone
+    end
+  end
+
+  # The dead owner `compute`'s name carries, or nil.
+  defp dead_owner(compute, prefix, owner, dead) do
+    case Ownership.classify(compute.name, prefix, owner) do
+      {:other, other} when is_map_key(dead, other) -> {other, Map.fetch!(dead, other)}
+      _ours_live_or_unowned -> nil
+    end
+  end
+
+  defp delete_ours(compute, provider) do
+    case delete_compute(compute, provider) do
+      :ok ->
+        :ok
+
+      {:error, error} ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] could not delete #{compute.id} (#{compute.name})" <>
+            "#{failure_kind(error)}; the next tick tries again"
+        )
+    end
+  end
+
+  defp delete_dead_owners(compute, provider, {other, expired_at}) do
+    case delete_compute(compute, provider) do
+      :ok ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] deleted #{compute.id} (#{compute.name}): owner " <>
+            "#{inspect(other)} has not renewed its lease since #{since(expired_at)}, and no " <>
+            "connected node reports it"
+        )
+
+      {:error, error} ->
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Reaper] could not delete #{compute.id} (#{compute.name}) of " <>
+            "dead owner #{inspect(other)}#{failure_kind(error)}; the next tick tries again"
+        )
+    end
+  end
+
+  # A delete that raises or exits skips that pod, not the tick: the rest of
+  # this provider's orphans, and every later provider's, still go. Only the
+  # error's kind is logged, never its message, which can carry a provider's
+  # response.
+  defp delete_compute(compute, provider) do
+    ExAtlas.terminate(compute.id, provider: provider)
+  rescue
+    error -> {:error, error}
+  catch
+    :exit, _reason -> {:error, :exit}
+  end
+
+  defp failure_kind(%ExAtlas.Error{kind: kind}), do: " (#{inspect(kind)})"
+  defp failure_kind(%{__exception__: true} = error), do: " (#{inspect(error.__struct__)})"
+  defp failure_kind(:exit), do: " (exited)"
+  defp failure_kind(_other), do: ""
+
+  defp since(ms) do
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, at} -> DateTime.to_iso8601(at)
+      {:error, _out_of_range} -> "#{ms} ms after the epoch"
     end
   end
 

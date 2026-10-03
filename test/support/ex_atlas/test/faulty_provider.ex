@@ -25,6 +25,8 @@ defmodule ExAtlas.Test.FaultyProvider do
       That is the window in which a resource exists upstream with nothing
       tracking it locally.
     * `:raise` — raise, the way `Client.fetch_key!/1` does on a missing key.
+    * `{:exit, reason}` — exit, the way an HTTP pool checkout that times out
+      does.
     * `{:error, error}` — return `{:error, error}`.
     * `{:error_once, error}` — return `{:error, error}` for the *next* call
       only, then disarm. A transient 5xx or socket blip, which callers are
@@ -58,7 +60,8 @@ defmodule ExAtlas.Test.FaultyProvider do
   def get_compute(id, ctx), do: with_fault(:get_compute, fn -> Mock.get_compute(id, ctx) end)
 
   @impl true
-  def list_compute(filters, ctx), do: Mock.list_compute(filters, ctx)
+  def list_compute(filters, ctx),
+    do: with_fault(:list_compute, fn -> Mock.list_compute(filters, ctx) end)
 
   @impl true
   def stop(id, ctx), do: Mock.stop(id, ctx)
@@ -117,6 +120,9 @@ defmodule ExAtlas.Test.FaultyProvider do
 
       :raise ->
         raise "simulated #{callback} failure"
+
+      {:exit, reason} ->
+        exit(reason)
 
       {:error, error} ->
         {:error, error}
