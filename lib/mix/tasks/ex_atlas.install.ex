@@ -5,7 +5,7 @@ if Code.ensure_loaded?(Igniter) do
     @moduledoc """
     Installs ExAtlas into your project.
 
-    Run this once after adding `{:ex_atlas, "~> 0.9"}` to `mix.exs`:
+    Run this once after adding `{:ex_atlas, "~> 0.10"}` to `mix.exs`:
 
         mix ex_atlas.install
 

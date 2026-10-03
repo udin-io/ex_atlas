@@ -24,7 +24,7 @@ directory, and wires `phoenix_pubsub` if your app uses Phoenix.
 Manual install — add to `mix.exs`:
 
 ```elixir
-{:ex_atlas, "~> 0.9"}
+{:ex_atlas, "~> 0.10"}
 ```
 
 ExAtlas is a regular OTP application — its supervision tree starts automatically.

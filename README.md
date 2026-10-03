@@ -83,7 +83,7 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_atlas, "~> 0.9"}
+    {:ex_atlas, "~> 0.10"}
   ]
 end
 ```
@@ -115,7 +115,7 @@ mix ex_atlas.upgrade
 `mix igniter.upgrade ex_atlas` passes your previous and new version, so the
 task runs only the steps between them. Run directly, `mix ex_atlas.upgrade`
 starts at 0.1.0 and runs every step; each step is idempotent.
-`mix ex_atlas.upgrade 0.8.0 0.9.0` runs one range.
+`mix ex_atlas.upgrade 0.9.0 0.10.0` runs one range.
 
 Coming from 0.8? Read [guides/upgrading.md](guides/upgrading.md): five changes
 in 0.9.0 decide which persisted tasks a node adopts after a restart. Coming from
