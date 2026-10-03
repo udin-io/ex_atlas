@@ -283,7 +283,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
   end
 
   describe "a Reaper that restarts after a failed adoption" do
-    test "stays disabled for the boot and says so" do
+    test "stays closed while the store cannot be read, and says so" do
       put_orchestrator_env(tracking_store: ExAtlas.Test.TrackingStore.Raising)
 
       sup = boot()
@@ -296,7 +296,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
         end)
 
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
-      assert log =~ "reaping is DISABLED for this boot"
+      assert log =~ "reaping is off until the tracking store reads"
     end
 
     test "stays disabled when the store is switched off before it restarts" do

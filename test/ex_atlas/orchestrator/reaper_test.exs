@@ -303,6 +303,124 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       # far the cheaper mistake.
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
     end
+
+    test "a failed adoption followed by a completed one reaps, and says so once",
+         %{reaper: reaper} do
+      {:ok, compute} = spawn_untracked()
+
+      log =
+        capture_log(fn ->
+          send(reaper, :adoption_failed)
+          :ok = tick(reaper)
+          :ok = tick(reaper)
+          assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+          send(reaper, :adoption_complete)
+          :ok = tick(reaper)
+        end)
+
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert [[closed]] = Regex.scan(~r/\[error\][^\n]*Reaper[^\n]*/, log)
+      assert closed =~ "reaping is off until the tracking store reads"
+      assert [[_resumed]] = Regex.scan(~r/\[info\][^\n]*Reaper[^\n]*reaping resumes/, log)
+    end
+
+    test "control: a first completed adoption logs no resume line", %{reaper: reaper} do
+      log =
+        capture_log(fn ->
+          send(reaper, :adoption_complete)
+          :ok = tick(reaper)
+        end)
+
+      refute log =~ "reaping resumes"
+    end
+  end
+
+  # Issue 155: the Adopter and the Reaper share a supervisor, which keys the
+  # recorded outcome. The Reaper restarts in between the failed read and the
+  # good one, and again after it.
+  describe "a Reaper restarted while the Adopter retries" do
+    alias ExAtlas.Orchestrator.Adopter
+
+    setup do
+      TestOrchestrator.put_env(
+        tracking_store: Memory,
+        reap_grace_ms: 0,
+        reap_interval_ms: 60_000,
+        reap_providers: [:mock],
+        reap_name_prefix: "atlas-"
+      )
+
+      start_supervised!(Memory)
+      Memory.fail_all(:database_down)
+
+      start_supervised!(%{
+        id: :reaper_and_adopter,
+        start:
+          {Supervisor, :start_link,
+           [
+             [Reaper, {Adopter, retry_after_ms: 10, max_retry_after_ms: 40}],
+             [strategy: :one_for_one]
+           ]},
+        type: :supervisor
+      })
+
+      :ok
+    end
+
+    test "reaps the untracked pod once the store reads, and after a later restart" do
+      {:ok, compute} = spawn_untracked()
+      await_gate(:failed)
+
+      reaper = restart_reaper()
+      assert :failed = :sys.get_state(reaper).adoption
+      :ok = tick(reaper)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+      Memory.fail_all(nil)
+      await_gate(:settled)
+      :ok = tick(Process.whereis(Reaper))
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(compute.id, provider: :mock)
+
+      {:ok, later} = spawn_untracked()
+      reaper = restart_reaper()
+      assert :settled = :sys.get_state(reaper).adoption
+      :ok = tick(reaper)
+      assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(later.id, provider: :mock)
+    end
+  end
+
+  defp restart_reaper do
+    old = Process.whereis(Reaper)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, :killed}, 2_000
+    await_new_reaper(old, 200)
+  end
+
+  defp await_new_reaper(old, tries) do
+    case Process.whereis(Reaper) do
+      pid when is_pid(pid) and pid != old ->
+        pid
+
+      _not_yet when tries > 0 ->
+        Process.sleep(10)
+        await_new_reaper(old, tries - 1)
+    end
+  end
+
+  defp await_gate(outcome, tries \\ 300) do
+    case :sys.get_state(Reaper).adoption do
+      ^outcome ->
+        :ok
+
+      _other when tries > 0 ->
+        Process.sleep(10)
+        await_gate(outcome, tries - 1)
+
+      other ->
+        flunk("the Reaper's gate stayed #{inspect(other)}")
+    end
   end
 
   # Issue 154: the gate is open, so the store's answer for the pod is the only
