@@ -61,6 +61,9 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   require Logger
 
   @table :ex_atlas_tracked
+  # The loss of whichever file the one `@table` has open, for `get/1`, which
+  # runs in the caller's process.
+  @loss_key {__MODULE__, :open_table_loss}
   @filename "tracked.dets"
 
   @impl ExAtlas.Orchestrator.TrackingStore
@@ -77,15 +80,20 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   end
 
   # `:error` means "not stored", and the Reaper deletes a pod on it, so a table
-  # that cannot answer raises. Every caller rescues the raise and keeps the pod.
+  # that cannot answer raises. So does a miss on a store that lost records: the
+  # record may be among the lost. Every caller rescues the raise and keeps the
+  # pod.
   @impl ExAtlas.Orchestrator.TrackingStore
   def get(id) do
     case lookup(id) do
       [{^id, record}] -> {:ok, record}
       {:error, reason} -> cannot_answer(id, reason_kind(reason))
-      _absent -> :error
+      _absent -> miss(id, :persistent_term.get(@loss_key, nil))
     end
   end
+
+  defp miss(_id, nil), do: :error
+  defp miss(id, {kind, _reason}), do: cannot_answer(id, kind)
 
   defp lookup(id) do
     :dets.lookup(@table, id)
@@ -155,6 +163,12 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     # Expanded, so every spelling of one file shares its mark.
     path = dir |> Path.join(@filename) |> Path.expand()
 
+    {:ok, state} = open_state(dir, path)
+    _ = put_new(@loss_key, state.degraded)
+    {:ok, state}
+  end
+
+  defp open_state(dir, path) do
     case open(path) do
       {:ok, table} ->
         _ = File.chmod(path, 0o600)
@@ -184,8 +198,15 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   # "records lost" into "these are all of them". It lives for the VM, keyed by
   # the file: the next boot reads the file as it stands.
   defp mark_lost(path, degraded) do
-    :persistent_term.put(lost_key(path), degraded)
+    _ = put_new(lost_key(path), degraded)
     degraded
+  end
+
+  # A put of the value already stored costs nothing; any other put or erase
+  # scans every process.
+  defp put_new(key, value) do
+    if :persistent_term.get(key, nil) != value, do: :persistent_term.put(key, value)
+    :ok
   end
 
   defp earlier_loss(path) do

@@ -342,6 +342,22 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
       assert log =~ "treating it as ours"
     end
 
+    # Adoption settled before the loss, so nothing re-reads `all/0`: the store's
+    # answer to `get/1` is all the Reaper has.
+    test "keeps a recorded pod after the store restarts over a corrupt file",
+         %{reaper: reaper, tmp_dir: dir} do
+      {:ok, compute} = spawn_untracked()
+      :ok = Dets.put(record_for(compute))
+      :ok = stop_supervised!(Dets)
+      File.write!(Path.join(dir, "tracked.dets"), :crypto.strong_rand_bytes(4_096))
+      capture_log(fn -> start_supervised!({Dets, storage_path: dir}) end)
+
+      log = capture_log(fn -> :ok = tick(reaper) end)
+
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+      assert log =~ "treating it as ours"
+    end
+
     test "control: with the store running, a pod it holds no record of is terminated",
          %{reaper: reaper} do
       {:ok, compute} = spawn_untracked()

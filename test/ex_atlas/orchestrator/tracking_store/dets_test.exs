@@ -162,6 +162,29 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
       assert {:error, {:store_recreated, _}} = Dets.all()
     end
 
+    test "raises on a miss, since the record may be among the lost, and answers a hit",
+         %{tmp_dir: dir} do
+      lost = Path.join(dir, "lost")
+      intact = Path.join(dir, "intact")
+      File.mkdir_p!(lost)
+      File.mkdir_p!(intact)
+      corrupt!(lost)
+      ExUnit.CaptureLog.capture_log(fn -> start_store!(lost) end)
+      :ok = Dets.put(record("compute-after-recreate"))
+
+      assert {:ok, %{id: "compute-after-recreate"}} = Dets.get("compute-after-recreate")
+      error = assert_raise ArgumentError, fn -> Dets.get("compute-lost") end
+      assert error.message =~ "store_recreated"
+
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(lost) end)
+      assert_raise ArgumentError, fn -> Dets.get("compute-lost") end
+
+      # Control: a store on an intact file answers a miss as "not stored".
+      :ok = stop_supervised!(Dets)
+      start_store!(intact)
+      assert :error = Dets.get("compute-lost")
+    end
+
     test "control: an intact store restarted logs no lost records", %{tmp_dir: dir} do
       start_store!(dir)
       :ok = Dets.put(record("compute-intact"))
