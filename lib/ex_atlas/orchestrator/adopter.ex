@@ -266,7 +266,18 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # here, and every containment resolves towards the safe answer: adopt nothing
   # and let the Reaper stay shut rather than guess.
   defp read_all(store) do
-    store.all()
+    case store.all() do
+      {:ok, records} when is_list(records) ->
+        if List.improper?(records),
+          do: {:error, {:unexpected_answer, :improper_list}},
+          else: {:ok, records}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:unexpected_answer, other}}
+    end
   rescue
     error -> {:error, error}
   catch
@@ -296,6 +307,9 @@ defmodule ExAtlas.Orchestrator.Adopter do
     :exit, reason -> log_skipped(record, {:exit, reason})
   end
 
+  defp id_of(record) when is_map(record), do: Map.get(record, :id)
+  defp id_of(record), do: record
+
   defp log_changing(record) do
     Logger.warning(
       "[ExAtlas.Orchestrator.Adopter] not adopting #{inspect(record.id)}: its record changed " <>
@@ -306,7 +320,7 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   defp log_skipped(record, error) do
     Logger.error(
-      "[ExAtlas.Orchestrator.Adopter] failed to adopt #{inspect(Map.get(record, :id))} " <>
+      "[ExAtlas.Orchestrator.Adopter] failed to adopt #{inspect(id_of(record))} " <>
         "(#{inspect(error)}); it is still running upstream. Its record is kept, so the " <>
         "Reaper will not terminate it."
     )

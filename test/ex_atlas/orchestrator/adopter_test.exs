@@ -1519,6 +1519,61 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert_receive :adoption_failed, 2_000
     end
 
+    defmodule AnsweringStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, whose `all/0` answers what the test
+      # set, wrapped around the real records when it is a function.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      def answer(fun), do: :persistent_term.put({__MODULE__, :answer}, fun)
+      def clear, do: :persistent_term.erase({__MODULE__, :answer})
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate put(record), to: Memory
+      @impl true
+      defdelegate get(id), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+
+      @impl true
+      def all, do: :persistent_term.get({__MODULE__, :answer}).(Memory.all())
+    end
+
+    test "an {:ok, _} that is not a list fails adoption instead of crashing it" do
+      AnsweringStore.answer(fn _real -> {:ok, :not_a_list} end)
+      on_exit(&AnsweringStore.clear/0)
+
+      log = capture_log(fn -> assert :ok = Adopter.run(store: AnsweringStore, notify: self()) end)
+
+      assert_receive :adoption_failed, 2_000
+      assert log =~ ":not_a_list"
+    end
+
+    test "an improper list fails adoption instead of crashing it" do
+      AnsweringStore.answer(fn _real -> {:ok, [:first | :tail]} end)
+      on_exit(&AnsweringStore.clear/0)
+
+      capture_log(fn -> assert :ok = Adopter.run(store: AnsweringStore, notify: self()) end)
+
+      assert_receive :adoption_failed, 2_000
+    end
+
+    test "a record that is not a map does not cost the others their trackers" do
+      compute = orphaned_task()
+      AnsweringStore.answer(fn {:ok, records} -> {:ok, ["junk" | records]} end)
+      on_exit(&AnsweringStore.clear/0)
+
+      log = capture_log(fn -> assert :ok = Adopter.run(store: AnsweringStore, notify: self()) end)
+
+      assert_receive :adoption_complete, 2_000
+      assert {:ok, _info} = Orchestrator.info(compute.id)
+      assert log =~ ~s("junk")
+    end
+
     test "one unreadable record does not cost the others their trackers" do
       compute = orphaned_task()
       :ok = Memory.put(%{v: TrackingStore.version(), id: "not-a-real-record"})
