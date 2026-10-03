@@ -22,6 +22,18 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 - Every adoption (boot, retry and a Lease's `adopt_claimed/3`) leaves a record
   whose id a live tracker holds alone. A pod that read 404 mid-respawn had its
   record deleted, and the replacement pod was left with no record.
+- The Adopter acts on the record the store holds when it reaches it, not on
+  the `all/0` snapshot: a record its tracker deleted meanwhile is not adopted,
+  one another node claimed is left alone, and a changed one adopts from its new
+  contents.
+- A respawn registers the replacement's id before it writes the
+  replacement's record. An adoption in between started a second tracker, and
+  the respawning tracker crashed.
+- `Orchestrator.spawn/1` returns the tracker an adoption already started for
+  the pod it just rented, where it deleted the pod.
+- An `all/0` answer that is not `{:ok, list}` or `{:error, _}` counts as a
+  failed read, and a record that is not a map is logged and skipped. Both
+  crashed the Adopter.
 - A DETS store that lost records still keeps reaping off until the VM
   restarts: its retries read the same `{:error, _}`.
 

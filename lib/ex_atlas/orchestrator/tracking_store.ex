@@ -236,8 +236,10 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
   **reaping stays off until a read succeeds**. The Adopter reads the store
   again, from 5 s doubling to every 5 minutes, so a database that comes back or
   a row an operator deletes turns reaping back on. A node that cannot tell
-  which pods are its own must never issue a DELETE. The cost is bounded by `:max_runtime_ms` plus
-  an operator reading the warning; the alternative is destroying live work.
+  which pods are its own must never issue a DELETE. Until then no adopted task
+  has its `:max_runtime_ms` deadline either: the cost is bounded by the next
+  good read, a pod's own command exiting, and an operator reading the warning.
+  The alternative is destroying live work.
   """
 
   alias ExAtlas.Orchestrator.{CostMeter, Ownership}

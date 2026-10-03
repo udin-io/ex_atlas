@@ -90,7 +90,7 @@ sequenceDiagram
   Store-->>Adopter: ok with records, or error when a row will not decode
   opt the read failed
     Adopter->>Reaper: adoption_failed, once
-    loop after 5 s, 10 s, 20 s, then every 5 min, no limit
+    loop after 5 s, doubling (10, 20, 40, 80, 160 s), then every 5 min, no limit
       Adopter->>Store: all()
       Store-->>Adopter: error, logged with the attempt and the next delay
     end

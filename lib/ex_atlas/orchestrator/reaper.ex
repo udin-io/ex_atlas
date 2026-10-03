@@ -57,9 +57,11 @@ defmodule ExAtlas.Orchestrator.Reaper do
   reaping stays off until a later read succeeds. The Adopter reads the store
   again, from 5 s doubling to every 5 minutes with no limit, and signals
   `:adoption_complete` once it has adopted. A node that cannot account for
-  which running compute is its own must never issue a DELETE; a leak is
-  bounded by `:max_runtime_ms` and an operator reading the log, while a
-  wrongly reaped task is hours of GPU spend that no longer exists.
+  which running compute is its own must never issue a DELETE. Until the read
+  succeeds no adopted task has its `:max_runtime_ms` deadline either, so a
+  leak is bounded by the next good read, a pod's own command exiting and an
+  operator reading the log, while a wrongly reaped task is hours of GPU spend
+  that no longer exists.
 
   The Adopter records each outcome before it sends it. A Reaper that crashes
   and restarts reads that record and keeps the gate as it was: open after
