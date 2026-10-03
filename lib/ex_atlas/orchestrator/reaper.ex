@@ -528,7 +528,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
         {orphans, held} =
           computes
           |> Enum.filter(&candidate?(&1, tracked, prefix, now, grace_ms))
-          |> Enum.reduce({[], []}, &sort_by_holder(&1, &2, store, prefix, owner))
+          |> Enum.reduce({[], []}, &sort_by_holder(&1, &2, {provider, store}, prefix, owner))
 
         {ours, others} = Enum.split_with(orphans, &Ownership.ours?(&1.name, prefix, owner))
 
@@ -567,13 +567,13 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # owner its name carries, and that no node would take over, is `held`
   # with that owner: its record shields it only while the owner lives
   # (issue 145). Any other record shields its pod.
-  defp sort_by_holder(compute, {orphans, held}, store, prefix, owner) do
+  defp sort_by_holder(compute, {orphans, held}, {provider, store}, prefix, owner) do
     case holder(store, compute.id) do
       :none ->
         {[compute | orphans], held}
 
       {:record, record} ->
-        case held_by(compute, record, store, prefix, owner) do
+        case held_by(compute, record, {provider, store}, prefix, owner) do
           nil -> {orphans, held}
           other -> {orphans, [{compute, other} | held]}
         end
@@ -583,15 +583,26 @@ defmodule ExAtlas.Orchestrator.Reaper do
     end
   end
 
-  defp held_by(compute, record, store, prefix, owner) do
+  # The record must be of the provider that listed the pod: ids of two
+  # providers can match.
+  defp held_by(compute, record, {provider, store}, prefix, owner) do
     with {:other, other} <- Ownership.classify(compute.name, prefix, owner),
          ^other <- Map.get(record, :owner),
+         true <- provider_module(record_provider(record)) == provider_module(provider),
          true <- function_exported?(store, :delete_expired, 3),
          why when is_binary(why) <- Lease.takeover_refusal(record) do
       other
     else
       _shields -> nil
     end
+  end
+
+  # As `TrackingStore.observe_opts/1` reads it, without raising on a record
+  # whose `:opts` is not a keyword list.
+  defp record_provider(record) do
+    opts = Map.get(record, :opts)
+    provider = if Keyword.keyword?(opts), do: Keyword.get(opts, :provider)
+    provider || Map.get(record, :provider)
   end
 
   # The record first, in one statement that re-checks its owner and that

@@ -469,6 +469,17 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       assert status(neighbour) == :terminated
     end
 
+    test "a record of another provider whose id matches the pod's: both kept" do
+      {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
+      unsigned!(compute, %{provider: FaultyProvider})
+
+      reap()
+
+      assert status(compute) == :running
+      assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
+      assert status(neighbour) == :terminated
+    end
+
     test "a record read that raises, throws or exits keeps the pod, and the tick goes on" do
       TestOrchestrator.put_env(tracking_store: Hooked)
       compute = pod()
@@ -599,7 +610,7 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
 
     test "a pod delete that fails after the record went: the next tick deletes the pod" do
       compute = pod(@name, FaultyProvider)
-      unsigned!(compute)
+      unsigned!(compute, %{provider: FaultyProvider})
       FaultyProvider.arm(:terminate, {:error_once, ExAtlas.Error.new(:upstream, message: "x")})
 
       log = reap([FaultyProvider])
@@ -667,7 +678,7 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       TestOrchestrator.put_env(reap_interval_ms: 60_000, reap_providers: [FaultyProvider])
       dead!(lease)
       compute = pod(@name, FaultyProvider)
-      unsigned!(compute)
+      unsigned!(compute, %{provider: FaultyProvider})
       FaultyProvider.arm(:terminate, {:error_once, ExAtlas.Error.new(:upstream, message: "x")})
 
       capture_log(fn -> :ok = tick(periodic_reaper!()) end)
