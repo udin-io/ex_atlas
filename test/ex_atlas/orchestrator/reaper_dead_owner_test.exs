@@ -471,11 +471,12 @@ defmodule ExAtlas.Orchestrator.ReaperDeadOwnerTest do
       {compute, neighbour} = {pod(), pod("atlas-m1-notebook-4")}
       unsigned!(compute)
 
-      reap()
+      log = reap()
 
       assert status(compute) == :running
       assert {:ok, %{owner: "m1"}} = Store.get(compute.id)
       assert status(neighbour) == :terminated
+      refute log =~ "could not delete the tracking record"
     end
 
     # The stale struct: the Reaper read the record, then m3 claimed it.
