@@ -1240,11 +1240,10 @@ With an owner set:
   every other prefixed pod alone and logs each once per boot, with its id and
   the owner it carries. With the Ecto store, another machine takes over a
   gone machine's persisted tasks once its lease expires (see "In your own
-  database"). With `reap_dead_owners: true` it also deletes the gone
-  machine's untracked pods once the lease has stayed expired for
-  `:reap_dead_owner_after_ms` (15 minutes by default); that is off by default
-  until lease rows are signed (#148). Otherwise the pods of a machine that
-  is gone are yours to delete.
+  database"). It also deletes the gone machine's untracked pods once its
+  signed lease row has stayed expired for `:reap_dead_owner_after_ms` (15
+  minutes by default); `reap_dead_owners: false` turns that off. Otherwise
+  the pods of a machine that is gone are yours to delete.
 - The Adopter adopts only the tracking records that carry its own owner, so
   machines can share one database-backed store (see "Surviving a deploy").
 
@@ -1367,9 +1366,9 @@ Seven things to know before you rely on it:
   of another owner stays untouched and the boot logs its id. The first node to
   adopt an unowned record (one written before v0.8.0) claims it. With the
   Ecto store, a live node takes over a dead owner's signed records once its
-  lease expires, and with `reap_dead_owners: true` deletes its untracked pods
-  once the lease stays expired for `:reap_dead_owner_after_ms` (off by
-  default until lease rows are signed, #148); with DETS or a store of your own, a dead
+  lease expires, and deletes its untracked pods once its signed lease row
+  stays expired for `:reap_dead_owner_after_ms` (`reap_dead_owners: false`
+  turns that off); with DETS or a store of your own, a dead
   owner's pods and records stay until you delete them. A store that maps fields to
   columns needs a nullable `owner` column, and from v0.8.0 the four cost
   columns `max_cost`, `spent_usd`, `cost_rate` and `cost_since_ms` (the last
@@ -1492,8 +1491,13 @@ ExAtlas.Orchestrator.list_ids()
   `lease_ttl_ms / 3` while the losing machine can renew.
 - Expiry uses each machine's wall clock: keep clock skew well under
   `lease_ttl_ms`.
-- A database that ran step 1 of the migration before this release needs a new
+- A database that ran step 1 of the migration before 0.9.0 needs a new
   migration calling `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 2)`.
+- Each machine signs its lease row with a key from its callback secret, and
+  a machine reads another as dead only from a row its own key verifies. A
+  database whose migrations ran before step 3 needs a new migration calling
+  `Migration.up(version: 3)`; until then no machine reads as dead. See
+  [the upgrading guide](guides/upgrading.md).
 
 ## Phoenix LiveDashboard integration
 

@@ -72,12 +72,18 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     records of an owner whose lease expired. Each record is claimed by one
     conditional `UPDATE` that re-checks the old owner and its expired lease,
     so two live nodes never both adopt it. `expired_leases/1` lists the
-    expired rows for the Lease's dead-owner watch, and with
-    `reap_dead_owners: true` the Reaper deletes the untracked pods of an owner
-    that stays dead (`:reap_dead_owner_after_ms`).
+    expired rows for the Lease's dead-owner watch, and the Reaper deletes the
+    untracked pods of an owner that stays dead (`:reap_dead_owner_after_ms`).
     A host that ran step 1 adds a
     migration calling `Migration.up(version: 2)`; until then the lease
     renewal logs a warning every tick and claims nothing.
+
+    Step 3 adds a `mac` column: each renewal writes
+    `ExAtlas.Orchestrator.TrackingStore.lease_mac/2` beside the expiry, and
+    the Lease reads an owner as dead only from a row its key verifies. On a
+    table without step 3 the renewal writes no `mac`, every row reads
+    unsigned so no owner is dead, and `start_link/1` logs one warning per
+    boot.
 
     ## What a row holds
 

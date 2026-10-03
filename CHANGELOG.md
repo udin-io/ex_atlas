@@ -7,12 +7,30 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
-### Added: a live node deletes a dead owner's untracked pods, opt-in (#144)
+### Changed: owner lease rows are signed, and dead-owner deletion is on by default (#148)
+
+Each `TrackingStore.Ecto` lease renewal writes an HMAC of the owner and
+expiry, under a key from `config :ex_atlas, :callback, secret:` with its own
+salt. The Lease reads an owner as dead only from a row its key verifies, so
+one `INSERT` into `atlas_owner_leases` by a writer without the secret no
+longer deletes a live node's pods. With that in place, the Reaper deletes a
+dead owner's untracked pods unless `reap_dead_owners: false` is set.
+
+A custom store's `expired_leases/1` now answers
+`%{owner => {expires_at_ms, mac}}`, and its `renew_lease/2` stores
+`TrackingStore.lease_mac/2` beside the expiry.
+
+- **Upgrade:** add a migration calling
+  `ExAtlas.Orchestrator.TrackingStore.Ecto.Migration.up(version: 3)`. Until
+  it runs, rows are unsigned, no owner reads as dead, and each boot logs one
+  warning. Set `reap_dead_owners: false` to keep the deletion off. See
+  [the upgrading guide](guides/upgrading.md).
+
+### Added: a live node deletes a dead owner's untracked pods (#144)
 
 A machine destroyed while it ran `spawn/1` sessions left their pods billing
 with no tracker, and every other node only logged them. With
-`reap_dead_owners: true`, `TrackingStore.Ecto`, `:reap_owner` and a callback
-secret, the Reaper now deletes an untracked pod named with another owner once that owner's lease has
+`TrackingStore.Ecto`, `:reap_owner` and a callback secret, the Reaper now deletes an untracked pod named with another owner once that owner's lease has
 stayed expired, unchanged, for `:reap_dead_owner_after_ms` (15 minutes by
 default, from two `lease_ttl_ms` to 24 hours):
 
@@ -29,13 +47,11 @@ booted waits a full window. A store of your own opts in with the optional
 A delete that raises or exits no longer stops the Reaper's tick: it logs the
 error's kind and the next pod goes on.
 
-- **Upgrade:** off by default until lease rows are signed (#148); set
-  `config :ex_atlas, :orchestrator, reap_dead_owners: true` to turn it on.
-  Until then the deletion trusts `atlas_owner_leases`: with it on, an
-  unclustered live node loses its untracked pods when it is cut off from the
-  database for the whole window, or renews no lease (no callback secret,
-  DETS, an older release) and has an expired row. Give every node the same
-  `lease_ttl_ms`, cluster the nodes, and let only the app write the table.
+- **Upgrade:** on by default since #148 signs lease rows (above). An
+  unclustered live node still loses its untracked pods when it is cut off
+  from the database for the whole window, or when it renewed signed rows and
+  then stopped renewing. Give every node the same `lease_ttl_ms`, cluster
+  the nodes, and let only the app write the table.
 
 ## v0.9.0 — 2026-10-02
 

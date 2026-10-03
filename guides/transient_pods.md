@@ -539,10 +539,10 @@ Six constraints worth knowing before you design around it:
   its own owner, so machines can share one database-backed store. Each boot
   logs the ids of the other owners' records it leaves alone. With the Ecto
   store, a live machine takes over the records of a machine that never comes
-  back once its lease expires (`lease_ttl_ms`, 90 s by default). With
-  `reap_dead_owners: true` (off by default until lease rows are signed,
-  #148) it also deletes that machine's untracked pods once its lease has
-  stayed expired for `:reap_dead_owner_after_ms` (15 minutes by default).
+  back once its lease expires (`lease_ttl_ms`, 90 s by default). It also
+  deletes that machine's untracked pods once its signed lease row has stayed
+  expired for `:reap_dead_owner_after_ms` (15 minutes by default);
+  `reap_dead_owners: false` turns that off.
   With any other store,
   such a record stays, with its pod, until you delete both.
 - A graceful stop (SIGTERM) keeps a persisted task's pod and record, unless
