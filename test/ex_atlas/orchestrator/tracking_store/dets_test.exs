@@ -76,6 +76,20 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
     end
   end
 
+  # The store traps exits so its shutdown closes the table. It is linked to
+  # OTP's `:dets` server too, and must still stop when that server dies,
+  # rather than run on with a table nothing serves. On a peer node, so the
+  # test VM keeps its own `:dets` server.
+  test "stops when the DETS server dies", %{tmp_dir: dir} do
+    {_peer, node} = ExAtlas.Test.Cluster.start_peer!()
+    {:ok, store} = :erpc.call(node, GenServer, :start, [Dets, [storage_path: dir], [name: Dets]])
+    ref = Process.monitor(store)
+
+    :erpc.call(node, Process, :exit, [:erpc.call(node, Process, :whereis, [:dets]), :kill])
+
+    assert_receive {:DOWN, ^ref, :process, ^store, :killed}, 2_000
+  end
+
   describe "a corrupt store" do
     test "comes up, but reports that it cannot account for its contents", %{tmp_dir: dir} do
       File.write!(Path.join(dir, "tracked.dets"), :crypto.strong_rand_bytes(4_096))
