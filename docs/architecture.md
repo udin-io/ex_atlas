@@ -148,6 +148,15 @@ When the store cannot answer, nothing is reaped: `all/0` returns an error and
 the Adopter sends `adoption_failed`; `get/1` raises and the Reaper treats the
 pod as ours; a tracker logs the raise and keeps its pod.
 
+`TrackingStore.Dets` keeps both answers across restarts of its process
+(#154). A file it recreated, could not open, or found deleted after this VM
+opened it marks its path in `:persistent_term`, so `all/0` answers
+`{:error, _}` until the VM restarts. `get/1` raises while its table is not
+open, and on a miss while the store is marked, so a Reaper already open
+keeps every pod it asks about. The store traps exits, so a shutdown closes
+the table before the process exits. The mark does not reach the next VM:
+that boot reads the file as it stands, lost records missing.
+
 ## A dead node's records, taken over by lease
 
 With `TrackingStore.Ecto` and `:reap_owner` set, each node runs a `Lease`

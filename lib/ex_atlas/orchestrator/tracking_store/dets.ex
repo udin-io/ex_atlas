@@ -43,12 +43,17 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   Writes made after the recreate work normally, so resources spawned by this
   boot are still tracked.
 
+  A file this VM opened that is gone at the next start of the store, and a
+  file that reads as garbage under the open table, count as lost records too.
+
   The mark lives in the VM, not the file. The next boot reads the file as it
   stands, the lost records missing, and its Reaper deletes their pods.
 
-  While its table is not open (the process is down or restarting, or the
-  file would not open), `get/1` raises rather than answer `:error`, which
-  means "not stored".
+  `get/1` raises rather than answer `:error`, which means "not stored", when
+  its table is not open (the process is down or restarting, or the file
+  would not open), and on a miss while the store is marked: the record may be
+  among the lost. A Reaper whose adoption settled before the loss then keeps
+  every pod it asks about.
 
   `{:ok, []}` is reserved for "the store is fine and holds nothing". Conflating
   the two is what would get a live GPU job deleted.
