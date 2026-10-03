@@ -205,6 +205,26 @@ defmodule ExAtlas.Orchestrator.TrackingStore.DetsTest do
       assert :error = Dets.get("compute-lost")
     end
 
+    # A tmp cleaner, or a volume that came up unmounted: the file this VM
+    # opened is gone, and a fresh one would read as "nothing was stored".
+    test "a file deleted after this VM opened it reads as lost; control: a first start reads {:ok, []}",
+         %{tmp_dir: dir} do
+      start_store!(dir)
+      assert {:ok, []} = Dets.all()
+      :ok = Dets.put(record("compute-vanished"))
+      :ok = stop_supervised!(Dets)
+      File.rm!(Path.join(dir, "tracked.dets"))
+
+      log = ExUnit.CaptureLog.capture_log(fn -> start_store!(dir) end)
+
+      assert {:error, {:store_vanished, _}} = Dets.all()
+      assert_raise ArgumentError, fn -> Dets.get("compute-vanished") end
+      assert log =~ "tracked.dets"
+
+      ExUnit.CaptureLog.capture_log(fn -> restart_store!(dir) end)
+      assert {:error, {:store_vanished, _}} = Dets.all()
+    end
+
     test "control: an intact store restarted logs no lost records", %{tmp_dir: dir} do
       start_store!(dir)
       :ok = Dets.put(record("compute-intact"))

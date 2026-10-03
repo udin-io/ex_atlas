@@ -169,10 +169,14 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   end
 
   defp open_state(dir, path) do
+    existed? = File.exists?(path)
+
     case open(path) do
       {:ok, table} ->
         _ = File.chmod(path, 0o600)
-        {:ok, %{dir: dir, path: path, table: table, degraded: earlier_loss(path)}}
+        degraded = if existed?, do: earlier_loss(path), else: vanished(path)
+        _ = put_new(opened_key(path), true)
+        {:ok, %{dir: dir, path: path, table: table, degraded: degraded}}
 
       {:recreated, table, reason} ->
         _ = File.chmod(path, 0o600)
@@ -225,7 +229,25 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
     end
   end
 
+  # DETS creates a missing file, which reads as "nothing was stored". That is
+  # true only the first time this VM opens the path; after that the file was
+  # deleted under us.
+  defp vanished(path) do
+    if :persistent_term.get(opened_key(path), false) do
+      Logger.error(
+        "[ExAtlas.Orchestrator.TrackingStore.Dets] #{path} is gone since this VM opened it; " <>
+          "its records are lost. all/0 answers {:error, _}, so adoption and the Reaper " <>
+          "stay off, until the VM restarts"
+      )
+
+      mark_lost(path, {:store_vanished, :enoent})
+    else
+      earlier_loss(path)
+    end
+  end
+
   defp lost_key(path), do: {__MODULE__, :lost_records, path}
+  defp opened_key(path), do: {__MODULE__, :opened, path}
 
   @impl GenServer
   def handle_call({:put, _record}, _from, %{table: nil} = state), do: {:reply, :ok, state}
