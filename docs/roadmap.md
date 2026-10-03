@@ -1,27 +1,18 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #152 (release
-0.10.0). It feeds the choice of the next feature. Dates are merge dates.
+merged PRs and open issues on `udin-io/ex_atlas` as of PR #160 (milestone
+13). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
-Reaper survives a failed store read (milestone 13, risk 4; parent #153).
-Today a node whose tracking store fails at boot (`:adoption_failed`) reaps
-nothing until the next boot, so every untracked pod it could have deleted
-bills for that whole time, and no persisted task gets its deadline or cost cap
-back. The Adopter will retry the read, from 5 s doubling to every 5 minutes
-with no limit, and on the first good read adopt and open the Reaper. Two
-slices, in order:
+Milestone 13 ends with PR #160 (#155), open for review. Once it merges, no
+milestone is open, and by the rule below the next pick is rank 2, risk 16:
+after a respawn and a restart the cost cap undercounts. Milestone 13 retires
+rank 1, risk 4, for an unreadable store; its config faults stay.
 
-1. #154: a DETS store that lost records keeps answering `{:error, _}` from
-   `all/0` after its process restarts, and `Dets.get/1` raises when its table
-   is not open, so the Reaper never deletes a recorded pod on an unread store.
-2. #155: the supervised Adopter retries `all/0`; the Reaper reopens on the
-   first good read.
-
-We picked it by the same rule as milestones 9 and 11: no roadmap item or open
-milestone is left, so we take the open risk with the largest cost that a
+The rule, as for milestones 9, 11 and 13: when no roadmap item or open
+milestone is left, we take the open risk with the largest cost that a
 feature can retire. We left out risk 2 and 15 (cowlib, waits on an upstream
 release), every risk only the owner's live tests settle (1, 14, 19, 20, 33,
 44, 52, 56, 58, 61; the Lambda and Vast live runs are deferred by the owner),
@@ -42,7 +33,7 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 | Feature | Ticket | State |
 |---|---|---|
 | Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
-| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Slice 1 (#154) in PR #157: a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. Slice 2 (#155) next |
+| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Slice 1 (#154) merged in #157: a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. Slice 2 (#155) in PR #160: the supervised Adopter retries an unreadable store, the Reaper reaps once it reads, and every adoption leaves a live tracker's record alone. Merging it closes #153 and milestone 13 |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.

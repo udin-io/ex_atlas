@@ -1,11 +1,13 @@
 defmodule ExAtlas.Orchestrator.Adopter do
   @moduledoc """
-  Re-adopts, once at boot, the compute this node was tracking before it
+  Re-adopts, at boot, the compute this node was tracking before it
   restarted.
 
   A `Task` with `restart: :transient`: it runs, it signals
   `ExAtlas.Orchestrator.Reaper`, and it exits `:normal` — there is nothing to
-  keep alive afterwards. It starts inside `ExAtlas.Application`'s tree, so it
+  keep alive afterwards. When the store cannot be read, the supervised child
+  stays up and reads it again, from 5 s doubling to every 5 minutes, with no
+  attempt limit. It starts inside `ExAtlas.Application`'s tree, so it
   runs concurrently with the rest of the boot rather than blocking it.
 
   ## What it does per record
@@ -46,10 +48,15 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
     * `:adoption_complete` — every record was accounted for; reap normally.
     * `:adoption_failed` — the store could not be read, so **nothing is reaped
-      for the rest of this boot**. A node that cannot tell which running pods
-      are its own must never issue a DELETE.
+      until a later read succeeds**. A node that cannot tell which running
+      pods are its own must never issue a DELETE. Sent once, on the first
+      failure; the read that succeeds adopts and sends `:adoption_complete`.
 
-  It records the outcome for its supervisor before it sends it, so a Reaper
+  A record whose id a live tracker holds is left to that tracker, in every
+  adoption: a retry runs minutes after boot, when a task spawned meanwhile may
+  be renting a replacement for a pod that now reads 404.
+
+  It records each outcome for its supervisor before it sends it, so a Reaper
   that restarts later in the boot, or was down when the signal went out,
   starts with the gate in the same state.
 
@@ -103,13 +110,18 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
   require Logger
 
+  alias ExAtlas.Orchestrator
+
   alias ExAtlas.Orchestrator.{ComputeServer, ComputeSupervisor, Ownership, Reaper, TrackingStore}
   alias ExAtlas.Config
   alias ExAtlas.Orchestrator.UpstreamStatus
   alias ExAtlas.Spec
 
   @doc false
-  def start_link(opts \\ []), do: Task.start_link(__MODULE__, :run, [opts])
+  # The supervised child reads until the store answers; `run/1` alone reads
+  # once.
+  def start_link(opts \\ []),
+    do: Task.start_link(__MODULE__, :run, [Keyword.put(opts, :retry, true)])
 
   @doc """
   Adopt everything in the tracking store, then signal the Reaper.
@@ -120,6 +132,11 @@ defmodule ExAtlas.Orchestrator.Adopter do
       Defaults to the configured one.
     * `:notify` — pid or registered name to send `:adoption_complete` /
       `:adoption_failed` to. Defaults to `ExAtlas.Orchestrator.Reaper`.
+    * `:retry` — read the store again after a failed read, until it answers.
+      Defaults to `false`; the child `ExAtlas.Orchestrator.Supervisor` starts
+      sets it.
+    * `:retry_after_ms` — the wait before the first retry. Defaults to 5 s.
+      Each wait doubles, up to `:max_retry_after_ms` (default 5 minutes).
   """
   @spec run(keyword()) :: :ok
   def run(opts \\ []) do
@@ -127,7 +144,18 @@ defmodule ExAtlas.Orchestrator.Adopter do
 
     case Keyword.get(opts, :store) || TrackingStore.impl() do
       nil -> signal(notify, :adoption_complete)
-      store -> adopt_all(store, notify)
+      store -> adopt_all(store, notify, retry_plan(opts))
+    end
+  end
+
+  @retry_after_ms 5_000
+  @max_retry_after_ms 300_000
+
+  defp retry_plan(opts) do
+    if Keyword.get(opts, :retry, false) do
+      # At least 1 ms: `Process.sleep/1` raises on a negative wait.
+      max = max(Keyword.get(opts, :max_retry_after_ms, @max_retry_after_ms), 1)
+      %{delay: max(min(Keyword.get(opts, :retry_after_ms, @retry_after_ms), max), 1), max: max}
     end
   end
 
@@ -141,26 +169,68 @@ defmodule ExAtlas.Orchestrator.Adopter do
     Enum.each(records, &adopt_one(&1, owner, store))
   end
 
-  defp adopt_all(store, notify) do
+  defp adopt_all(store, notify, plan) do
     case read_all(store) do
       {:ok, records} ->
-        case Ownership.owner() do
-          {:ok, owner} -> adopt_owned(records, owner, store)
-          {:error, error} -> log_invalid_owner(error)
-        end
-
-        signal(notify, :adoption_complete)
+        adopt_records(records, store, notify)
 
       {:error, reason} ->
         Logger.error(
           "[ExAtlas.Orchestrator.Adopter] tracking store could not be read " <>
-            "(#{inspect(reason)}); adopting nothing and DISABLING the Reaper for this boot. " <>
-            "Compute this node spawned before the restart is still running and billing — " <>
-            "check your provider for pods matching :reap_name_prefix."
+            "(#{inspect(reason)}); adopting nothing, and reaping is off until it reads. " <>
+            "Compute this node spawned before the restart is still running and billing. " <>
+            next_try(plan)
         )
 
         signal(notify, :adoption_failed)
+
+        if plan,
+          do: retry(store, notify, plan, 2, System.monotonic_time(:millisecond)),
+          else: :ok
     end
+  end
+
+  # No attempt limit: giving up would shut the Reaper for the rest of the boot.
+  # Once capped, a store that stays down costs one read per 5 minutes.
+  defp retry(store, notify, plan, attempt, since) do
+    Process.sleep(plan.delay)
+
+    case read_all(store) do
+      {:ok, records} ->
+        Logger.info(
+          "[ExAtlas.Orchestrator.Adopter] tracking store read on attempt #{attempt} after " <>
+            "#{span(System.monotonic_time(:millisecond) - since)}; adopting from #{length(records)} " <>
+            "record(s). The Reaper reopens once adoption settles."
+        )
+
+        adopt_records(records, store, notify)
+
+      {:error, reason} ->
+        plan = %{plan | delay: min(plan.delay * 2, plan.max)}
+
+        Logger.warning(
+          "[ExAtlas.Orchestrator.Adopter] tracking store still unreadable (attempt #{attempt}): " <>
+            "#{inspect(reason)}; reaping stays off. #{next_try(plan)}"
+        )
+
+        retry(store, notify, plan, attempt + 1, since)
+    end
+  end
+
+  defp next_try(nil), do: "Nothing reads it again until the next boot."
+  defp next_try(%{delay: delay}), do: "Next try in #{span(delay)}."
+
+  defp span(ms) when ms < 1_000, do: "#{ms} ms"
+  defp span(ms) when ms < 60_000, do: "#{div(ms, 1_000)} s"
+  defp span(ms), do: "#{Float.round(ms / 60_000, 1)} min"
+
+  defp adopt_records(records, store, notify) do
+    case Ownership.owner() do
+      {:ok, owner} -> adopt_owned(records, owner, store)
+      {:error, error} -> log_invalid_owner(error)
+    end
+
+    signal(notify, :adoption_complete)
   end
 
   defp adopt_owned(records, owner, store) do
@@ -197,41 +267,77 @@ defmodule ExAtlas.Orchestrator.Adopter do
   # here, and every containment resolves towards the safe answer: adopt nothing
   # and let the Reaper stay shut rather than guess.
   defp read_all(store) do
-    store.all()
+    case store.all() do
+      {:ok, records} when is_list(records) ->
+        if List.improper?(records),
+          do: {:error, {:unexpected_answer, :improper_list}},
+          else: {:ok, records}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:unexpected_answer, other}}
+    end
   rescue
     error -> {:error, error}
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  # One unreadable record must not cost the others their trackers.
-  defp adopt_one(record, owner, store) do
-    adopt(record, owner, store)
+  # One unreadable record must not cost the others their trackers. A record a
+  # live tracker holds is that tracker's: a 404 for it means a respawn is
+  # renting the replacement, and the tracker carries the record over itself.
+  #
+  # A record that changed in the store since `all/0` read it is adopted again
+  # from what the store holds now, once; a record gone from the store was
+  # removed by its tracker.
+  defp adopt_one(record, owner, store, rereads \\ 1) do
+    if tracked?(record) do
+      :tracked
+    else
+      case adopt(record, owner, store) do
+        {:changed, fresh} when rereads > 0 -> adopt_one(fresh, owner, store, rereads - 1)
+        {:changed, _fresh} -> log_changing(record)
+        result -> result
+      end
+    end
   rescue
     error -> log_skipped(record, error)
   catch
     :exit, reason -> log_skipped(record, {:exit, reason})
   end
 
+  defp id_of(record) when is_map(record), do: Map.get(record, :id)
+  defp id_of(record), do: record
+
+  defp log_changing(record) do
+    Logger.warning(
+      "[ExAtlas.Orchestrator.Adopter] not adopting #{inspect(record.id)}: its record changed " <>
+        "twice while this node adopted it. The record is kept, so the Reaper still treats " <>
+        "the resource as ours."
+    )
+  end
+
   defp log_skipped(record, error) do
     Logger.error(
-      "[ExAtlas.Orchestrator.Adopter] failed to adopt #{inspect(Map.get(record, :id))} " <>
+      "[ExAtlas.Orchestrator.Adopter] failed to adopt #{inspect(id_of(record))} " <>
         "(#{inspect(error)}); it is still running upstream. Its record is kept, so the " <>
         "Reaper will not terminate it."
     )
   end
 
-  defp adopt(record, owner, store) do
-    case refusal(record) do
+  defp adopt(stored, owner, store) do
+    case refusal(stored) do
       nil ->
-        warn_stored_endpoint(record)
+        warn_stored_endpoint(stored)
         # Checked on the record as stored, before anything changes it. A
         # tracker respawns only from a record this node signed.
-        record = Map.put(TrackingStore.upgrade(record), :sealed, TrackingStore.sealed?(record))
-        adopt_by_owner(record, record[:owner], owner, store)
+        record = Map.put(TrackingStore.upgrade(stored), :sealed, TrackingStore.sealed?(stored))
+        adopt_by_owner(record, record[:owner], owner, store, stored)
 
       why ->
-        skip(record, why)
+        skip(stored, why)
     end
   end
 
@@ -292,15 +398,17 @@ defmodule ExAtlas.Orchestrator.Adopter do
   end
 
   # Same owner, or no owner on either side: ours, as before.
-  defp adopt_by_owner(record, owner, owner, store), do: reconcile(record, owner, store, false)
+  defp adopt_by_owner(record, owner, owner, store, stored),
+    do: reconcile(record, owner, store, false, stored)
 
   # An unowned record: the first node to adopt it claims it, so later boots on
   # other nodes skip it.
-  defp adopt_by_owner(record, nil, owner, store),
-    do: reconcile(Map.put(record, :owner, owner), owner, store, true)
+  defp adopt_by_owner(record, nil, owner, store, stored),
+    do: reconcile(Map.put(record, :owner, owner), owner, store, true, stored)
 
   # Another node's task: no provider call, no delete, no tracker.
-  defp adopt_by_owner(record, other, _owner, _store), do: {:other_owner, other, record.id}
+  defp adopt_by_owner(record, other, _owner, _store, _stored),
+    do: {:other_owner, other, record.id}
 
   # Skipped, but never deleted: the store entry is the only thing telling the
   # Reaper that a live, prefix-matching pod belongs to this app, and a record
@@ -313,18 +421,44 @@ defmodule ExAtlas.Orchestrator.Adopter do
     )
   end
 
-  defp reconcile(record, owner, store, claim?) do
-    case observe(record) do
-      # The provider has forgotten the id entirely: `{:dead, _, nil}` is
-      # `UpstreamStatus`'s way of saying there is nothing left to terminate,
-      # whether that reads as `:vanished` or, on spot capacity, `:preempted`.
-      {:dead, _reason, nil} ->
-        store.delete(record.id)
+  defp reconcile(record, owner, store, claim?, stored) do
+    observation = observe(record)
 
-      observation ->
-        track(record, observation, owner, store, claim?)
+    # A tracker started while the provider answered (a Lease claim, a second
+    # adoption): the record is its own now. Otherwise act only on the record
+    # the store holds now: `all/0` read it before this record's turn, and on a
+    # retry minutes before.
+    if tracked?(record) do
+      :tracked
+    else
+      reconcile_current(store.get(record.id), record, observation, owner, store, claim?, stored)
     end
   end
+
+  # The provider has forgotten the id entirely: `{:dead, _, nil}` is
+  # `UpstreamStatus`'s way of saying there is nothing left to terminate,
+  # whether that reads as `:vanished` or, on spot capacity, `:preempted`.
+  defp reconcile_current(
+         {:ok, stored},
+         record,
+         {:dead, _reason, nil},
+         _owner,
+         store,
+         _claim?,
+         stored
+       ),
+       do: store.delete(record.id)
+
+  defp reconcile_current({:ok, stored}, record, observation, owner, store, claim?, stored),
+    do: track(record, observation, owner, store, claim?)
+
+  defp reconcile_current({:ok, fresh}, _record, _observation, _owner, _store, _claim?, _stale),
+    do: {:changed, fresh}
+
+  defp reconcile_current(:error, _record, _observation, _owner, _store, _claim?, _stale),
+    do: :gone
+
+  defp tracked?(record), do: match?({:ok, _pid}, Orchestrator.lookup(Map.get(record, :id)))
 
   defp track(record, observation, owner, store, claim?) do
     case unsigned_refusal(record, observation, owner) do

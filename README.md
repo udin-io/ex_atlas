@@ -1318,9 +1318,10 @@ ExAtlas.Orchestrator.run_task(
 At the next boot `ExAtlas.Orchestrator.Adopter` reads the store, asks the
 provider whether each id still exists, and starts a tracker for the ones that
 do. The Reaper waits for it: with a store configured it reaps **nothing** until
-adoption has settled, and if the store could not be read it reaps nothing for
-the whole boot — a node that cannot tell which pods are its own must never
-issue a DELETE.
+adoption has settled, and if the store could not be read it reaps nothing until
+a read succeeds — a node that cannot tell which pods are its own must never
+issue a DELETE. The Adopter reads the store again, from 5 s doubling to every 5
+minutes, with no attempt limit.
 
 What an adopted task keeps:
 
@@ -1446,8 +1447,8 @@ children = [MyApp.Repo, ExAtlas.Orchestrator.Supervisor, MyAppWeb.Endpoint]
 
 - Each record is one `term_to_binary` blob, decoded with `[:safe]`. A row
   that will not decode (an unknown atom, a function, another id's record)
-  makes the boot adopt nothing and reap nothing, as an unreadable DETS file
-  does.
+  makes the node adopt nothing and reap nothing until the row decodes or you
+  delete it.
 - With the database down, the store logs failed writes and the tracker runs
   on; the Reaper leaves every pod alone.
 - With both `start_orchestrator: true` and the supervisor in your children,

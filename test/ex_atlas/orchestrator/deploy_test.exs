@@ -283,7 +283,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
   end
 
   describe "a Reaper that restarts after a failed adoption" do
-    test "stays disabled for the boot and says so" do
+    test "stays closed while the store cannot be read, and says so" do
       put_orchestrator_env(tracking_store: ExAtlas.Test.TrackingStore.Raising)
 
       sup = boot()
@@ -296,7 +296,7 @@ defmodule ExAtlas.Orchestrator.DeployTest do
         end)
 
       assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
-      assert log =~ "reaping is DISABLED for this boot"
+      assert log =~ "reaping is off until the tracking store reads"
     end
 
     test "stays disabled when the store is switched off before it restarts" do
@@ -386,18 +386,17 @@ defmodule ExAtlas.Orchestrator.DeployTest do
 
   defp shutdown, do: stop_supervised!(:atlas_orchestrator_tree)
 
-  # The Adopter is a transient Task: it exits `:normal` when it is done, so
-  # waiting for it is a monitor rather than a sleep. A pid that has already
-  # gone delivers `:DOWN` immediately, and `:undefined` means it finished
-  # before we looked.
-  defp await_adoption(sup) do
-    case List.keyfind(Supervisor.which_children(sup), Adopter, 0) do
-      {Adopter, pid, _type, _mods} when is_pid(pid) ->
-        ref = Process.monitor(pid)
-        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  # The Adopter tells the Reaper once adoption settles or fails. A failed read
+  # keeps the Adopter running, retrying, so the test waits on the Reaper's gate
+  # instead of the Adopter's exit.
+  defp await_adoption(_sup, tries \\ 500) do
+    case :sys.get_state(Reaper).adoption do
+      :pending when tries > 0 ->
+        Process.sleep(10)
+        await_adoption(nil, tries - 1)
 
-      _already_finished ->
-        :ok
+      outcome ->
+        assert outcome in [:settled, :failed]
     end
   end
 end

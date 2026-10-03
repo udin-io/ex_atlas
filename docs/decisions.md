@@ -253,7 +253,12 @@ names the PR or issue that holds the reasoning.
 | `persist: true` only for `mode: :task` | Interactive too: its auth token is unrecoverable after a restart | #39 |
 | The record carries a wall-clock `spawned_at_ms`; the deadline is recomputed on adoption | Persist the monotonic deadline: it means nothing in a new VM | #39 |
 | Secrets never reach disk: API keys and auth headers are scrubbed | Store the full opts | #39 |
-| The Reaper starts gated; the Adopter releases it. An unreadable store disables reaping for the whole boot | Rely on the first tick being late: luck, not design | #39 |
+| The Reaper starts gated; the Adopter releases it. An unreadable store keeps reaping off until a later read succeeds; the supervised Adopter reads again from 5 s doubling to 5 minutes, no limit (#155; the boot-long shutdown was #39) | Rely on the first tick being late: luck, not design. Give up after N reads: brings the boot-long shutdown back. Reap on `get/1` alone while the store cannot list: a store that cannot list cannot prove a pod has no record | #39, #155 |
+| Every adoption (boot, retry, `adopt_claimed/3`) skips a record whose id a live tracker holds, before the provider call and again before a delete or claim | Start it and take `already_started`: a 404 mid-respawn would delete the record the tracker is about to carry | #155 |
+| The Adopter re-reads each record with `get/1` just before it deletes, claims or tracks it, and adopts the fresh copy once if it changed | Act on the `all/0` snapshot: on a retry it can be minutes old, so a finished task's record would get a new tracker | #155 review |
+| A respawn registers the replacement's id before `carry_record/3` writes its record | Register after `release_old/1`: an adoption in the DELETE's window started a second tracker | #155 review |
+| `Orchestrator.spawn/1` takes `{:already_started, pid}` from its tracker start as success | Treat it as a failed start: it deleted the pod an adopted tracker had just started on | #155 review |
+| No timeout on `all/0`: a hung store keeps the gate shut and logs nothing more | A timeout per read: a store slower than the timeout would never adopt | #155 review |
 | Child order is store, Reaper, Adopter | Store, Adopter, Reaper: the Adopter's signal to the Reaper could be lost | #39 |
 | An unreachable provider during adoption still gets a tracker | Skip the record: a live pod would have no deadline | #39 |
 | "Ours" means in the Registry or in the store | Registry only: a deploy empties it | #39 |
