@@ -202,7 +202,8 @@ defmodule ExAtlas.Orchestrator.Lease do
   defp skipped_outcome(state, owner) do
     if Reaper.reap_dead_owners?() and function_exported?(state.store, :expired_leases, 1) and
          function_exported?(state.store, :delete_expired, 3) do
-      "Unless #{inspect(owner)} renews, the Reaper deletes the pod and this record once its " <>
+      "Unless #{inspect(owner)} renews, a Reaper whose :reap_providers covers the pod deletes " <>
+        "the pod and this record once its " <>
         "signed lease has stayed expired for :reap_dead_owner_after_ms (#{state.window_ms} ms) " <>
         "and the pod's name carries that owner."
     else

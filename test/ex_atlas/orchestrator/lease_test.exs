@@ -692,7 +692,8 @@ defmodule ExAtlas.Orchestrator.LeaseTest do
       log = skipped_log!()
 
       assert log =~
-               ~s|Unless "m1" renews, the Reaper deletes the pod and this record once its | <>
+               ~s|Unless "m1" renews, a Reaper whose :reap_providers covers the pod deletes | <>
+                 "the pod and this record once its " <>
                  "signed lease has stayed expired for :reap_dead_owner_after_ms (900000 ms) " <>
                  "and the pod's name carries that owner"
 
