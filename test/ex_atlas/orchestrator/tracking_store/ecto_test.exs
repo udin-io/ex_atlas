@@ -10,7 +10,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
   import ExUnit.CaptureLog
 
   alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
-  alias ExAtlas.Orchestrator.TrackingStoreConformance
+  alias ExAtlas.Orchestrator.{TrackingStore, TrackingStoreConformance}
   alias ExAtlas.Test.Repo
 
   @moduletag :tmp_dir
@@ -277,6 +277,25 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
   end
 
   describe "start_link/1" do
+    test "on a step-2 lease table, warns once to run step 3", %{tmp_dir: dir} do
+      Repo.start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+
+      log = capture_log(fn -> :ignore = Store.start_link([]) end)
+
+      assert [_once] = Regex.scan(~r/Migration.up\(version: 3\)/, log)
+      assert log =~ "atlas_owner_leases has no mac column"
+    end
+
+    test "control: after step 3, or before step 2, it does not warn", %{tmp_dir: dir} do
+      Repo.start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}], :up, all: true, log: false)
+      refute capture_log(fn -> :ignore = Store.start_link([]) end) =~ "mac column"
+
+      Repo.migrate!()
+      refute capture_log(fn -> :ignore = Store.start_link([]) end) =~ "mac column"
+    end
+
     test "raises ArgumentError naming the key when :repo is unset" do
       Application.delete_env(:ex_atlas, :orchestrator)
 
@@ -303,6 +322,39 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
   end
 
   describe "renew_lease/2" do
+    setup :callback_secret
+
+    test "signs the owner and expiry, and a renewal signs the new expiry", %{tmp_dir: dir} do
+      start!(dir)
+
+      :ok = Store.renew_lease("m1", 1_000_000)
+      assert TrackingStore.lease_signed?("m1", 1_000_000, lease_mac("m1"))
+
+      :ok = Store.renew_lease("m1", 2_000_000)
+      assert TrackingStore.lease_signed?("m1", 2_000_000, lease_mac("m1"))
+    end
+
+    test "with no callback secret, writes the row with no mac", %{tmp_dir: dir} do
+      Application.delete_env(:ex_atlas, :callback)
+      start!(dir)
+
+      :ok = Store.renew_lease("m1", 1_000_000)
+
+      assert lease_expiry("m1") == 1_000_000
+      assert lease_mac("m1") == nil
+    end
+
+    # A host that has not run step 3 yet keeps renewing, unsigned.
+    test "on a step-2 table, renews without a mac", %{tmp_dir: dir} do
+      start!(dir, migrate: false)
+      Ecto.Migrator.run(Repo, [{1, StepOne}, {2, StepTwo}], :up, all: true, log: false)
+
+      assert :ok = Store.renew_lease("m1", 1_000_000)
+      assert lease_expiry("m1") == 1_000_000
+      assert :ok = Store.renew_lease("m1", 2_000_000)
+      assert lease_expiry("m1") == 2_000_000
+    end
+
     test "writes the owner's expiry, and a renewal moves it", %{tmp_dir: dir} do
       start!(dir)
 
@@ -520,6 +572,18 @@ defmodule ExAtlas.Orchestrator.TrackingStore.EctoTest do
 
       assert {:error, _reason} = Store.claim_expired("m2", 2_000, to("m2"))
     end
+  end
+
+  defp callback_secret(_context) do
+    Application.put_env(:ex_atlas, :callback, secret: String.duplicate("s", 40))
+    on_exit(fn -> Application.delete_env(:ex_atlas, :callback) end)
+  end
+
+  defp lease_mac(owner) do
+    %{rows: [[mac]]} =
+      Repo.query!("SELECT mac FROM atlas_owner_leases WHERE owner = ?1", [owner])
+
+    mac
   end
 
   defp lease_expiry(owner) do
