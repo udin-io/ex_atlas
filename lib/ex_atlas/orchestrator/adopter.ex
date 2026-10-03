@@ -199,8 +199,8 @@ defmodule ExAtlas.Orchestrator.Adopter do
       {:ok, records} ->
         Logger.info(
           "[ExAtlas.Orchestrator.Adopter] tracking store read on attempt #{attempt} after " <>
-            "#{span(System.monotonic_time(:millisecond) - since)}; read #{length(records)} " <>
-            "record(s). The Reaper reaps again."
+            "#{span(System.monotonic_time(:millisecond) - since)}; adopting from #{length(records)} " <>
+            "record(s). The Reaper reopens once adoption settles."
         )
 
         adopt_records(records, store, notify)

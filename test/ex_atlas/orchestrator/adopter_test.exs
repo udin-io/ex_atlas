@@ -1434,8 +1434,8 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert hd(hd(warnings)) =~ "(attempt 2)"
 
       assert [[info]] = Regex.scan(~r/\[info\][^\n]*Adopter[^\n]*read on attempt[^\n]*/, log)
-      assert info =~ "read 1 record(s)"
-      assert info =~ "reaps again"
+      assert info =~ "adopting from 1 record(s)"
+      refute info =~ "reaps again"
     end
 
     test "a delay below 1 ms waits 1 ms, and still reports the failure once" do
