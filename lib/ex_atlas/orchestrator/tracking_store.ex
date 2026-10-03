@@ -576,18 +576,59 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
     if sealed?, do: seal(record), else: Map.delete(record, :mac)
   end
 
+  @seal_salt "ex_atlas tracking record v1"
+  @lease_salt "ex_atlas owner lease v1"
+
+  @doc """
+  The MAC a store writes beside `owner`'s lease expiry, or `nil` when this
+  node has no usable callback secret.
+
+  The key is derived from the callback secret like `seal/1`'s, with a salt
+  of its own, so a lease MAC never passes as a record's.
+  """
+  @spec lease_mac(String.t(), integer()) :: binary() | nil
+  def lease_mac(owner, expires_at_ms) when is_binary(owner) and is_integer(expires_at_ms) do
+    case key(@lease_salt) do
+      nil -> nil
+      key -> lease_mac(key, owner, expires_at_ms)
+    end
+  end
+
+  @doc """
+  Whether `mac` is this node's `lease_mac/2` over `owner` and `expires_at_ms`.
+
+  `false` for no MAC, and for one written under another secret or over
+  another owner or expiry.
+  """
+  @spec lease_signed?(String.t(), integer(), term()) :: boolean()
+  def lease_signed?(owner, expires_at_ms, mac)
+      when is_binary(owner) and is_integer(expires_at_ms) and is_binary(mac) do
+    case key(@lease_salt) do
+      nil -> false
+      key -> Plug.Crypto.secure_compare(mac, lease_mac(key, owner, expires_at_ms))
+    end
+  end
+
+  def lease_signed?(_owner, _expires_at_ms, _mac), do: false
+
+  defp lease_mac(key, owner, expires_at_ms) do
+    bytes = :erlang.term_to_binary({owner, expires_at_ms}, [:deterministic])
+    :crypto.mac(:hmac, :sha256, key, bytes)
+  end
+
   defp mac(key, record) do
     bytes = :erlang.term_to_binary(Map.delete(record, :mac), [:deterministic])
     :crypto.mac(:hmac, :sha256, key, bytes)
   end
 
-  # A salt of its own, so the key that signs records signs no callback token.
-  @seal_salt "ex_atlas tracking record v1"
+  defp seal_key, do: key(@seal_salt)
 
-  defp seal_key do
+  # Each use has a salt of its own, so the key that signs records signs no
+  # callback token and no lease row.
+  defp key(salt) do
     case Application.get_env(:ex_atlas, :callback, [])[:secret] do
       secret when is_binary(secret) and byte_size(secret) >= 32 ->
-        Plug.Crypto.KeyGenerator.generate(secret, @seal_salt, cache: Plug.Crypto.Keys)
+        Plug.Crypto.KeyGenerator.generate(secret, salt, cache: Plug.Crypto.Keys)
 
       _none_or_unusable ->
         nil
