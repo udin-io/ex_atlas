@@ -11,7 +11,7 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
   import ExUnit.CaptureLog
 
   alias ExAtlas.Orchestrator
-  alias ExAtlas.Orchestrator.{Adopter, Lease, Reaper}
+  alias ExAtlas.Orchestrator.{Lease, Reaper}
   alias ExAtlas.Orchestrator.Supervisor, as: OrchestratorSupervisor
   alias ExAtlas.Orchestrator.TrackingStore.Ecto, as: Store
   alias ExAtlas.Providers.Mock
@@ -97,15 +97,9 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
     assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(orphan.id, provider: :mock)
   end
 
-  test "a row that will not decode adopts nothing and reaps nothing that boot",
+  test "a row that will not decode adopts nothing and reaps nothing while it will not decode",
        %{database: db} do
-    with_repo(db, fn ->
-      Repo.query!(
-        "INSERT INTO atlas_tracking_records (id, owner, record, inserted_at, updated_at) " <>
-          "VALUES ('pod-x', NULL, ?1, '2026-10-02T00:00:00Z', '2026-10-02T00:00:00Z')",
-        [{:blob, "not an external term"}]
-      )
-    end)
+    insert_undecodable_row(db)
 
     boot(db)
     {:ok, orphan} = spawn_untracked()
@@ -113,6 +107,33 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
 
     assert Orchestrator.list_ids() == []
     assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+  end
+
+  # Issue 155: the one test of the child as the supervisor starts it, on the
+  # default first retry of 5 s.
+  test "once the row is deleted, the next read opens the Reaper and it reaps",
+       %{database: db} do
+    insert_undecodable_row(db)
+    capture_log(fn -> boot(db) end)
+    {:ok, orphan} = spawn_untracked()
+    :ok = tick()
+    assert {:ok, %{status: :running}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+
+    Repo.query!("DELETE FROM atlas_tracking_records WHERE id = 'pod-x'")
+
+    assert :settled = await_gate(&(&1 == :settled), 700)
+    :ok = tick()
+    assert {:ok, %{status: :terminated}} = ExAtlas.get_compute(orphan.id, provider: :mock)
+  end
+
+  defp insert_undecodable_row(db) do
+    with_repo(db, fn ->
+      Repo.query!(
+        "INSERT INTO atlas_tracking_records (id, owner, record, inserted_at, updated_at) " <>
+          "VALUES ('pod-x', NULL, ?1, '2026-10-02T00:00:00Z', '2026-10-02T00:00:00Z')",
+        [{:blob, "not an external term"}]
+      )
+    end)
   end
 
   test "stopping the supervisor keeps a persisted task's row", %{database: db} do
@@ -346,14 +367,23 @@ defmodule ExAtlas.Orchestrator.SupervisorTest do
     stop_supervised!(Repo)
   end
 
-  defp await_adoption do
-    case List.keyfind(Supervisor.which_children(OrchestratorSupervisor), Adopter, 0) do
-      {Adopter, pid, _type, _mods} when is_pid(pid) ->
-        ref = Process.monitor(pid)
-        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  # The Adopter tells the Reaper once adoption settles or fails. A failed read
+  # keeps the Adopter running, retrying, so the test waits on the Reaper's gate
+  # instead of the Adopter's exit.
+  defp await_adoption, do: await_gate(&(&1 in [:settled, :failed]), 500)
 
-      _already_finished ->
-        :ok
+  defp sleep_then(fun) do
+    Process.sleep(10)
+    fun.()
+  end
+
+  defp await_gate(fun, tries) do
+    adoption = :sys.get_state(Reaper).adoption
+
+    cond do
+      fun.(adoption) -> adoption
+      tries > 0 -> sleep_then(fn -> await_gate(fun, tries - 1) end)
+      true -> flunk("the Reaper's gate stayed #{inspect(adoption)}")
     end
   end
 

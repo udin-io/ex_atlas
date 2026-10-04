@@ -233,10 +233,13 @@ defmodule ExAtlas.Orchestrator.TrackingStore do
 
   If `all/0` returns `{:error, _}` — a corrupt DETS file that had to be
   recreated, a database that will not answer — the Adopter adopts nothing and
-  **disables reaping for the entire boot**. Unlike Fly's cached tokens this
-  state is not re-acquirable, and a node that cannot tell which pods are its
-  own must never issue a DELETE. The cost is bounded by `:max_runtime_ms` plus
-  an operator reading the warning; the alternative is destroying live work.
+  **reaping stays off until a read succeeds**. The Adopter reads the store
+  again, from 5 s doubling to every 5 minutes, so a database that comes back or
+  a row an operator deletes turns reaping back on. A node that cannot tell
+  which pods are its own must never issue a DELETE. Until then no adopted task
+  has its `:max_runtime_ms` deadline either: the cost is bounded by the next
+  good read, a pod's own command exiting, and an operator reading the warning.
+  The alternative is destroying live work.
   """
 
   alias ExAtlas.Orchestrator.{CostMeter, Ownership}

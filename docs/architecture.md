@@ -49,7 +49,7 @@ database and no web UI. It runs inside the host application's VM.
 | `Orchestrator.TrackingStore` | Behaviour | `put/1`, `get/1`, `delete/1`, `all/0`, `child_spec/1`; optional `renew_lease/2`, `claim_expired/3`, `expired_leases/1` and `delete_expired/3`. Default `TrackingStore.Dets` |
 | `Orchestrator.TrackingStore.Ecto` | Functions, no process | Records as `term_to_binary` blobs in the host repo's `atlas_tracking_records`, decoded with `[:safe]`; owner leases in `atlas_owner_leases`. `Ecto.Migration` step 1 creates the records table, step 2 the lease table |
 | `Orchestrator.Supervisor` | `Supervisor` | The orchestrator's tree for a host to start after its repo; `children/0` is the one child list |
-| `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper. `adopt_claimed/3` adopts records a Lease claimed, the same way |
+| `Orchestrator.Adopter` | Transient `Task` | At boot, re-creates trackers from the store, then releases the Reaper. On a failed read it reads again, from 5 s doubling to every 5 minutes, with no limit. Every adoption, `adopt_claimed/3` included, leaves a record a live tracker holds alone |
 | `Orchestrator.Lease` | `GenServer`, only with a lease store, `:reap_owner` and a callback secret | Every `lease_ttl_ms / 3`, renews this node's lease, releases trackers of records another node owns, and, once it held its lease a full ttl, claims and adopts (in a task) the signed records of owners whose lease expired |
 | `Orchestrator.RespawnCredentials` | Behaviour | Marks a host module whose function a record's `respawn_credentials:` may call |
 | `Orchestrator.Reaper` | `GenServer` | Every `reap_interval_ms`, deletes untracked pods that carry the prefix and this node's owner |
@@ -83,14 +83,24 @@ sequenceDiagram
   Host->>Sup: start (child 2), refuses when start_orchestrator is true
   Sup->>Store: start_link, raises ArgumentError when repo is unset or not running
   Sup->>Reaper: start gated
-  Sup->>Adopter: run
+  Sup->>Adopter: run, retry on
   Adopter->>Store: all()
   Store->>Repo: SELECT id, record FROM atlas_tracking_records
   Repo-->>Store: rows
   Store-->>Adopter: ok with records, or error when a row will not decode
+  opt the read failed
+    Adopter->>Reaper: adoption_failed, once
+    loop after 5 s, doubling (10, 20, 40, 80, 160 s), then every 5 min, no limit
+      Adopter->>Store: all()
+      Store-->>Adopter: error, logged with the attempt and the next delay
+    end
+    Adopter->>Store: all()
+    Store-->>Adopter: ok with records
+  end
+  Adopter->>Adopter: skip a record whose id a live tracker holds
   Adopter->>Adopter: skip and keep a record whose provider is not built in and declares no ExAtlas.Provider
   Note over Adopter: the adopted task calls its provider at config base_url and req_options, never the record's
-  Adopter->>Reaper: adoption_complete, or adoption_failed
+  Adopter->>Reaper: adoption_complete
   Note over Host,Reaper: Shutdown runs in reverse, so the trackers stop while the Repo is up and persisted rows stay
 ```
 
@@ -146,7 +156,9 @@ classDiagram
 
 When the store cannot answer, nothing is reaped: `all/0` returns an error and
 the Adopter sends `adoption_failed`; `get/1` raises and the Reaper treats the
-pod as ours; a tracker logs the raise and keeps its pod.
+pod as ours; a tracker logs the raise and keeps its pod. The Adopter reads
+`all/0` again until it answers (#155), then adopts and sends
+`adoption_complete`, and the Reaper reaps on its next tick.
 
 `TrackingStore.Dets` keeps both answers across restarts of its process
 (#154). A file it recreated, could not open, or found deleted after this VM
@@ -295,7 +307,7 @@ flowchart TD
   ad -->|"all/0"| store
   ad -->|"start with adopted record"| cs
   cs -->|"respawn after adoption:<br/>apply(m, f, args ++ [info])"| res["Host resolver<br/>respawn_credentials"]
-  ad -->|"adoption_complete / adoption_failed"| rp["Reaper"]
+  ad -->|"adoption_failed once, then<br/>adoption_complete on the first good read"| rp["Reaper"]
   ad -->|"outcome, keyed by the supervisor's pid"| pt["persistent_term"]
   pt -.->|"init: this tree's outcome,<br/>after a Reaper restart"| rp
   rp -->|"list, delete untracked"| prov

@@ -38,7 +38,8 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
   recreated, loudly, and the store is marked **degraded for the life of the
   VM, across restarts of the store process**: `all/0` answers `{:error, _}`
   until the VM restarts, which `ExAtlas.Orchestrator.Adopter` turns into
-  "adopt nothing, and never let the Reaper DELETE anything this boot". A file
+  "adopt nothing, and never let the Reaper DELETE anything until the VM
+  restarts": its retries read the same `{:error, _}`. A file
   that will not open even after the delete marks the store the same way.
   Writes made after the recreate work normally, so resources spawned by this
   boot are still tracked.
@@ -190,12 +191,12 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
 
       {:error, reason} ->
         # Nothing left to try — come up with no table rather than take the
-        # host's supervision tree down with us. Persistence is a no-op for this
-        # boot and `all/0` says so, which disables reaping.
+        # host's supervision tree down with us. Persistence is a no-op until the
+        # VM restarts and `all/0` says so, which keeps reaping off.
         Logger.error(
           "[ExAtlas.Orchestrator.TrackingStore.Dets] could not open #{path} " <>
-            "(#{inspect(reason)}); persistence is disabled for this boot and " <>
-            "the Reaper will not terminate anything"
+            "(#{inspect(reason)}); persistence is disabled and the Reaper will not " <>
+            "terminate anything until the VM restarts"
         )
 
         degraded = mark_lost(path, {:store_unopenable, reason})
@@ -320,7 +321,7 @@ defmodule ExAtlas.Orchestrator.TrackingStore.Dets do
         Logger.warning(
           "[ExAtlas.Orchestrator.TrackingStore.Dets] tracking DETS file #{path} unreadable " <>
             "(#{inspect(reason)}); recreating. Adoption is skipped and the Reaper is " <>
-            "DISABLED for this boot — this node can no longer tell which running compute " <>
+            "DISABLED until the VM restarts — this node can no longer tell which running compute " <>
             "is its own. Check for orphaned pods at your provider."
         )
 

@@ -9,7 +9,7 @@ defmodule ExAtlas.Test.TrackingStore.Memory do
 
   `all/0` can be made to fail with `fail_all/1`, which is how a store that
   cannot account for its own contents is simulated. That is the state in which
-  reaping must be disabled for the whole boot.
+  reaping stays off until a read succeeds; `fail_all(nil)` restores it.
   """
 
   @behaviour ExAtlas.Orchestrator.TrackingStore

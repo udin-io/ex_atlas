@@ -604,6 +604,311 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  # Issue 155, decision 10 on issue 153: a retry reads the store minutes after
+  # boot, when this node may already track some of its records. A 404 for such
+  # a record means a respawn is under way, not that the task is gone.
+  describe "a record whose id a live tracker holds" do
+    alias ExAtlas.Test.FaultyProvider
+
+    setup do
+      TestOrchestrator.put_env(reap_providers: [:mock, FaultyProvider])
+    end
+
+    test "stays in the store when its pod reads 404, and keeps its tracker" do
+      {:ok, pid, compute} = Orchestrator.spawn(task_opts([]))
+      {:ok, before} = Memory.get(compute.id)
+      :ok = Mock.forget(compute.id)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert {:ok, ^before} = Memory.get(compute.id)
+      assert {:ok, ^pid} = Orchestrator.lookup(compute.id)
+    end
+
+    test "asks the provider nothing about it" do
+      {:ok, _pid, _compute} = Orchestrator.spawn(task_opts(provider: FaultyProvider))
+      FaultyProvider.arm(:get_compute, {:notify, self(), nil})
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      me = self()
+      refute_received {:called, :get_compute, ^me}
+    end
+
+    test "a list read before the tracker started keeps the record too" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, pid} = Orchestrator.lookup(compute.id)
+      :ok = Mock.forget(compute.id)
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+      assert {:ok, ^pid} = Orchestrator.lookup(compute.id)
+    end
+
+    test "a tracker that starts while the provider answers keeps the record" do
+      compute = orphaned_task(provider: FaultyProvider)
+      :ok = Mock.forget(compute.id)
+      FaultyProvider.arm(:get_compute, {:block, self()})
+      me = self()
+      adopter = Task.async(fn -> Adopter.run(notify: me) end)
+      assert_receive {:blocked, :get_compute, observer}, 2_000
+
+      holder = hold_registry_entry(compute.id)
+      FaultyProvider.reset()
+      send(observer, :release)
+      assert :ok = Task.await(adopter)
+      assert_receive :adoption_complete, 2_000
+
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+      send(holder, :stop)
+    end
+
+    # The case the skip exists for: the old pod is gone, and the tracker is
+    # renting its replacement. Without the skip the Adopter deletes the old
+    # record, and the tracker has nothing to carry to the replacement.
+    test "a tracker mid-respawn carries its record to the replacement" do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+        )
+
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      FaultyProvider.arm(:spawn_compute, {:block, self()})
+      :ok = Mock.set_status(old_id, :stopped)
+      assert_receive {:blocked, :spawn_compute, ^pid}, 2_000
+      :ok = Mock.forget(old_id)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      FaultyProvider.reset()
+      send(pid, :release)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, new_id}}, 2_000
+      assert {:ok, %{id: ^new_id}} = Memory.get(new_id)
+    end
+
+    # The respawn has written the replacement's record and is deleting the old
+    # pod. The replacement's record must already name a live tracker.
+    test "a respawn deleting its old pod keeps the replacement's record and tracker" do
+      {:ok, pid, pod_a} =
+        Orchestrator.spawn(
+          task_opts(
+            provider: FaultyProvider,
+            spot: true,
+            status_poll_ms: 30,
+            on_failure: {:respawn, 1}
+          )
+        )
+
+      old_id = pod_a.id
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(old_id))
+      FaultyProvider.arm(:terminate, {:block, self()})
+      :ok = Mock.set_status(old_id, :stopped)
+      assert_receive {:blocked, :terminate, ^pid}, 2_000
+      FaultyProvider.reset()
+      {:ok, [%{id: new_id}]} = Memory.all()
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+      send(pid, :release)
+
+      assert_receive {:atlas_compute, ^old_id, {:respawned, ^new_id}}, 2_000
+      assert {:ok, ^pid} = Orchestrator.lookup(new_id)
+      assert {:ok, %{id: ^new_id}} = Memory.get(new_id)
+    end
+
+    test "control: a record with no tracker whose pod reads 404 is deleted" do
+      compute = orphaned_task()
+      :ok = Mock.forget(compute.id)
+
+      :ok = Adopter.run(notify: self())
+      assert_receive :adoption_complete, 2_000
+
+      assert :error = Memory.get(compute.id)
+    end
+  end
+
+  # Review of issue 155: a retry acts on an `all/0` snapshot that can be minutes
+  # old, and each record waits behind the provider calls of the ones before it.
+  describe "a record that changed after the read" do
+    test "is not adopted once its tracker finished and deleted it" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+      :ok = Memory.delete(compute.id)
+      :ok = Mock.set_status(compute.id, :terminated)
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert :error = Memory.get(compute.id)
+    end
+
+    test "is left alone once another node claimed it" do
+      compute = orphaned_task_of("m1", name: "atlas-m1-job")
+      {:ok, stale} = Memory.all()
+      {:ok, record} = Memory.get(compute.id)
+      :ok = put_signed(%{record | owner: "m2"})
+
+      :ok = Adopter.adopt_claimed(stale, "m1", Memory)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{owner: "m2"}} = Memory.get(compute.id)
+    end
+
+    test "is adopted from what the store holds now" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+      backdate!(compute.id, 2 * 60 * 60 * 1_000)
+      Phoenix.PubSub.subscribe(ExAtlas.PubSub, Events.topic(compute.id))
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      id = compute.id
+      assert_receive {:atlas_compute, ^id, {:task, :timed_out}}, 2_000
+    end
+
+    defmodule ChangingStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, whose `get/1` answers a record that
+      # changed since the last read, every time.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate put(record), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+      @impl true
+      defdelegate all(), to: Memory
+
+      @impl true
+      def get(id) do
+        with {:ok, record} <- Memory.get(id),
+             do: {:ok, Map.put(record, :spent_usd, System.unique_integer([:positive]) * 1.0)}
+      end
+    end
+
+    test "that keeps changing is kept, untracked, after one more read" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+
+      log = capture_log(fn -> :ok = Adopter.adopt_claimed(stale, nil, ChangingStore) end)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+      assert log =~ "changed twice"
+    end
+
+    test "control: an unchanged record is adopted" do
+      compute = orphaned_task()
+      {:ok, stale} = Memory.all()
+
+      :ok = Adopter.adopt_claimed(stale, nil, Memory)
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+    end
+  end
+
+  # Review of issue 155: `Orchestrator.spawn/1` writes the record, then starts
+  # the tracker. A retry can read the record in between.
+  describe "a spawn whose record an adoption reads before its tracker starts" do
+    defmodule PausingStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, whose `put/1` writes and then waits
+      # for `:release` while a test listens.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      def pause(pid), do: :persistent_term.put({__MODULE__, :listener}, pid)
+      def resume, do: :persistent_term.erase({__MODULE__, :listener})
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate get(id), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+      @impl true
+      defdelegate all(), to: Memory
+
+      @impl true
+      def put(record) do
+        :ok = Memory.put(record)
+
+        case :persistent_term.get({__MODULE__, :listener}, nil) do
+          nil ->
+            :ok
+
+          pid ->
+            send(pid, {:put, record.id, self()})
+
+            receive do
+              :release -> :ok
+            end
+        end
+      end
+    end
+
+    setup do
+      TestOrchestrator.put_env(tracking_store: PausingStore)
+      on_exit(&PausingStore.resume/0)
+    end
+
+    test "keeps the pod and returns the tracker the adoption started" do
+      PausingStore.pause(self())
+      spawner = Task.async(fn -> Orchestrator.spawn(task_opts([])) end)
+      assert_receive {:put, id, putter}, 2_000
+      PausingStore.resume()
+
+      :ok = Adopter.run(store: Memory, notify: self())
+      assert_receive :adoption_complete, 2_000
+      {:ok, adopted} = Orchestrator.lookup(id)
+      send(putter, :release)
+
+      assert {:ok, ^adopted, %{id: ^id}} = Task.await(spawner)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(id, provider: :mock)
+      assert {:ok, %{id: ^id}} = Memory.get(id)
+    end
+  end
+
+  # A process registered under the tracker's name, as a tracker is from its
+  # start. Returns once the entry is in place.
+  defp hold_registry_entry(id) do
+    me = self()
+
+    holder =
+      spawn(fn ->
+        {:ok, _} = Registry.register(ExAtlas.Orchestrator.ComputeRegistry, {:compute, id}, nil)
+        send(me, :held)
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert_receive :held, 2_000
+    holder
+  end
+
   describe "a task with s3: staging" do
     @s3 %{
       access_key_id: "tid-test-4b1e",
@@ -1003,6 +1308,225 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
     end
   end
 
+  # Issue 155: the supervised Adopter, as `ExAtlas.Orchestrator.Supervisor`
+  # starts it, reads again until the store answers.
+  describe "a supervised Adopter whose store cannot be read" do
+    defmodule CountingStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, reporting each `all/0` answer to
+      # the test that set itself as the listener.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      def listen(pid), do: :persistent_term.put({__MODULE__, :listener}, pid)
+      def stop_listening, do: :persistent_term.erase({__MODULE__, :listener})
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate put(record), to: Memory
+      @impl true
+      defdelegate get(id), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+
+      @impl true
+      def all do
+        answer = Memory.all()
+
+        case :persistent_term.get({__MODULE__, :listener}, nil) do
+          nil -> :ok
+          pid -> send(pid, {:read, answer})
+        end
+
+        answer
+      end
+    end
+
+    setup do
+      CountingStore.listen(self())
+      on_exit(&CountingStore.stop_listening/0)
+    end
+
+    defp start_retrying(opts \\ []) do
+      start_supervised!(
+        {Adopter,
+         Keyword.merge(
+           [store: CountingStore, notify: self(), retry_after_ms: 10, max_retry_after_ms: 40],
+           opts
+         )}
+      )
+    end
+
+    defp await_failed_reads(0), do: :ok
+
+    defp await_failed_reads(n) do
+      assert_receive {:read, {:error, _}}, 2_000
+      await_failed_reads(n - 1)
+    end
+
+    test "reports the failure, then adopts once the store reads" do
+      compute = orphaned_task()
+      Memory.fail_all(:database_down)
+
+      start_retrying()
+      assert_receive :adoption_failed, 2_000
+      await_failed_reads(2)
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+
+      Memory.fail_all(nil)
+
+      assert_receive :adoption_complete, 2_000
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+    end
+
+    test "keeps reading past the longest delay, and adopts when the store answers" do
+      compute = orphaned_task()
+      Memory.fail_all(:database_down)
+
+      log =
+        capture_log(fn ->
+          start_retrying()
+          await_failed_reads(7)
+          Memory.fail_all(nil)
+          assert_receive :adoption_complete, 2_000
+        end)
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+
+      delays = Regex.scan(~r/next try in (\d+) ms/i, log, capture: :all_but_first)
+      assert Enum.take(List.flatten(delays), 6) == ~w(10 20 40 40 40 40)
+    end
+
+    test "reports :adoption_failed once, however many reads fail" do
+      orphaned_task()
+      Memory.fail_all(:database_down)
+
+      start_retrying()
+      await_failed_reads(6)
+      Memory.fail_all(nil)
+      assert_receive :adoption_complete, 2_000
+
+      assert_received :adoption_failed
+      refute_received :adoption_failed
+    end
+
+    test "logs one error, one warning per later failure, and one info line on success" do
+      orphaned_task()
+      Memory.fail_all(:database_down)
+
+      log =
+        capture_log(fn ->
+          start_retrying()
+          await_failed_reads(4)
+          Memory.fail_all(nil)
+          assert_receive :adoption_complete, 2_000
+        end)
+
+      assert [[error]] = Regex.scan(~r/\[error\][^\n]*Adopter[^\n]*/, log)
+      assert error =~ ":database_down"
+      assert error =~ "reaping is off until it reads"
+      assert error =~ "Next try in 10 ms"
+
+      warnings = Regex.scan(~r/\[warning\][^\n]*Adopter[^\n]*still unreadable[^\n]*/, log)
+      assert length(warnings) >= 3
+      assert hd(hd(warnings)) =~ "(attempt 2)"
+
+      assert [[info]] = Regex.scan(~r/\[info\][^\n]*Adopter[^\n]*read on attempt[^\n]*/, log)
+      assert info =~ "adopting from 1 record(s)"
+      refute info =~ "reaps again"
+    end
+
+    test "a delay below 1 ms waits 1 ms, and still reports the failure once" do
+      orphaned_task()
+      Memory.fail_all(:database_down)
+
+      capture_log(fn ->
+        start_retrying(retry_after_ms: -5, max_retry_after_ms: -5)
+        await_failed_reads(3)
+        Memory.fail_all(nil)
+        assert_receive :adoption_complete, 2_000
+      end)
+
+      assert_received :adoption_failed
+      refute_received :adoption_failed
+    end
+
+    test "stopping it while it waits returns, and keeps every record" do
+      compute = orphaned_task()
+      Memory.fail_all(:database_down)
+
+      start_retrying(retry_after_ms: 60_000, max_retry_after_ms: 60_000)
+      assert_receive :adoption_failed, 2_000
+
+      # The supervisor kills a child that ignores the shutdown after 5 s, so a
+      # stop that returns at all proves nothing; one well under 5 s does.
+      {micros, :ok} = :timer.tc(fn -> stop_supervised(Adopter) end)
+      assert micros < 1_000_000
+      assert {:ok, %{id: id}} = Memory.get(compute.id)
+      assert id == compute.id
+    end
+
+    test "control: Adopter.run/1 reads once and returns" do
+      Memory.fail_all(:database_down)
+
+      assert :ok = Adopter.run(store: CountingStore, notify: self(), retry_after_ms: 10)
+      assert_receive :adoption_failed, 2_000
+      assert_received {:read, {:error, :database_down}}
+      refute_receive {:read, _}, 100
+    end
+  end
+
+  # Issue 153, the stale-node table: a node back from its own outage reads
+  # records another node signed meanwhile.
+  describe "a retry that reads another owner's record" do
+    alias ExAtlas.Orchestrator.Reaper
+
+    setup do
+      TestOrchestrator.put_env(
+        reap_grace_ms: 0,
+        reap_interval_ms: 60_000,
+        reap_name_prefix: "atlas-"
+      )
+
+      :ok
+    end
+
+    defp retry_as(owner) do
+      TestOrchestrator.put_env(reap_owner: owner)
+      Memory.fail_all(:database_down)
+      reaper = start_supervised!(Reaper)
+      start_supervised!({Adopter, notify: self(), retry_after_ms: 10, max_retry_after_ms: 40})
+      assert_receive :adoption_failed, 2_000
+      Memory.fail_all(nil)
+      assert_receive :adoption_complete, 2_000
+      send(reaper, :adoption_complete)
+      send(reaper, :reap)
+      _ = :sys.get_state(reaper)
+      :ok
+    end
+
+    test "starts no tracker, and the Reaper keeps the pod" do
+      compute = orphaned_task_of("m2", name: "atlas-m1-job")
+
+      capture_log(fn -> retry_as("m1") end)
+
+      assert {:error, :not_tracked} = Orchestrator.info(compute.id)
+      assert {:ok, %{owner: "m2"}} = Memory.get(compute.id)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+
+    test "control: the same record under this node's owner is adopted" do
+      compute = orphaned_task_of("m1", name: "atlas-m1-job")
+
+      retry_as("m1")
+
+      assert {:ok, %{mode: :task}} = Orchestrator.info(compute.id)
+      assert {:ok, %{status: :running}} = ExAtlas.get_compute(compute.id, provider: :mock)
+    end
+  end
+
   describe "a store that misbehaves outright" do
     test "raising from all/0 fails adoption instead of failing the boot" do
       # This runs inside the host's supervision tree during their boot. A
@@ -1011,6 +1535,61 @@ defmodule ExAtlas.Orchestrator.AdopterTest do
       assert :ok = Adopter.run(store: ExAtlas.Test.TrackingStore.Raising, notify: self())
 
       assert_receive :adoption_failed, 2_000
+    end
+
+    defmodule AnsweringStore do
+      @moduledoc false
+      # `ExAtlas.Test.TrackingStore.Memory`, whose `all/0` answers what the test
+      # set, wrapped around the real records when it is a function.
+      @behaviour ExAtlas.Orchestrator.TrackingStore
+
+      alias ExAtlas.Test.TrackingStore.Memory
+
+      def answer(fun), do: :persistent_term.put({__MODULE__, :answer}, fun)
+      def clear, do: :persistent_term.erase({__MODULE__, :answer})
+
+      @impl true
+      defdelegate child_spec(opts), to: Memory
+      @impl true
+      defdelegate put(record), to: Memory
+      @impl true
+      defdelegate get(id), to: Memory
+      @impl true
+      defdelegate delete(id), to: Memory
+
+      @impl true
+      def all, do: :persistent_term.get({__MODULE__, :answer}).(Memory.all())
+    end
+
+    test "an {:ok, _} that is not a list fails adoption instead of crashing it" do
+      AnsweringStore.answer(fn _real -> {:ok, :not_a_list} end)
+      on_exit(&AnsweringStore.clear/0)
+
+      log = capture_log(fn -> assert :ok = Adopter.run(store: AnsweringStore, notify: self()) end)
+
+      assert_receive :adoption_failed, 2_000
+      assert log =~ ":not_a_list"
+    end
+
+    test "an improper list fails adoption instead of crashing it" do
+      AnsweringStore.answer(fn _real -> {:ok, [:first | :tail]} end)
+      on_exit(&AnsweringStore.clear/0)
+
+      capture_log(fn -> assert :ok = Adopter.run(store: AnsweringStore, notify: self()) end)
+
+      assert_receive :adoption_failed, 2_000
+    end
+
+    test "a record that is not a map does not cost the others their trackers" do
+      compute = orphaned_task()
+      AnsweringStore.answer(fn {:ok, records} -> {:ok, ["junk" | records]} end)
+      on_exit(&AnsweringStore.clear/0)
+
+      log = capture_log(fn -> assert :ok = Adopter.run(store: AnsweringStore, notify: self()) end)
+
+      assert_receive :adoption_complete, 2_000
+      assert {:ok, _info} = Orchestrator.info(compute.id)
+      assert log =~ ~s("junk")
     end
 
     test "one unreadable record does not cost the others their trackers" do

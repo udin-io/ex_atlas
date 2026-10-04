@@ -54,14 +54,18 @@ defmodule ExAtlas.Orchestrator.Reaper do
   Adopter has signalled `:adoption_complete`.
 
   If the Adopter signals `:adoption_failed` — the store could not be read —
-  reaping stays off for the **entire boot**. A node that cannot account for
-  which running compute is its own must never issue a DELETE; a leak is
-  bounded by `:max_runtime_ms` and an operator reading the log, while a
-  wrongly reaped task is hours of GPU spend that no longer exists.
+  reaping stays off until a later read succeeds. The Adopter reads the store
+  again, from 5 s doubling to every 5 minutes with no limit, and signals
+  `:adoption_complete` once it has adopted. A node that cannot account for
+  which running compute is its own must never issue a DELETE. Until the read
+  succeeds no adopted task has its `:max_runtime_ms` deadline either, so a
+  leak is bounded by the next good read, a pod's own command exiting and an
+  operator reading the log, while a wrongly reaped task is hours of GPU spend
+  that no longer exists.
 
-  The Adopter runs once per boot, so it records its outcome before it sends
-  it. A Reaper that crashes and restarts reads that record and keeps the gate
-  as it was: open after `:adoption_complete`, shut after `:adoption_failed`.
+  The Adopter records each outcome before it sends it. A Reaper that crashes
+  and restarts reads that record and keeps the gate as it was: open after
+  `:adoption_complete`, shut after `:adoption_failed`.
   The record is keyed by the pid of the supervisor the two share. A new tree
   (the app started again in the same VM, or a restarted supervisor) has a new
   pid, so its Reaper starts gated until that tree's Adopter signals.
@@ -205,7 +209,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
      })}
   end
 
-  # A Reaper restarted after the Adopter's one signal takes the outcome its
+  # A Reaper restarted after the Adopter's last signal takes the outcome its
   # tree recorded, even when the store was switched off since. A new tree has
   # a new supervisor pid, so an outcome from an earlier start of the app never
   # opens its gate. With no record and no store there is nothing to wait for.
@@ -280,8 +284,16 @@ defmodule ExAtlas.Orchestrator.Reaper do
     end
   end
 
-  def handle_info(:adoption_complete, state),
-    do: {:noreply, %{state | adoption: :settled, announced: nil}}
+  def handle_info(:adoption_complete, state) do
+    if state.adoption == :failed do
+      Logger.info(
+        "[ExAtlas.Orchestrator.Reaper] the tracking store read again and adoption settled; " <>
+          "reaping resumes on the next tick"
+      )
+    end
+
+    {:noreply, %{state | adoption: :settled, announced: nil}}
+  end
 
   def handle_info(:adoption_failed, state),
     do: {:noreply, %{state | adoption: :failed, announced: nil}}
@@ -390,9 +402,9 @@ defmodule ExAtlas.Orchestrator.Reaper do
 
   defp log_closed(:adoption_failed) do
     Logger.error(
-      "[ExAtlas.Orchestrator.Reaper] reaping is DISABLED for this boot: the tracking store " <>
+      "[ExAtlas.Orchestrator.Reaper] reaping is off until the tracking store reads: it " <>
         "could not be read, so this node cannot tell which running compute is its own. " <>
-        "Untracked compute will keep billing until you reclaim it by hand."
+        "The Adopter reads it again until it answers; untracked compute keeps billing meanwhile."
     )
   end
 
@@ -719,7 +731,7 @@ defmodule ExAtlas.Orchestrator.Reaper do
   # A list that raises (RunPod with no API key, which the default
   # `reap_providers` lists on a Vast-only host) or exits (an HTTP pool
   # checkout that times out) skips that provider, not the tick: a crash would
-  # restart the Reaper gated, and no Adopter signals again. The log keeps the
+  # restart the Reaper and lose the tick for every other provider. The log keeps the
   # error's kind, never its message or exit reason, which can carry a
   # provider's response.
   defp list_compute(provider) do
