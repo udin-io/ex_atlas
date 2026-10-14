@@ -1,14 +1,15 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of PR #160 (milestone
-13). It feeds the choice of the next feature. Dates are merge dates.
+merged PRs and open issues on `udin-io/ex_atlas` as of #164 (milestone
+14). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
-Milestone 13 ends with PR #160 (#155), open for review. Once it merges, no
-milestone is open, and by the rule below the next pick is rank 2, risk 16:
-after a respawn and a restart the cost cap undercounts. Milestone 13 retires
+Milestone 14, S3-compatible object storage, is in progress: Eagle needs it
+to keep event pictures and clips in a bucket (udin-io/eagle#1071). After it,
+by the rule below the next pick is rank 2, risk 16: after a respawn and a
+restart the cost cap undercounts. Milestone 13 retires
 rank 1, risk 4, for an unreadable store; its config faults stay.
 
 The rule, as for milestones 9, 11 and 13: when no roadmap item or open
@@ -33,7 +34,7 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 | Feature | Ticket | State |
 |---|---|---|
 | Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
-| Reaper survives a failed store read (milestone 13, risk 4) | #153 | Slice 1 (#154) merged in #157: a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. Slice 2 (#155) in PR #160: the supervised Adopter retries an unreadable store, the Reaper reaps once it reads, and every adoption leaves a live tracker's record alone. Merging it closes #153 and milestone 13 |
+| S3-compatible object storage (milestone 14), for Eagle's event pictures and clips (udin-io/eagle#1071) | #164, #165, #166 | Slice 1 (#164) in review: `ExAtlas.S3` reads, writes, lists and deletes objects in Tigris, AWS S3 or MinIO. Slice 2 (#165): ranged reads, streamed downloads, multipart upload. Slice 3 (#166): presigned URLs, a setup guide, and the release Eagle pins |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
@@ -42,6 +43,7 @@ Lambda Labs takes its place as the second provider, and Vast.ai the third.
 
 | Feature | PRs | Merged |
 |---|---|---|
+| Reaper survives a failed store read (milestone 13, risk 4) | #157 (#154): a DETS store that lost records keeps saying so, and a closed DETS table shields its pods. #160 (#155): the supervised Adopter retries an unreadable store, and the Reaper reaps once it reads. Closes #153 and milestone 13 | 2026-10-04 |
 | Dead owner's pods, slice 2 (milestone 11, risk 6) | #150 (#145): a record a dead owner still holds, and no node takes over, no longer shields its pod; the Reaper deletes the record, then the pod. Closes parent #143 and milestone 11 | 2026-10-03 |
 | Dead owner's pods, slices 1 and 3 (milestone 11, risk 6) | #147 (#144): the Reaper deletes a dead owner's untracked pods. #149 (#148): lease rows signed (migration step 3), dead-owner deletion on by default | 2026-10-03 |
 | Release 0.9.0 (milestone 10) | #142 (#141): version bump, the 0.9.0 section of `guides/upgrading.md`, and a `"0.9.0"` step in `mix ex_atlas.upgrade`. The owner publishes to Hex and pushes tag `v0.9.0` | 2026-10-02 |
