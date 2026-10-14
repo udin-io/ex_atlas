@@ -39,9 +39,9 @@ bin/audit                  # the weekly mix_audit run, not part of bin/ci
 ### CI is red at `hex.audit` on cowlib, and that is accepted
 
 On Actions, `hex.audit` (Hex 2.5) reports OSV advisories as well as retired
-packages. It fails on cowlib 2.20.0, the newest release, for
-EEF-CVE-2026-43966 (medium) and EEF-CVE-2026-43969 (low). Neither lists a
-fixed release. Cowlib comes in only through the test-only `bypass`. The
+packages. It fails on cowlib 2.21.0, the newest release, for
+EEF-CVE-2026-43966 (medium). 2.21.0 fixed EEF-CVE-2026-43969 (low); no
+release fixes 43966. Cowlib comes in only through the test-only `bypass`. The
 owner's decision on #53 (decision 4) keeps the step and suppresses nothing,
 so `ci` stays red until cowlib ships a fix.
 
