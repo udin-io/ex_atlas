@@ -22,7 +22,7 @@ defmodule ExAtlas.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger, :crypto, :xmerl],
       mod: {ExAtlas.Application, []}
     ]
   end
@@ -156,6 +156,7 @@ defmodule ExAtlas.MixProject do
           ExAtlas.Fly.Logs.StreamerSupervisor
         ],
         Auth: [ExAtlas.Auth.Token, ExAtlas.Auth.SignedUrl],
+        "Object storage": [ExAtlas.S3, ExAtlas.S3.Config],
         "Pod callbacks": [
           ExAtlas.Callback,
           ExAtlas.Callback.Plug,

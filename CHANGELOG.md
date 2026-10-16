@@ -7,6 +7,24 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: read and write objects in an S3-compatible bucket (#164)
+
+- `ExAtlas.S3` puts, gets, heads, deletes and lists objects in Tigris, AWS S3
+  or a store on your own network such as MinIO, with no second S3 library.
+  `config!/1` takes the bucket, endpoint, region, keys and `path_style:`, and
+  falls back to the `AWS_*` variables Fly's Tigris extension sets.
+- `list/2` returns the names directly under a folder, sorted, across every
+  page. `delete_prefix/2` deletes every object under a folder in batches of
+  1,000 and refuses an empty prefix. Both read `"events/1"` as the folder
+  `events/1/`, never `events/10/`.
+- The keys sit in `ExAtlas.Secret` from the moment `config!/1` takes them. An
+  error keeps S3's error code and request id only, since an S3 error body can
+  quote the access key id.
+- `path_style:` defaults to `false`: Tigris serves buckets made since February
+  2025 only on virtual-hosted URLs. Set it to `true` for MinIO.
+- `:xmerl` (part of OTP) joins `extra_applications`; a release that lists its
+  applications by hand needs it.
+
 ### Fixed: the Reaper reaps again once an unreadable tracking store reads (#155)
 
 - The supervised `ExAtlas.Orchestrator.Adopter` reads a tracking store that
