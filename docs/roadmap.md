@@ -1,13 +1,13 @@
 # Roadmap
 
 This page lists what ExAtlas has shipped and what comes next, built from the
-merged PRs and open issues on `udin-io/ex_atlas` as of #164 (milestone
+merged PRs and open issues on `udin-io/ex_atlas` as of #171 (milestone
 14). It feeds the choice of the next feature. Dates are merge dates.
 
 ## Next
 
-Milestone 14, S3-compatible object storage, is in progress: Eagle needs it
-to keep event pictures and clips in a bucket (udin-io/eagle#1071). After it,
+Milestone 14, S3-compatible object storage, ships in 0.11.0 once the owner publishes it. Eagle needs it to keep
+event pictures and clips in a bucket (udin-io/eagle#1071). After it,
 by the rule below the next pick is rank 2, risk 16: after a respawn and a
 restart the cost cap undercounts. Milestone 13 retires
 rank 1, risk 4, for an unreadable store; its config faults stay.
@@ -34,7 +34,7 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 | Feature | Ticket | State |
 |---|---|---|
 | Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
-| S3-compatible object storage (milestone 14), for Eagle's event pictures and clips (udin-io/eagle#1071) | #164, #165, #166 | Slice 1 (#164) merged: `ExAtlas.S3` reads, writes, lists and deletes objects in Tigris, AWS S3 or MinIO. Slice 2 (#165) merged: ranged reads, streamed downloads, multipart upload. Slice 3 (#166) in review: presigned URLs and a setup guide. Release 0.11.0 (#171), the one Eagle pins, follows both |
+| S3-compatible object storage (milestone 14), for Eagle's event pictures and clips (udin-io/eagle#1071) | #164, #165, #166 | Slice 1 (#164) merged: `ExAtlas.S3` reads, writes, lists and deletes objects in Tigris, AWS S3 or MinIO. Slice 2 (#165) merged: ranged reads, streamed downloads, multipart upload. Slice 3 (#166) merged: presigned URLs and a setup guide. Release 0.11.0 (#171), the one Eagle pins, is in review; the owner publishes and tags `v0.11.0` |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.
