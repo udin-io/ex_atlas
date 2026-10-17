@@ -607,6 +607,559 @@ defmodule ExAtlas.S3Test do
     end
   end
 
+  describe "get_range/3" do
+    test "sends one Range and answers with the bytes, the range and the total" do
+      s3 =
+        s3(fn conn ->
+          reply(conn, 206, "0123456789", [{"content-range", "bytes 100-109/209715200"}])
+        end)
+
+      assert {:ok, %{body: "0123456789", range: 100..109, total: 209_715_200}} =
+               S3.get_range(s3, "clips/42.mp4", 100..109)
+
+      assert_received {:request, request}
+      assert request.method == "GET"
+      assert request.path == "/clips/42.mp4"
+      assert request.headers["range"] == "bytes=100-109"
+    end
+
+    test "{:from, first} reads to the end of the object" do
+      s3 = s3(&reply(&1, 206, "6789", [{"content-range", "bytes 6-9/10"}]))
+
+      assert {:ok, %{body: "6789", range: 6..9, total: 10}} =
+               S3.get_range(s3, "a.bin", {:from, 6})
+
+      assert_received {:request, %{headers: %{"range" => "bytes=6-"}}}
+    end
+
+    test "a range past the end of a short object comes back cut to the object" do
+      s3 = s3(&reply(&1, 206, "89", [{"content-range", "bytes 8-9/10"}]))
+
+      assert {:ok, %{body: "89", range: 8..9, total: 10}} = S3.get_range(s3, "a.bin", 8..99)
+    end
+
+    test "a range that starts past the end is :validation, from S3's 416" do
+      s3 =
+        s3(fn conn ->
+          conn
+          |> Plug.Conn.put_resp_header("content-range", "bytes */10")
+          |> xml(416, s3_error("InvalidRange"))
+        end)
+
+      assert {:error, %Error{kind: :validation, status: 416, raw: %{code: "InvalidRange"}}} =
+               S3.get_range(s3, "a.bin", 10..19)
+    end
+
+    test "a missing key is :not_found" do
+      s3 = s3(&xml(&1, 404, s3_error("NoSuchKey")))
+      assert {:error, %Error{kind: :not_found}} = S3.get_range(s3, "a.bin", 0..9)
+    end
+
+    test "a store that ignores the Range header is an error, not the whole object" do
+      s3 = s3(&reply(&1, 200, String.duplicate("x", 100_000)))
+
+      assert {:error, %Error{kind: :provider, message: message}} =
+               S3.get_range(s3, "a.bin", 0..9)
+
+      assert message =~ "Range"
+    end
+
+    test "a store that answers a range from 0 with the whole, smaller object is read as that range" do
+      s3 = s3(&reply(&1, 200, String.duplicate("x", 500)))
+
+      assert {:ok, %{body: body, range: 0..499, total: 500}} = S3.get_range(s3, "a.bin", 0..999)
+      assert byte_size(body) == 500
+
+      assert {:ok, %{range: 0..499, total: 500}} = S3.get_range(s3, "a.bin", {:from, 0})
+    end
+
+    test "a store that ignores a range from past 0 is an error" do
+      s3 = s3(&reply(&1, 200, "0123456789"))
+      assert {:error, %Error{kind: :provider}} = S3.get_range(s3, "a.bin", {:from, 6})
+      assert {:error, %Error{kind: :provider}} = S3.get_range(s3, "a.bin", 6..9)
+    end
+
+    test "a Content-Range other than the one asked for is an error" do
+      for {asked, header, body} <- [
+            {0..9, "bytes 5-9/10", "56789"},
+            {0..9, "bytes 0-9/*", "0123456789"},
+            {0..9, "bytes 0-19/20", String.duplicate("x", 20)},
+            {0..9, "bytes 0-9/10", "short"},
+            {0..9, nil, "0123456789"}
+          ] do
+        headers = if header, do: [{"content-range", header}], else: []
+        s3 = s3(&reply(&1, 206, body, headers))
+
+        assert {:error, %Error{kind: :provider}} = S3.get_range(s3, "a.bin", asked),
+               "accepted #{inspect(header)} with #{byte_size(body)} bytes"
+      end
+    end
+
+    test "ranges S3 cannot serve are refused before any request" do
+      s3 = s3(&reply(&1, 206, "x"))
+
+      for range <- [5..4//-1, 0..9//2, -1..3, {:from, -1}, {:to, 3}, :all, "0-9"] do
+        assert {:error, %Error{kind: :validation}} = S3.get_range(s3, "a.bin", range),
+               "accepted #{inspect(range)}"
+      end
+
+      assert {:error, %Error{kind: :validation}} = S3.get_range(s3, "/bad", 0..1)
+      refute_received {:request, _}
+    end
+  end
+
+  describe "download/3" do
+    @describetag :tmp_dir
+
+    test "streams the object to a file", %{tmp_dir: dir} do
+      chunks = ["first chunk, ", "second chunk, ", "last"]
+
+      s3 =
+        s3(fn conn ->
+          Enum.reduce(chunks, Plug.Conn.send_chunked(conn, 200), fn chunk, conn ->
+            {:ok, conn} = Plug.Conn.chunk(conn, chunk)
+            conn
+          end)
+        end)
+
+      path = Path.join(dir, "42.mp4")
+      assert :ok = S3.download(s3, "clips/42.mp4", path)
+
+      assert File.read!(path) == Enum.join(chunks)
+      assert File.ls!(dir) == ["42.mp4"]
+      assert_received {:request, %{method: "GET", path: "/clips/42.mp4"}}
+    end
+
+    test "replaces a file already at the path", %{tmp_dir: dir} do
+      path = Path.join(dir, "a.bin")
+      File.write!(path, "old and longer contents")
+
+      assert :ok = S3.download(s3(&reply(&1, 200, "new")), "a.bin", path)
+      assert File.read!(path) == "new"
+    end
+
+    test "hands each chunk to a function, in order" do
+      s3 =
+        s3(fn conn ->
+          Enum.reduce(["a", "b", "c"], Plug.Conn.send_chunked(conn, 200), fn chunk, conn ->
+            {:ok, conn} = Plug.Conn.chunk(conn, chunk)
+            conn
+          end)
+        end)
+
+      test = self()
+      assert :ok = S3.download(s3, "a.bin", &send(test, {:chunk, &1}))
+
+      assert_received {:chunk, "a"}
+      assert_received {:chunk, "b"}
+      assert_received {:chunk, "c"}
+    end
+
+    test "a missing key writes no file and hands nothing to the function", %{tmp_dir: dir} do
+      s3 = s3(&xml(&1, 404, s3_error("NoSuchKey")))
+      path = Path.join(dir, "a.bin")
+
+      assert {:error, %Error{kind: :not_found, raw: %{code: "NoSuchKey"}}} =
+               S3.download(s3, "a.bin", path)
+
+      assert File.ls!(dir) == []
+
+      test = self()
+
+      assert {:error, %Error{kind: :not_found}} =
+               S3.download(s3, "a.bin", &send(test, {:chunk, &1}))
+
+      refute_received {:chunk, _}
+    end
+
+    test "a failed download leaves an existing file as it was", %{tmp_dir: dir} do
+      path = Path.join(dir, "a.bin")
+      File.write!(path, "keep me")
+
+      assert {:error, %Error{kind: :forbidden}} =
+               S3.download(s3(&xml(&1, 403, s3_error("AccessDenied"))), "a.bin", path)
+
+      assert File.read!(path) == "keep me"
+      assert File.ls!(dir) == ["a.bin"]
+    end
+
+    test "a connection that drops partway leaves no file", %{tmp_dir: dir} do
+      {port, server} = drop_after(10, 100)
+
+      s3 =
+        S3.config!(
+          bucket: "media",
+          endpoint: "http://127.0.0.1:#{port}",
+          path_style: true,
+          region: "auto",
+          access_key_id: @key_id,
+          secret_access_key: @secret,
+          req_options: [retry: false, receive_timeout: 5_000]
+        )
+
+      path = Path.join(dir, "a.bin")
+      assert {:error, %Error{kind: :transport}} = S3.download(s3, "a.bin", path)
+      assert_receive {:served, ^server}, 5_000
+      assert File.ls!(dir) == []
+    end
+
+    test "a download is never retried, so no chunk arrives twice" do
+      test = self()
+
+      s3 =
+        s3(&reply(&1, 503),
+          req_options: [plug: stub(&reply(&1, 503)), retry: :transient, retry_delay: 0]
+        )
+
+      assert {:error, %Error{status: 503}} = S3.download(s3, "a.bin", &send(test, {:chunk, &1}))
+      assert_received {:request, _}
+      refute_received {:request, _}
+    end
+
+    test "a target that is neither a path nor a 1-arity function is refused before any request" do
+      s3 = s3(&reply(&1, 200, "x"))
+
+      for target <- [:file, fn _a, _b -> :ok end, ~c"charlist/path", ""] do
+        assert {:error, %Error{kind: :validation}} = S3.download(s3, "a.bin", target)
+      end
+
+      refute_received {:request, _}
+    end
+
+    test "a path in a missing folder, or a folder itself, is refused before any request", %{
+      tmp_dir: dir
+    } do
+      s3 = s3(&reply(&1, 200, "x"))
+
+      assert {:error, %Error{kind: :validation}} =
+               S3.download(s3, "a.bin", Path.join([dir, "missing", "a.bin"]))
+
+      assert {:error, %Error{kind: :validation}} = S3.download(s3, "a.bin", dir)
+      refute_received {:request, _}
+    end
+  end
+
+  # A server that answers with `sent` of `declared` body bytes, then closes the
+  # connection: a download cut off partway.
+  defp drop_after(sent, declared) do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listen)
+    test = self()
+
+    server =
+      spawn_link(fn ->
+        {:ok, socket} = :gen_tcp.accept(listen)
+        {:ok, _request} = :gen_tcp.recv(socket, 0, 5_000)
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-length: #{declared}\r\n\r\n" <>
+              String.duplicate("x", sent)
+          )
+
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listen)
+        send(test, {:served, self()})
+      end)
+
+    {port, server}
+  end
+
+  describe "upload_file/4" do
+    @describetag :tmp_dir
+
+    @mib 1024 * 1024
+    @upload_id "VXBsb2FkIElE+/="
+
+    # A store that takes a multipart upload. `fail_part` answers that part
+    # number with a 500; `complete` answers CompleteMultipartUpload.
+    defp multipart_store(opts \\ []) do
+      fail_part = Keyword.get(opts, :fail_part)
+
+      complete =
+        Keyword.get(
+          opts,
+          :complete,
+          &xml(
+            &1,
+            200,
+            ~s(<CompleteMultipartUploadResult><ETag>"x-3"</ETag></CompleteMultipartUploadResult>)
+          )
+        )
+
+      s3(fn conn ->
+        params = URI.decode_query(conn.query_string)
+
+        case {conn.method, params} do
+          {"POST", %{"uploads" => ""}} ->
+            xml(
+              conn,
+              200,
+              "<InitiateMultipartUploadResult><Bucket>media</Bucket><Key>k</Key>" <>
+                "<UploadId>#{@upload_id}</UploadId></InitiateMultipartUploadResult>"
+            )
+
+          {"PUT", %{"partNumber" => n, "uploadId" => @upload_id}} ->
+            part_reply(conn, n, fail_part)
+
+          {"POST", %{"uploadId" => @upload_id}} ->
+            complete.(conn)
+
+          {"DELETE", %{"uploadId" => @upload_id}} ->
+            reply(conn, 204)
+        end
+      end)
+    end
+
+    defp part_reply(conn, number, fail_part) do
+      if number == to_string(fail_part),
+        do: xml(conn, 500, s3_error("InternalError")),
+        else: reply(conn, 200, "", [{"etag", ~s("etag-#{number}")}])
+    end
+
+    defp file_of(dir, size) do
+      path = Path.join(dir, "clip.mp4")
+      # Bytes that differ by position, so a part sent from the wrong offset shows.
+      File.write!(path, for(i <- 0..(size - 1), into: <<>>, do: <<rem(i, 251)>>))
+      path
+    end
+
+    test "a file of 2.5 parts goes up in three parts, then one Complete with the ETags in order",
+         %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib * 2 + div(5 * @mib, 2))
+      content = File.read!(path)
+
+      assert :ok =
+               S3.upload_file(multipart_store(), "clips/42.mp4", path,
+                 part_size: 5 * @mib,
+                 content_type: "video/mp4"
+               )
+
+      requests = collect_requests()
+
+      assert Enum.map(requests, &{&1.method, query(&1)}) == [
+               {"POST", %{"uploads" => ""}},
+               {"PUT", %{"partNumber" => "1", "uploadId" => @upload_id}},
+               {"PUT", %{"partNumber" => "2", "uploadId" => @upload_id}},
+               {"PUT", %{"partNumber" => "3", "uploadId" => @upload_id}},
+               {"POST", %{"uploadId" => @upload_id}}
+             ]
+
+      assert Enum.all?(requests, &(&1.path == "/clips/42.mp4"))
+      [create, p1, p2, p3, complete] = requests
+      assert create.headers["content-type"] == "video/mp4"
+      assert p1.body <> p2.body <> p3.body == content
+      assert byte_size(p1.body) == 5 * @mib
+      assert byte_size(p2.body) == 5 * @mib
+      assert p1.headers["x-amz-content-sha256"] == sha256(p1.body)
+
+      assert complete.body ==
+               ~s(<?xml version="1.0" encoding="UTF-8"?>) <>
+                 ~s(<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">) <>
+                 ~s(<Part><PartNumber>1</PartNumber><ETag>&quot;etag-1&quot;</ETag></Part>) <>
+                 ~s(<Part><PartNumber>2</PartNumber><ETag>&quot;etag-2&quot;</ETag></Part>) <>
+                 ~s(<Part><PartNumber>3</PartNumber><ETag>&quot;etag-3&quot;</ETag></Part>) <>
+                 "</CompleteMultipartUpload>"
+    end
+
+    test "a failed second part aborts the upload and sends no Complete", %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib * 2 + 10)
+
+      assert {:error, %Error{kind: :provider, status: 500, raw: %{code: "InternalError"}}} =
+               S3.upload_file(multipart_store(fail_part: 2), "clips/42.mp4", path,
+                 part_size: 5 * @mib
+               )
+
+      assert Enum.map(collect_requests(), &{&1.method, query(&1)["partNumber"]}) == [
+               {"POST", nil},
+               {"PUT", "1"},
+               {"PUT", "2"},
+               {"DELETE", nil}
+             ]
+    end
+
+    test "an Error inside Complete's 200 aborts the upload and returns it", %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib + 1)
+      store = multipart_store(complete: &xml(&1, 200, s3_error("InternalError")))
+
+      assert {:error, %Error{raw: %{code: "InternalError"}}} =
+               S3.upload_file(store, "clips/42.mp4", path, part_size: 5 * @mib)
+
+      assert List.last(collect_requests()).method == "DELETE"
+    end
+
+    test "a refused Complete aborts the upload", %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib + 1)
+      store = multipart_store(complete: &xml(&1, 400, s3_error("InvalidPart")))
+
+      assert {:error, %Error{kind: :provider, raw: %{code: "InvalidPart"}}} =
+               S3.upload_file(store, "clips/42.mp4", path, part_size: 5 * @mib)
+
+      assert List.last(collect_requests()).method == "DELETE"
+    end
+
+    test "a part answered without an ETag aborts the upload", %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib + 1)
+
+      s3 =
+        s3(fn conn ->
+          case {conn.method, URI.decode_query(conn.query_string)} do
+            {"POST", %{"uploads" => ""}} ->
+              xml(
+                conn,
+                200,
+                "<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>"
+              )
+
+            {"PUT", _} ->
+              reply(conn, 200)
+
+            {"DELETE", %{"uploadId" => "u1"}} ->
+              reply(conn, 204)
+          end
+        end)
+
+      assert {:error, %Error{kind: :provider}} =
+               S3.upload_file(s3, "a.bin", path, part_size: 5 * @mib)
+
+      assert Enum.map(collect_requests(), & &1.method) == ["POST", "PUT", "DELETE"]
+    end
+
+    test "a CreateMultipartUpload answer with no upload id is an error, and no part goes up",
+         %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib + 1)
+      s3 = s3(&xml(&1, 200, "<InitiateMultipartUploadResult></InitiateMultipartUploadResult>"))
+
+      assert {:error, %Error{kind: :provider}} =
+               S3.upload_file(s3, "a.bin", path, part_size: 5 * @mib)
+
+      assert [%{method: "POST"}] = collect_requests()
+    end
+
+    test "a file that needs more than 10,000 parts is refused before any request",
+         %{tmp_dir: dir} do
+      # A sparse file: its size is set without writing the bytes.
+      path = Path.join(dir, "huge")
+      {:ok, file} = :file.open(path, [:write, :raw])
+      {:ok, _} = :file.position(file, 10_000 * 5 * @mib + 1)
+      :ok = :file.truncate(file)
+      :ok = :file.close(file)
+
+      assert {:error, %Error{kind: :validation, message: message}} =
+               S3.upload_file(s3(&reply(&1, 200)), "a.bin", path, part_size: 5 * @mib)
+
+      assert message =~ "10000 parts"
+      assert collect_requests() == []
+    end
+
+    test "Create and Complete are sent once, whatever :retry the config sets", %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib + 1)
+      transient = [retry: :transient, retry_delay: 0, max_retries: 2]
+
+      create_fails = s3(&reply(&1, 503), req_options: [plug: stub(&reply(&1, 503))] ++ transient)
+
+      assert {:error, %Error{status: 503}} =
+               S3.upload_file(create_fails, "a.bin", path, part_size: 5 * @mib)
+
+      assert [%{method: "POST"}] = collect_requests()
+
+      complete_fails =
+        multipart_store(complete: &reply(&1, 503))
+        |> Map.update!(:req_options, &Keyword.merge(&1, transient))
+
+      assert {:error, %Error{status: 503}} =
+               S3.upload_file(complete_fails, "a.bin", path, part_size: 5 * @mib)
+
+      assert Enum.map(collect_requests(), &{&1.method, query(&1)["partNumber"]}) == [
+               {"POST", nil},
+               {"PUT", "1"},
+               {"PUT", "2"},
+               {"POST", nil},
+               {"DELETE", nil}
+             ]
+    end
+
+    test "an abort that fails still returns the first error", %{tmp_dir: dir} do
+      path = file_of(dir, 5 * @mib + 1)
+
+      s3 =
+        s3(fn conn ->
+          case {conn.method, conn.query_string} do
+            {"POST", "uploads="} ->
+              xml(
+                conn,
+                200,
+                "<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>"
+              )
+
+            {"PUT", _} ->
+              xml(conn, 403, s3_error("AccessDenied"))
+
+            {"DELETE", _} ->
+              xml(conn, 500, s3_error("InternalError"))
+          end
+        end)
+
+      assert {:error, %Error{kind: :forbidden, raw: %{code: "AccessDenied"}}} =
+               S3.upload_file(s3, "a.bin", path, part_size: 5 * @mib)
+    end
+
+    test "a file at or under the part size goes up in one PutObject", %{tmp_dir: dir} do
+      path = file_of(dir, 1000)
+
+      assert :ok =
+               S3.upload_file(s3(&reply(&1, 200)), "a.bin", path, content_type: "video/mp4")
+
+      assert [put] = collect_requests()
+      assert put.method == "PUT"
+      assert put.query == ""
+      assert put.body == File.read!(path)
+      assert put.headers["content-type"] == "video/mp4"
+    end
+
+    test "an empty file goes up in one PutObject", %{tmp_dir: dir} do
+      path = Path.join(dir, "empty")
+      File.write!(path, "")
+
+      assert :ok = S3.upload_file(s3(&reply(&1, 200)), "a.bin", path)
+      assert [%{method: "PUT", body: ""}] = collect_requests()
+    end
+
+    test "a part size under S3's 5 MiB minimum or over its 5 GiB maximum is refused",
+         %{tmp_dir: dir} do
+      path = file_of(dir, 10)
+      s3 = s3(&reply(&1, 200))
+
+      for size <- [5 * @mib - 1, 5 * 1024 * @mib + 1, 0, "8MiB"] do
+        assert {:error, %Error{kind: :validation}} =
+                 S3.upload_file(s3, "a.bin", path, part_size: size),
+               "accepted part_size #{inspect(size)}"
+      end
+
+      assert :ok = S3.upload_file(s3, "a.bin", path, part_size: 5 * @mib)
+    end
+
+    test "a missing file, a folder, a bad key or an unknown option is refused before any request",
+         %{tmp_dir: dir} do
+      path = file_of(dir, 10)
+      s3 = s3(&reply(&1, 200))
+
+      for {key, file, opts} <- [
+            {"a.bin", Path.join(dir, "missing"), []},
+            {"a.bin", dir, []},
+            {"a.bin", :path, []},
+            {"/bad", path, []},
+            {"a.bin", path, [acl: "public-read"]},
+            {"a.bin", path, [content_type: "a\r\nx-amz-acl: public-read"]}
+          ] do
+        assert {:error, %Error{kind: :validation}} = S3.upload_file(s3, key, file, opts)
+      end
+
+      assert collect_requests() == []
+    end
+  end
+
   describe "no credential leaves in an error" do
     test "neither key appears in any error return, a SignatureDoesNotMatch body included" do
       leaky =
@@ -627,6 +1180,9 @@ defmodule ExAtlas.S3Test do
         S3.get(s3(&xml(&1, 403, "<Error><Code>#{@key_id}</Code></Error>")), "a.jpg"),
         S3.get(s3(&xml(&1, 404, s3_error("NoSuchKey"))), "a.jpg"),
         S3.get(s3(&Req.Test.transport_error(&1, :timeout)), "a.jpg"),
+        S3.get_range(s3(&xml(&1, 403, leaky)), "a.jpg", 0..9),
+        S3.get_range(s3(&xml(&1, 416, leaky)), "a.jpg", 0..9),
+        S3.download(s3(&xml(&1, 403, leaky)), "a.jpg", fn _chunk -> :ok end),
         S3.get(s3(&reply(&1, 200)), "/bad"),
         S3.delete_prefix(s3(&reply(&1, 200)), ""),
         S3.delete_prefix(
@@ -642,6 +1198,52 @@ defmodule ExAtlas.S3Test do
 
       for result <- errors do
         assert {:error, %Error{} = error} = result
+
+        for printed <- [inspect(error), inspect(error, structs: false), Exception.message(error)] do
+          refute printed =~ @key_id
+          refute printed =~ @secret
+        end
+      end
+    end
+
+    @tag :tmp_dir
+    test "neither key appears in an upload_file error, at any step", %{tmp_dir: dir} do
+      leaky =
+        s3_error(
+          "SignatureDoesNotMatch",
+          "<AWSAccessKeyId>#{@key_id}</AWSAccessKeyId><CanonicalRequest>#{@secret}</CanonicalRequest>"
+        )
+
+      path = Path.join(dir, "big")
+      File.write!(path, :binary.copy("x", 5 * 1024 * 1024 + 1))
+
+      created =
+        "<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>"
+
+      stores = [
+        s3(&xml(&1, 403, leaky)),
+        s3(fn conn ->
+          if conn.method == "POST", do: xml(conn, 200, created), else: xml(conn, 403, leaky)
+        end),
+        s3(fn conn ->
+          case conn.method do
+            "POST" ->
+              if conn.query_string == "uploads=",
+                do: xml(conn, 200, created),
+                else: xml(conn, 200, leaky)
+
+            "PUT" ->
+              reply(conn, 200, "", [{"etag", ~s("e")}])
+
+            "DELETE" ->
+              xml(conn, 403, leaky)
+          end
+        end)
+      ]
+
+      for store <- stores do
+        assert {:error, %Error{} = error} =
+                 S3.upload_file(store, "a.bin", path, part_size: 5 * 1024 * 1024)
 
         for printed <- [inspect(error), inspect(error, structs: false), Exception.message(error)] do
           refute printed =~ @key_id

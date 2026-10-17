@@ -18,8 +18,11 @@ defmodule ExAtlas.S3 do
     * `:unauthorized`, `:rate_limited`, `:timeout`, `:provider`: other HTTP
       answers, a redirect included, since ExAtlas never follows one with a
       signed request;
-    * `:transport`: the store did not answer, a socket timeout included;
-    * `:validation`: ExAtlas refused the input before any request.
+    * `:transport`: the store did not answer or dropped the connection, a
+      socket timeout included;
+    * `:validation`: ExAtlas refused the input before any request, or S3
+      answered 416 to a range that starts past the end;
+    * `:unknown`: a local file could not be read or written.
 
   An error's `raw` holds S3's error code and request id and nothing else of
   the body: an S3 error body can quote the access key id and the request it
@@ -70,6 +73,16 @@ defmodule ExAtlas.S3 do
   @delete_batch 1000
   # 1,000 pages of 1,000 keys: a million objects under one folder.
   @max_list_pages 1000
+  # S3's multipart limits: parts of 5 MiB to 5 GiB, the last one smaller, and
+  # at most 10,000 parts.
+  @min_part_size 5 * 1024 * 1024
+  @max_part_size 5 * 1024 * 1024 * 1024
+  @default_part_size 8 * 1024 * 1024
+  @max_parts 10_000
+  # An error body is read for its code alone.
+  @error_body_bytes 64 * 1024
+  # An upload id or ETag the store sends goes back in a query or XML body.
+  @token_pattern ~r/\A[\x21-\x7e]{1,1024}\z/
 
   @typedoc "A configured bucket, from `config!/1`."
   @type t :: Config.t()
@@ -195,6 +208,101 @@ defmodule ExAtlas.S3 do
 
   def delete_prefix(_s3, _prefix), do: not_config!()
 
+  @doc """
+  The bytes of `range` in the object, without reading the rest.
+
+  `range` is `first..last` (inclusive, step 1), or `{:from, first}` for the
+  bytes from `first` to the end. A range that runs past the end comes back
+  cut to the object, and `range` in the result says which bytes came.
+  `total` is the object's full size, for a player's `Content-Range`.
+
+      ExAtlas.S3.get_range(s3, "clips/42.mp4", 0..1_048_575)
+      # => {:ok, %{body: <<...>>, range: 0..1_048_575, total: 209_715_200}}
+
+  A range that starts at or past the end is `:validation` (S3's 416
+  `InvalidRange`). A store that ignores the `Range` header and starts to send
+  the whole object is an error, and ExAtlas stops reading it.
+  """
+  @spec get_range(t(), String.t(), Range.t() | {:from, non_neg_integer()}) ::
+          {:ok, %{body: binary(), range: Range.t(), total: non_neg_integer()}}
+          | {:error, Error.t()}
+  def get_range(%Config{} = s3, key, range) do
+    with :ok <- check_key(key),
+         {:ok, first, last} <- check_range(range) do
+      limit = if last, do: last - first + 1, else: :infinity
+
+      s3
+      |> request(:get, key_url(s3, key),
+        headers: [{"range", "bytes=#{first}-#{last}"}],
+        into: collect(&range_cap(&1, first, limit))
+      )
+      |> expect_ok(&range_result(&1, first, last))
+    end
+  end
+
+  def get_range(_s3, _key, _range), do: not_config!()
+
+  @doc """
+  Stream the object to `target` as it arrives, never holding it whole.
+
+  `target` is a file path or a 1-arity function. A path gets the bytes in a
+  hidden file beside it, renamed over the path only once the last byte is
+  in, so a download that fails partway leaves no file and an existing file
+  as it was. A function gets each chunk in order; after a failure partway it
+  has seen the chunks before it.
+
+  ExAtlas makes one attempt, whatever `:retry` the config sets: a retry would
+  hand the function the first chunks twice. Call again to retry. It writes
+  as many bytes as the store sends: `head/2` first gives the size to expect.
+  If the calling process is killed partway, the hidden file stays.
+  """
+  @spec download(t(), String.t(), Path.t() | (binary() -> any())) :: result()
+  def download(%Config{} = s3, key, target) do
+    with :ok <- check_key(key),
+         {:ok, sink} <- open_sink(target) do
+      s3
+      |> request(:get, key_url(s3, key), into: stream_to(sink), retry: false)
+      |> close_sink(sink)
+      |> expect_ok(fn _response -> :ok end)
+    end
+  end
+
+  def download(_s3, _key, _target), do: not_config!()
+
+  @doc """
+  Store the file at `path` under `key`, reading it one part at a time.
+
+  A file of at most `part_size` bytes goes up in one PutObject. A larger file
+  goes up as a multipart upload in parts of `part_size` bytes, the last one
+  smaller. If any step fails, ExAtlas aborts the upload so the store keeps
+  no parts that bill, and returns the first error. An abort can fail too;
+  a bucket lifecycle rule that aborts incomplete multipart uploads after a
+  day or so clears what is left.
+
+  Options:
+
+    * `:content_type`: the object's `Content-Type`.
+    * `:part_size`: bytes per part, from 5 MiB to 5 GiB (S3's limits).
+      Defaults to 8 MiB. ExAtlas holds one part in memory at a time, so a
+      large `:part_size` costs that much memory per upload. S3 takes at most 10,000 parts, so a file over
+      10,000 parts is refused: raise `:part_size` for it.
+  """
+  @spec upload_file(t(), String.t(), Path.t(), keyword()) :: result()
+  def upload_file(s3, key, path, opts \\ [])
+
+  def upload_file(%Config{} = s3, key, path, opts) do
+    with :ok <- check_key(key),
+         {:ok, headers, part_size} <- upload_options(opts),
+         {:ok, size} <- file_size(path),
+         :ok <- check_parts(size, part_size) do
+      if size <= part_size,
+        do: put_file(s3, key, path, headers),
+        else: multipart_upload(s3, key, path, headers, size, part_size)
+    end
+  end
+
+  def upload_file(_s3, _key, _path, _opts), do: not_config!()
+
   @doc false
   # Req calls this in its `:aws_sigv4` step, so the request struct holds the
   # keys wrapped and they are revealed only while the signature is built.
@@ -226,6 +334,7 @@ defmodule ExAtlas.S3 do
       raw: true,
       decode_body: false
     )
+    |> Req.merge(Keyword.take(opts, [:into, :retry]))
     |> Req.request()
   end
 
@@ -257,6 +366,7 @@ defmodule ExAtlas.S3 do
     kind =
       case {code, Error.from_response(status, nil, :s3).kind} do
         {"NoSuchKey", _} -> :not_found
+        {_, _} when status == 416 -> :validation
         {_, :unknown} -> :provider
         {_, kind} -> kind
       end
@@ -379,15 +489,21 @@ defmodule ExAtlas.S3 do
   defp check_body(_body), do: invalid("the body must be iodata")
 
   defp put_headers(opts) do
+    with :ok <- check_options(opts, [:content_type], "put") do
+      content_type(Keyword.get(opts, :content_type))
+    end
+  end
+
+  defp check_options(opts, allowed, call) do
     cond do
       not Keyword.keyword?(opts) ->
-        invalid("put options must be a keyword list")
+        invalid("#{call} options must be a keyword list")
 
-      unknown = Enum.find(opts, fn {key, _} -> key != :content_type end) ->
-        invalid("unknown put option #{inspect(elem(unknown, 0))}")
+      unknown = Enum.find(opts, fn {key, _} -> key not in allowed end) ->
+        invalid("unknown #{call} option #{inspect(elem(unknown, 0))}")
 
       true ->
-        content_type(Keyword.get(opts, :content_type))
+        :ok
     end
   end
 
@@ -596,5 +712,317 @@ defmodule ExAtlas.S3 do
       _other ->
         body_error("a delete body ExAtlas cannot read")
     end
+  end
+
+  # --- get_range ---
+
+  defp check_range(%Range{first: first, last: last, step: 1})
+       when is_integer(first) and first >= 0 and last >= first,
+       do: {:ok, first, last}
+
+  defp check_range({:from, first}) when is_integer(first) and first >= 0,
+    do: {:ok, first, nil}
+
+  defp check_range(_range),
+    do: invalid("a range must be first..last with 0 <= first <= last, or {:from, first}")
+
+  # Reads the body into the response, and stops once it holds more than
+  # `cap_for.(status)` bytes for a 2xx: a store that ignores `Range` must not
+  # fill memory. An error body is cut at @error_body_bytes; ExAtlas reads only
+  # its code from it.
+  defp collect(cap_for) do
+    fn {:data, data}, {request, response} ->
+      cap = if response.status in 200..299, do: cap_for.(response.status), else: @error_body_bytes
+      body = response.body <> data
+
+      if cap != :infinity and byte_size(body) > cap,
+        do:
+          {:halt,
+           {request,
+            %{response | body: "", private: Map.put(response.private, :ex_atlas_overflow, true)}}},
+        else: {:cont, {request, %{response | body: body}}}
+    end
+  end
+
+  defp range_result(%Req.Response{status: 206, private: private} = response, first, last)
+       when not is_map_key(private, :ex_atlas_overflow) do
+    with [content_range] <- Req.Response.get_header(response, "content-range"),
+         [_, a, b, total] <- Regex.run(~r/\Abytes (\d+)-(\d+)\/(\d+)\z/, content_range),
+         {a, b, total} = {String.to_integer(a), String.to_integer(b), String.to_integer(total)},
+         true <- a == first and b >= a and b < total,
+         true <- if(last, do: b == last or (b < last and b == total - 1), else: b == total - 1),
+         true <- byte_size(response.body) == b - a + 1 do
+      {:ok, %{body: response.body, range: a..b, total: total}}
+    else
+      _other -> body_error("a Content-Range or body other than the range asked for")
+    end
+  end
+
+  defp range_result(%Req.Response{status: 206}, _first, _last),
+    do: body_error("more bytes than the range asked for")
+
+  # A store may answer a range from 0 with the whole object, when the object is
+  # no longer than the range (RFC 9110). That is the range, cut to the object.
+  defp range_result(%Req.Response{status: 200, body: body, private: private}, 0, _last)
+       when body != "" and not is_map_key(private, :ex_atlas_overflow),
+       do: {:ok, %{body: body, range: 0..(byte_size(body) - 1), total: byte_size(body)}}
+
+  defp range_result(%Req.Response{}, _first, _last),
+    do: body_error("the whole object: the store ignored the Range header")
+
+  # A 206 holds at most the range; a 200 to a range from 0 at most the range
+  # too; any other 2xx ignored the range, and ExAtlas reads none of it.
+  defp range_cap(206, _first, limit), do: limit
+  defp range_cap(200, 0, limit), do: limit
+  defp range_cap(_status, _first, _limit), do: 0
+
+  # --- download ---
+
+  defp open_sink(fun) when is_function(fun, 1), do: {:ok, {:fun, fun}}
+
+  defp open_sink(path) when is_binary(path) and path != "" do
+    dir = Path.dirname(path)
+    part = Path.join(dir, ".#{Path.basename(path)}.part-#{random_suffix()}")
+
+    with {:dir, true} <- {:dir, File.dir?(dir)},
+         {:path, false} <- {:path, File.dir?(path)},
+         {:ok, device} <- File.open(part, [:write, :binary, :exclusive]) do
+      {:ok, {:file, path, part, device}}
+    else
+      {:dir, false} -> invalid("the target's folder does not exist")
+      {:path, true} -> invalid("the target is a folder")
+      {:error, reason} -> invalid("cannot write the target's folder (#{inspect(reason)})")
+    end
+  end
+
+  defp open_sink(_target), do: invalid("the target must be a file path or a 1-arity function")
+
+  defp random_suffix, do: Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+  # A 2xx body goes to the sink; any other body is kept, cut, for its code.
+  defp stream_to(sink) do
+    # Only a non-2xx body reaches `collect/1`, and it caps that at @error_body_bytes.
+    collect_error = collect(fn _status -> :infinity end)
+
+    fn {:data, data}, {_request, response} = acc ->
+      if response.status in 200..299,
+        do: write_chunk(sink, data, acc),
+        else: collect_error.({:data, data}, acc)
+    end
+  end
+
+  defp write_chunk(sink, data, {request, response} = acc) do
+    case write_sink(sink, data) do
+      :ok ->
+        {:cont, acc}
+
+      {:error, reason} ->
+        {:halt, {request, Req.Response.put_private(response, :ex_atlas_write_error, reason)}}
+    end
+  end
+
+  defp write_sink({:fun, fun}, data) do
+    fun.(data)
+    :ok
+  end
+
+  defp write_sink({:file, _path, _part, device}, data), do: IO.binwrite(device, data)
+
+  defp close_sink(result, {:fun, _fun}), do: sink_result(result)
+
+  defp close_sink(result, {:file, path, part, device}) do
+    closed = File.close(device)
+
+    case {sink_result(result), closed} do
+      {{:ok, %Req.Response{status: status}} = ok, :ok} when status in 200..299 ->
+        case File.rename(part, path) do
+          :ok -> ok
+          {:error, reason} -> remove_then(part, file_error("rename", reason))
+        end
+
+      {{:ok, %Req.Response{status: status}}, {:error, reason}} when status in 200..299 ->
+        remove_then(part, file_error("write", reason))
+
+      {other, _closed} ->
+        remove_then(part, other)
+    end
+  end
+
+  defp remove_then(part, result) do
+    _ = File.rm(part)
+    result
+  end
+
+  defp sink_result({:ok, %Req.Response{private: %{ex_atlas_write_error: reason}}}),
+    do: file_error("write", reason)
+
+  defp sink_result(result), do: result
+
+  defp file_error(action, reason) do
+    {:error,
+     Error.new(:unknown,
+       provider: :s3,
+       message: "could not #{action} the local file (#{inspect(reason)})"
+     )}
+  end
+
+  # --- upload_file ---
+
+  defp upload_options(opts) do
+    with :ok <- check_options(opts, [:content_type, :part_size], "upload_file"),
+         {:ok, headers} <- content_type(Keyword.get(opts, :content_type)) do
+      case Keyword.get(opts, :part_size, @default_part_size) do
+        size when is_integer(size) and size in @min_part_size..@max_part_size ->
+          {:ok, headers, size}
+
+        _other ->
+          invalid(
+            ":part_size must be #{@min_part_size}..#{@max_part_size} bytes (5 MiB to 5 GiB)"
+          )
+      end
+    end
+  end
+
+  defp file_size(path) when is_binary(path) and path != "" do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, size: size}} -> {:ok, size}
+      {:ok, %File.Stat{}} -> invalid("the path is not a regular file")
+      {:error, reason} -> invalid("cannot read the file (#{inspect(reason)})")
+    end
+  end
+
+  defp file_size(_path), do: invalid("the path must be a non-empty string")
+
+  defp check_parts(size, part_size) do
+    if div(size + part_size - 1, part_size) > @max_parts,
+      do: invalid("the file needs more than #{@max_parts} parts; raise :part_size"),
+      else: :ok
+  end
+
+  defp put_file(s3, key, path, headers) do
+    case File.read(path) do
+      {:ok, body} ->
+        s3
+        |> request(:put, key_url(s3, key), headers: headers, body: body)
+        |> expect_ok(fn _response -> :ok end)
+
+      {:error, reason} ->
+        file_error("read", reason)
+    end
+  end
+
+  defp multipart_upload(s3, key, path, headers, size, part_size) do
+    with {:ok, upload_id} <- create_upload(s3, key, headers) do
+      result =
+        with {:ok, etags} <- upload_parts(s3, key, upload_id, path, size, part_size) do
+          complete_upload(s3, key, upload_id, etags)
+        end
+
+      if result != :ok, do: abort_upload(s3, key, upload_id)
+      result
+    end
+  end
+
+  defp upload_url(s3, key, query), do: url(s3, encode_key(key), query)
+
+  defp create_upload(s3, key, headers) do
+    s3
+    # One attempt: a retry after a lost answer would start a second upload,
+    # and the first one's parts would bill with no abort.
+    |> request(:post, upload_url(s3, key, [{"uploads", ""}]), headers: headers, retry: false)
+    |> expect_ok(fn %Req.Response{body: body} ->
+      with {:ok, {"InitiateMultipartUploadResult", _} = result} <- XML.parse(body),
+           id when is_binary(id) <- safe(XML.text(result, "UploadId"), @token_pattern) do
+        {:ok, id}
+      else
+        _other -> body_error("a CreateMultipartUpload body ExAtlas cannot read")
+      end
+    end)
+  end
+
+  defp upload_parts(s3, key, upload_id, path, size, part_size) do
+    case File.open(path, [:read, :binary, :raw]) do
+      {:ok, file} ->
+        upload = %{s3: s3, key: key, id: upload_id, file: file, size: size, part_size: part_size}
+
+        try do
+          send_parts(upload, 1, 0, [])
+        after
+          File.close(file)
+        end
+
+      {:error, reason} ->
+        file_error("read", reason)
+    end
+  end
+
+  # One part in memory at a time, read from its offset in the file.
+  defp send_parts(%{size: size}, _number, offset, etags) when offset >= size,
+    do: {:ok, Enum.reverse(etags)}
+
+  defp send_parts(upload, number, offset, etags) do
+    length = min(upload.part_size, upload.size - offset)
+
+    with {:ok, body} <- read_part(upload.file, offset, length),
+         {:ok, etag} <- upload_part(upload, number, body) do
+      send_parts(upload, number + 1, offset + length, [{number, etag} | etags])
+    end
+  end
+
+  defp read_part(file, offset, length) do
+    case :file.pread(file, offset, length) do
+      {:ok, body} when byte_size(body) == length -> {:ok, body}
+      {:error, reason} -> file_error("read", reason)
+      _short -> file_error("read", :file_changed_size)
+    end
+  end
+
+  defp upload_part(upload, number, body) do
+    query = [{"partNumber", Integer.to_string(number)}, {"uploadId", upload.id}]
+
+    upload.s3
+    |> request(:put, upload_url(upload.s3, upload.key, query), body: body)
+    |> expect_ok(&part_etag(&1, number))
+  end
+
+  defp part_etag(response, number) do
+    case safe(header(response, "etag"), @token_pattern) do
+      nil -> body_error("no usable ETag for part #{number}")
+      etag -> {:ok, etag}
+    end
+  end
+
+  defp complete_upload(s3, key, upload_id, etags) do
+    body =
+      ~s(<?xml version="1.0" encoding="UTF-8"?>) <>
+        ~s(<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">) <>
+        Enum.map_join(etags, fn {number, etag} ->
+          "<Part><PartNumber>#{number}</PartNumber><ETag>#{XML.escape(etag)}</ETag></Part>"
+        end) <>
+        "</CompleteMultipartUpload>"
+
+    s3
+    |> request(:post, upload_url(s3, key, [{"uploadId", upload_id}]),
+      headers: [{"content-type", "application/xml"}],
+      body: body,
+      # One attempt: a retry after a lost success answers NoSuchUpload, and the
+      # upload would be aborted and reported failed with the object stored.
+      retry: false
+    )
+    |> expect_ok(&complete_result/1)
+  end
+
+  # S3 sends 200 before it assembles the parts, so a failure comes back as an
+  # `Error` document inside the 200.
+  defp complete_result(%Req.Response{body: body} = response) do
+    case XML.parse(body) do
+      {:ok, {"CompleteMultipartUploadResult", _}} -> :ok
+      {:ok, {"Error", _}} -> {:error, response_error(response)}
+      _other -> body_error("a CompleteMultipartUpload body ExAtlas cannot read")
+    end
+  end
+
+  defp abort_upload(s3, key, upload_id) do
+    request(s3, :delete, upload_url(s3, key, [{"uploadId", upload_id}]))
   end
 end
