@@ -5,6 +5,23 @@ bodies and the body of issue #28. It exists so a reader can see what we chose
 and what we rejected without reading each PR. PR #70 creates it. Each row
 names the PR or issue that holds the reasoning.
 
+## Object storage (milestone 14)
+
+- `presign/4` signs SigV4 itself with `:crypto`, not with Req's
+  `Req.Utils.aws_sigv4_url/1`: that module is `@moduledoc false` and may
+  change in any release. The tests check it against AWS's worked example and
+  against Req's signer on an endpoint with a port (#166).
+- `expires_in:` has no default. A link lives as long as the caller chose,
+  from 1 second to SigV4's 7 days (#166).
+- `now:` may lead the clock by 15 minutes at most: a later signing time
+  would stretch a link past the 7-day cap on a store that accepts future
+  dates (review of #166).
+- The guide tells MinIO users to keep MinIO's own 24-hour expiry of
+  unfinished uploads, not an `mc ilm` expiry rule, which also deletes
+  finished objects (#166).
+- The release that carries #164 to #166 is its own ticket, #171, because it
+  can start only once both open PRs merge (#166).
+
 ## Dead owner's pods (milestone 11)
 
 | Decision | Alternative not taken | Where |
@@ -211,7 +228,7 @@ names the PR or issue that holds the reasoning.
 | The string `"not_stored"` counts as the marker | Match the atom only: a store that keeps atoms as strings sends `"not_stored"` to the pod as a value | #79, review |
 | `Config.build_ctx/2` drops `env:` | Pass it through: no provider reads it, and every tracker poll printed it | #79 |
 | URIs must be `s3://bucket/...`; the endpoint `http://` or `https://` | `https://` only: a local MinIO runs on plain HTTP | #26 |
-| ExAtlas never presigns and never calls S3 | Presign in ExAtlas: needs a SigV4 signer and host credentials | #26 |
+| Data staging calls no S3 from ExAtlas; the pod does. #166 later added `ExAtlas.S3.presign/4`, which signs in memory on the host | Presign in ExAtlas: needs a SigV4 signer and host credentials (#166 built one) | #26, #166 |
 | Presigned URLs may be `http://` or `https://`, need a host, and carry no user info | `https://` only: a local MinIO runs on plain HTTP | #26, #73 |
 | `Spec.Staging` holds `dataset_url` and `artifact_url` as `ExAtlas.Secret`s | Plain strings left out of `Inspect`'s `only:` list: `structs: false` and `~p` print them | #73 |
 | The entrypoint downloads the dataset archive to a file, then runs `tar -xf` | `curl \| tar -x`: GNU tar detects no compression on a pipe, and the pipe hides curl's exit code | #73 |

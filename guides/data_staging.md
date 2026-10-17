@@ -259,20 +259,17 @@ hold credentials.
 
 You presign two URLs on your side: a GET for one dataset archive and a PUT
 for one artifact archive. The pod gets only those. It can read one object and
-write one object, until the URLs expire. ExAtlas never presigns and never
-reads a URL's expiry. `ex_aws_s3` presigns locally, with no request to S3:
+write one object, until the URLs expire. ExAtlas never reads a URL's expiry.
+`ExAtlas.S3.presign/4` signs locally, with no request to S3:
 
 ```elixir
-config = ExAws.Config.new(:s3)
+s3 = ExAtlas.S3.config!(bucket: "acme-data")
 
-{:ok, dataset_url} =
-  ExAws.S3.presigned_url(config, :get, "acme-data", "datasets/abc.tar.gz", expires_in: 3_600)
+{:ok, dataset_url} = ExAtlas.S3.presign(s3, :get, "datasets/abc.tar.gz", expires_in: 3_600)
 
 # Longer than max_runtime_ms: the PUT runs when the trainer ends.
 {:ok, artifact_url} =
-  ExAws.S3.presigned_url(config, :put, "acme-data", "artifacts/run-123.tar.gz",
-    expires_in: 6 * 3_600
-  )
+  ExAtlas.S3.presign(s3, :put, "artifacts/run-123.tar.gz", expires_in: 6 * 3_600)
 
 ExAtlas.Orchestrator.run_task(
   provider: :runpod,
@@ -287,7 +284,7 @@ ExAtlas.Orchestrator.run_task(
 
 Each URL must be `http://` or `https://` with a host and a path to the
 object, carry no user info, and hold only RFC 3986 characters after the host,
-with no braces or brackets. `ExAws.S3.presigned_url/5` output passes. A URL is
+with no braces or brackets. `ExAtlas.S3.presign/4` output passes, whatever the key holds. A URL is
 a bearer credential until it expires, so ExAtlas treats it like a key:
 `inspect/1`, errors, crash reports and tracking records never show it. Plain
 `http://` sends that credential in clear text; use it only for a store on a

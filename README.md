@@ -382,8 +382,8 @@ artifacts. ExAtlas makes no S3 call itself.
 
 `s3:` needs at least one URI or URL. Presigned URLs put no storage key on the
 pod: `s3: %{dataset_url: presigned_get, artifact_url: presigned_put}`. You
-presign them yourself, for example with `ExAws.S3.presigned_url/5`; ExAtlas
-never presigns.
+presign them with `ExAtlas.S3.presign/4`; see the
+[object storage guide](guides/object_storage.md).
 
 - A key left out sets no variable. No `endpoint` means AWS S3 itself.
 - An `env:` entry that `s3:` would also set raises, naming the variable.

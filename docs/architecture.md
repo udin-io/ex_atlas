@@ -18,7 +18,7 @@ database and no web UI. It runs inside the host application's VM.
 | A running pod | POSTs to the host through `ExAtlas.Callback.Plug` (progress, logs, finish) |
 | Fly.io | `ExAtlas.Fly.*`: deploys, log streams, tokens |
 | A shared store | Optional host `TrackingStore` implementation (a database) |
-| An S3-compatible bucket | HTTPS (or plain HTTP to a store on the host's network) through `Req` (`ExAtlas.S3`): put, get, head, delete, ListObjectsV2 (paged by continuation token), DeleteObjects. Every request is signed with SigV4 and follows no redirect |
+| An S3-compatible bucket | HTTPS (or plain HTTP to a store on the host's network) through `Req` (`ExAtlas.S3`): put, get, head, delete, ListObjectsV2 (paged by continuation token), DeleteObjects. Every request is signed with SigV4 and follows no redirect. `presign/4` signs a GET or PUT URL in memory and sends nothing |
 
 ## Modules
 
