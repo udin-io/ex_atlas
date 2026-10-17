@@ -72,6 +72,49 @@ defmodule ExAtlas.S3LiveTest do
     assert {:ok, 0} = S3.delete_prefix(s3, folder)
   end
 
+  test "presigned PUT and GET URLs work with no key, for keys with special characters",
+       %{s3: s3, folder: folder} do
+    names = [
+      "a b.jpg",
+      "a+b",
+      "100%",
+      "q?x=1",
+      "h#1",
+      "café ü.jpg",
+      "x&y<z>.txt",
+      "~!$'()*,;=@[]"
+    ]
+
+    for name <- names do
+      key = "#{folder}/#{name}"
+      assert {:ok, put_url} = S3.presign(s3, :put, key, expires_in: 60)
+      assert {:ok, %{status: 200}} = Req.put(put_url, body: name, retry: false)
+
+      assert {:ok, get_url} = S3.presign(s3, :get, key, expires_in: 60)
+
+      assert {:ok, %{status: 200, body: ^name}} =
+               Req.get(get_url, retry: false, decode_body: false)
+
+      assert {:ok, ^name} = S3.get(s3, key)
+    end
+
+    expired = DateTime.add(DateTime.utc_now(), -120)
+
+    assert {:ok, old_url} =
+             S3.presign(s3, :get, "#{folder}/a b.jpg", expires_in: 60, now: expired)
+
+    assert {:ok, %{status: 403}} = Req.get(old_url, retry: false)
+
+    assert {:ok, ok_url} = S3.presign(s3, :get, "#{folder}/a b.jpg", expires_in: 60)
+    tampered = String.replace(ok_url, "X-Amz-Expires=60", "X-Amz-Expires=600")
+    assert {:ok, %{status: 403}} = Req.get(tampered, retry: false)
+
+    assert {:ok, acl_url} = S3.presign(s3, :put, "#{folder}/acl.txt", expires_in: 60)
+
+    assert {:ok, %{status: 403}} =
+             Req.put(acl_url, body: "x", headers: [{"x-amz-acl", "public-read"}], retry: false)
+  end
+
   test "a wrong secret is :forbidden and the error holds no key", %{s3: s3, folder: folder} do
     bad = %{s3 | secret_access_key: ExAtlas.Secret.wrap("wrong-secret-0000")}
     key_id = ExAtlas.Secret.reveal(s3.access_key_id)

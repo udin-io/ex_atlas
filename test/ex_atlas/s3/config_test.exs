@@ -37,6 +37,11 @@ defmodule ExAtlas.S3.ConfigTest do
       assert ExAtlas.Secret.reveal(s3.secret_access_key) == @secret
     end
 
+    test "an endpoint's host is lowercased, as a browser sends it in a presigned link" do
+      s3 = S3.config!([bucket: "media", endpoint: "HTTP://MinIO.Local:9000/"] ++ keys())
+      assert s3.endpoint == "http://minio.local:9000"
+    end
+
     test "an option wins over its variable" do
       System.put_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
       System.put_env("AWS_REGION", "eu-west-1")
