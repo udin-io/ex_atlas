@@ -1,7 +1,9 @@
 defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
-  # Bypass stands in for Lambda's Cloud API v1. A refusal test registers no
+  # ExAtlas.Test.Api stands in for Lambda's Cloud API v1. A refusal test registers no
   # route for POST /instance-operations/launch, so a launch fails the test.
   use ExUnit.Case, async: false
+
+  alias ExAtlas.Test.Api
 
   import ExAtlas.Test.FakeLambda
 
@@ -14,31 +16,32 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
   @hf_token "hf-probe-7c1d9e"
 
   setup do
-    bypass = Bypass.open()
+    server = Api.open()
 
     opts = [
       provider: :lambda_labs,
       api_key: "lambda-test-key",
-      base_url: "http://localhost:#{bypass.port}",
+      base_url: server.base_url,
+      req_options: [plug: Api.plug()],
       gpu: :h100,
       image: "vllm/vllm-openai:latest",
       provider_opts: %{ssh_key_name: "deploy"}
     ]
 
-    {:ok, bypass: bypass, opts: opts}
+    {:ok, server: server, opts: opts}
   end
 
-  defp expect_types(bypass, types \\ instance_types()) do
-    Bypass.expect_once(bypass, "GET", "/instance-types", fn conn ->
+  defp expect_types(server, types \\ instance_types()) do
+    Api.expect_once(server, "GET", "/instance-types", fn conn ->
       json(conn, 200, %{"data" => types})
     end)
   end
 
   # Sends the decoded launch body to the test and answers with one id.
-  defp expect_launch(bypass) do
+  defp expect_launch(server) do
     test_pid = self()
 
-    Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+    Api.expect_once(server, "POST", @launch, fn conn ->
       {body, conn} = read_json(conn)
       send(test_pid, {:launch, body})
       json(conn, 200, %{"data" => %{"instance_ids" => [@launched_id]}})
@@ -52,16 +55,16 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
   # Routes for the firewall calls a spawn with `ports:` makes. A test that
   # asserts on them registers its own expects instead.
-  defp stub_firewall(bypass) do
-    Bypass.stub(bypass, "GET", "/firewall-rulesets", fn conn ->
+  defp stub_firewall(server) do
+    Api.stub(server, "GET", "/firewall-rulesets", fn conn ->
       json(conn, 200, %{"data" => []})
     end)
 
-    Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
+    Api.stub(server, "POST", "/firewall-rulesets", fn conn ->
       json(conn, 200, %{"data" => ruleset(%{"id" => "rs-stub"})})
     end)
 
-    Bypass.stub(bypass, "DELETE", "/firewall-rulesets/:id", fn conn ->
+    Api.stub(server, "DELETE", "/firewall-rulesets/:id", fn conn ->
       json(conn, 200, %{"data" => %{}})
     end)
   end
@@ -70,12 +73,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
   describe "spawn_compute/1 picks the type and region" do
     test "launches the catalog's type in the first hinted region with capacity", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
-      stub_firewall(bypass)
+      expect_types(server)
+      expect_launch(server)
+      stub_firewall(server)
       before = DateTime.utc_now() |> DateTime.truncate(:second)
 
       assert {:ok, compute} =
@@ -118,21 +121,21 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "with no hint, launches in Lambda's first region with capacity", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, %{region: "us-west-1"}} = ExAtlas.spawn_compute(opts)
       assert launched_body()["region_name"] == "us-west-1"
     end
 
     test "a type with no capacity anywhere is a :provider error naming it, and no launch", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
 
       assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
                ExAtlas.spawn_compute(Keyword.put(opts, :gpu, :h100_sxm))
@@ -140,9 +143,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert message =~ "gpu_1x_h100_sxm5"
     end
 
-    test "gpu_count: 8 launches the 8x type", %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
-      expect_launch(bypass)
+    test "gpu_count: 8 launches the 8x type", %{server: server, opts: opts} do
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, %{gpu_type: "gpu_8x_h100_sxm5", gpu_count: 8, cost_per_hour: 23.92}} =
                ExAtlas.spawn_compute(Keyword.merge(opts, gpu: :h100_sxm, gpu_count: 8))
@@ -151,8 +154,8 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a count Lambda does not list is :validation naming the listed counts, and no launch",
-         %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
+         %{server: server, opts: opts} do
+      expect_types(server)
 
       assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
                ExAtlas.spawn_compute(Keyword.merge(opts, gpu: :h100_sxm, gpu_count: 4))
@@ -161,9 +164,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert message =~ "1, 8"
     end
 
-    test "provider_opts.instance_type wins over the catalog", %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
-      expect_launch(bypass)
+    test "provider_opts.instance_type wins over the catalog", %{server: server, opts: opts} do
+      expect_types(server)
+      expect_launch(server)
 
       opts =
         Keyword.put(opts, :provider_opts, %{ssh_key_name: "deploy", instance_type: "gpu_1x_a10"})
@@ -182,12 +185,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     @tag_key ~r/^[a-z][a-z0-9-:]+$/
 
     test "holds only fields Lambda's spec defines, with valid tags", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
-      stub_firewall(bypass)
+      expect_types(server)
+      expect_launch(server)
+      stub_firewall(server)
 
       long_image = "registry.example.com/" <> String.duplicate("a", 200) <> ":latest"
 
@@ -225,7 +228,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert message =~ "ssh_key_name"
     end
 
-    test "app config alone works", %{bypass: bypass, opts: opts} do
+    test "app config alone works", %{server: server, opts: opts} do
       previous = Application.get_env(:ex_atlas, :lambda_labs)
       Application.put_env(:ex_atlas, :lambda_labs, ssh_key_name: "from-config")
 
@@ -235,8 +238,8 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
           else: Application.delete_env(:ex_atlas, :lambda_labs)
       end)
 
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(Keyword.put(opts, :provider_opts, %{}))
       assert launched_body()["ssh_key_names"] == ["from-config"]
@@ -246,10 +249,10 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
   describe "spawn_compute/1 user_data script" do
     @tag :tmp_dir
     test "runs the image with every port and variable; values reach docker byte for byte, never on argv",
-         %{bypass: bypass, opts: opts, tmp_dir: dir} do
-      expect_types(bypass)
-      expect_launch(bypass)
-      stub_firewall(bypass)
+         %{server: server, opts: opts, tmp_dir: dir} do
+      expect_types(server)
+      expect_launch(server)
+      stub_firewall(server)
       tricky = "it's $(id) `whoami` \"q\"\nline two\\"
 
       assert {:ok, compute} =
@@ -328,9 +331,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     @tag :tmp_dir
     test "control: a name that only contains one of bash's names launches and reaches docker",
-         %{bypass: bypass, opts: opts, tmp_dir: dir} do
-      expect_types(bypass)
-      expect_launch(bypass)
+         %{server: server, opts: opts, tmp_dir: dir} do
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [env: %{"APP_UID" => "1000"}])
 
@@ -405,11 +408,11 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "no image and none of them launches a plain VM with no user_data", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, %{image: nil, ports: []}} = ExAtlas.spawn_compute(Keyword.delete(opts, :image))
 
@@ -419,19 +422,19 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a script of 1,000,000 bytes launches; one byte more is :validation", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       # Measure the script around an empty value, then pad the value to fit.
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [env: %{"PAD" => ""}])
       base = byte_size(launched_body()["user_data"])
       pad = String.duplicate("x", 1_000_000 - base)
 
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [env: %{"PAD" => pad}])
       assert byte_size(launched_body()["user_data"]) == 1_000_000
 
@@ -467,12 +470,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a launch answered 200 with no instance id is a :provider error", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         json(conn, 200, %{"data" => %{"instance_ids" => []}})
       end)
 
@@ -515,12 +518,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     @tag :tmp_dir
     test "with self_terminate: false runs the command after the image, each argument quoted", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: dir
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       command = ["python", "it's $(id) `whoami`", "--epochs=3"]
 
@@ -538,18 +541,18 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       refute File.exists?(Path.join(dir, "ran-id"))
     end
 
-    test "command: [] runs the image's own command and launches", %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
-      expect_launch(bypass)
+    test "command: [] runs the image's own command and launches", %{server: server, opts: opts} do
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [command: []])
     end
 
     @tag :tmp_dir
     test "with a callback, the host waits on the container and POSTs its exit code to /finish",
-         %{bypass: bypass, opts: opts, tmp_dir: dir, callback: callback} do
-      expect_types(bypass)
-      expect_launch(bypass)
+         %{server: server, opts: opts, tmp_dir: dir, callback: callback} do
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} =
                ExAtlas.spawn_compute(
@@ -585,9 +588,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     @tag :tmp_dir
     test "with a callback, no env value or token reaches an argv, a log or the unit's environment",
-         %{bypass: bypass, opts: opts, tmp_dir: dir, callback: callback} do
-      expect_types(bypass)
-      expect_launch(bypass)
+         %{server: server, opts: opts, tmp_dir: dir, callback: callback} do
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, compute} =
                ExAtlas.spawn_compute(
@@ -631,13 +634,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     @tag :tmp_dir
     test "with a callback and no command, the host reports the image's own exit", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: dir,
       callback: callback
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [callback: callback])
 
@@ -650,13 +653,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     # `docker wait` prints an error, not a code, when the container is gone.
     @tag :tmp_dir
     test "with a callback, a docker wait that prints no exit code POSTs 125", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: dir,
       callback: callback
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [callback: callback])
 
@@ -670,13 +673,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     # max_runtime_ms: the report ends the task at once instead.
     @tag :tmp_dir
     test "with a callback, a docker run that fails still POSTs 125", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: dir,
       callback: callback
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} =
                ExAtlas.spawn_compute(opts ++ [command: ["true"], callback: callback])
@@ -693,12 +696,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     @tag :tmp_dir
     test "without a callback, a docker run that fails fails the script", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: dir
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts)
 
@@ -737,17 +740,17 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     @ruleset_rule_keys ~w(protocol port_range source_network description)
 
     # Logs the order of the three calls a spawn makes.
-    defp expect_ruleset_flow(bypass, log, launch_status \\ 200) do
+    defp expect_ruleset_flow(server, log, launch_status \\ 200) do
       test_pid = self()
 
-      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+      Api.expect_once(server, "POST", "/firewall-rulesets", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:ruleset, body})
         Agent.update(log, &[:create | &1])
         json(conn, 200, %{"data" => ruleset(%{"id" => "rs-1", "name" => body["name"]})})
       end)
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:launch, body})
         Agent.update(log, &[:launch | &1])
@@ -766,8 +769,8 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     # Each spawn lists the rulesets first, to sweep (see the next describe).
-    setup %{bypass: bypass} do
-      Bypass.stub(bypass, "GET", "/firewall-rulesets", fn conn ->
+    setup %{server: server} do
+      Api.stub(server, "GET", "/firewall-rulesets", fn conn ->
         json(conn, 200, %{"data" => []})
       end)
 
@@ -775,12 +778,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "creates one ruleset with a tcp rule per port, then launches with its id", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_types(bypass)
-      expect_ruleset_flow(bypass, log)
+      expect_types(server)
+      expect_ruleset_flow(server, log)
 
       assert {:ok, %{id: @launched_id}} =
                ExAtlas.spawn_compute(
@@ -810,12 +813,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "provider_opts.source_network limits the rules", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_types(bypass)
-      expect_ruleset_flow(bypass, log)
+      expect_types(server)
+      expect_ruleset_flow(server, log)
 
       opts =
         Keyword.put(opts, :provider_opts, %{
@@ -827,30 +830,30 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert [%{"source_network" => "203.0.113.0/24"}] = ruleset_body()["rules"]
     end
 
-    test "a port listed twice opens one rule", %{bypass: bypass, opts: opts, log: log} do
-      expect_types(bypass)
-      expect_ruleset_flow(bypass, log)
+    test "a port listed twice opens one rule", %{server: server, opts: opts, log: log} do
+      expect_types(server)
+      expect_ruleset_flow(server, log)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{22, :tcp}, {22, :http}]])
       assert [%{"port_range" => [22, 22]}] = ruleset_body()["rules"]
     end
 
     test "the ruleset name holds at most 64 characters, and differs for two spawns of one name",
-         %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
+         %{server: server, opts: opts} do
+      expect_types(server)
       test_pid = self()
 
-      Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
+      Api.stub(server, "POST", "/firewall-rulesets", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:ruleset, body})
         json(conn, 200, %{"data" => ruleset()})
       end)
 
-      Bypass.stub(bypass, "POST", @launch, fn conn ->
+      Api.stub(server, "POST", @launch, fn conn ->
         json(conn, 200, %{"data" => %{"instance_ids" => [@launched_id]}})
       end)
 
-      Bypass.stub(bypass, "GET", "/instance-types", fn conn ->
+      Api.stub(server, "GET", "/instance-types", fn conn ->
         json(conn, 200, %{"data" => instance_types()})
       end)
 
@@ -865,32 +868,32 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert first != second
     end
 
-    test "an unnamed spawn gets a generated ruleset name", %{bypass: bypass, opts: opts, log: log} do
-      expect_types(bypass)
-      expect_ruleset_flow(bypass, log)
+    test "an unnamed spawn gets a generated ruleset name", %{server: server, opts: opts, log: log} do
+      expect_types(server)
+      expect_ruleset_flow(server, log)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
       assert ruleset_body()["name"] =~ ~r/\Aatlas-[0-9a-f]{8}\z/
     end
 
     test "ports: [] creates no ruleset and sends no firewall_rulesets", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: []])
       refute Map.has_key?(launched_body(), "firewall_rulesets")
     end
 
     test "a refused ruleset create returns its error and launches nothing", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
 
-      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+      Api.expect_once(server, "POST", "/firewall-rulesets", fn conn ->
         json(conn, 400, %{
           "error" => %{"code" => "global/quota-exceeded", "message" => "Too many rulesets."}
         })
@@ -906,14 +909,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a ruleset create answered 429 then 200 creates one ruleset", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_types(bypass)
+      expect_types(server)
       calls = :counters.new(1, [])
 
-      Bypass.expect(bypass, "POST", "/firewall-rulesets", fn conn ->
+      Api.expect(server, "POST", "/firewall-rulesets", fn conn ->
         :counters.add(calls, 1, 1)
 
         if :counters.get(calls, 1) == 1 do
@@ -925,7 +928,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
         end
       end)
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         Agent.update(log, &[:launch | &1])
         json(conn, 200, %{"data" => %{"instance_ids" => [@launched_id]}})
       end)
@@ -935,14 +938,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a refused launch deletes the ruleset it created and returns the launch error", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_types(bypass)
-      expect_ruleset_flow(bypass, log, 400)
+      expect_types(server)
+      expect_ruleset_flow(server, log, 400)
 
-      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
+      Api.expect_once(server, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
         Agent.update(log, &[:delete | &1])
         json(conn, 200, %{"data" => %{}})
       end)
@@ -954,14 +957,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a refused launch whose ruleset delete also fails still returns the launch error", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_types(bypass)
-      expect_ruleset_flow(bypass, log, 400)
+      expect_types(server)
+      expect_ruleset_flow(server, log, 400)
 
-      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
+      Api.expect_once(server, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
         json(conn, 500, %{"error" => %{"code" => "global/internal-error"}})
       end)
 
@@ -972,13 +975,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a launch answered 503 keeps the ruleset, since the instance may hold it", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_types(bypass)
+      expect_types(server)
       # No DELETE route: a delete fails the test.
-      expect_ruleset_flow(bypass, log, 503)
+      expect_ruleset_flow(server, log, 503)
 
       assert {:error, %ExAtlas.Error{status: 503}} =
                ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
@@ -987,21 +990,21 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a launch answered 200 with no instance id deletes the ruleset it created", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
       test_pid = self()
 
-      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+      Api.expect_once(server, "POST", "/firewall-rulesets", fn conn ->
         json(conn, 200, %{"data" => ruleset(%{"id" => "rs-1"})})
       end)
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         json(conn, 200, %{"data" => %{"instance_ids" => []}})
       end)
 
-      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
+      Api.expect_once(server, "DELETE", "/firewall-rulesets/rs-1", fn conn ->
         send(test_pid, :ruleset_deleted)
         json(conn, 200, %{"data" => %{}})
       end)
@@ -1013,12 +1016,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a ruleset create answered 200 with no id is a :provider error and launches nothing", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
 
-      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+      Api.expect_once(server, "POST", "/firewall-rulesets", fn conn ->
         json(conn, 200, %{"data" => %{"name" => "atlas-x"}})
       end)
 
@@ -1029,14 +1032,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "us-south-1 launches with no ruleset, since Lambda applies no firewall rules there", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass, %{
+      expect_types(server, %{
         "gpu_1x_h100_pcie" => type_entry("gpu_1x_h100_pcie", 249, 1, "H100", ["us-south-1"])
       })
 
-      expect_launch(bypass)
+      expect_launch(server)
 
       assert {:ok, %{region: "us-south-1"}} =
                ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
@@ -1061,23 +1064,23 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
     # Lambda refuses to delete a ruleset an instance uses, so every spawn
     # first deletes the `atlas-` rulesets none uses.
-    defp expect_list(bypass, rulesets) do
-      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+    defp expect_list(server, rulesets) do
+      Api.expect_once(server, "GET", "/firewall-rulesets", fn conn ->
         json(conn, 200, %{"data" => rulesets})
       end)
     end
 
-    defp expect_create(bypass) do
-      Bypass.expect_once(bypass, "POST", "/firewall-rulesets", fn conn ->
+    defp expect_create(server) do
+      Api.expect_once(server, "POST", "/firewall-rulesets", fn conn ->
         json(conn, 200, %{"data" => ruleset(%{"id" => "rs-new"})})
       end)
     end
 
     # Reports each DELETE to the test; answers with `status`.
-    defp track_deletes(bypass, status \\ 200) do
+    defp track_deletes(server, status \\ 200) do
       test_pid = self()
 
-      Bypass.stub(bypass, "DELETE", "/firewall-rulesets/:id", fn conn ->
+      Api.stub(server, "DELETE", "/firewall-rulesets/:id", fn conn ->
         send(test_pid, {:deleted, List.last(conn.path_info)})
         json(conn, status, %{"data" => %{}})
       end)
@@ -1088,15 +1091,15 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "deletes old atlas- rulesets with no instance; keeps one in use, a young one and foreign ones",
-         %{bypass: bypass, opts: opts} do
+         %{server: server, opts: opts} do
       young = DateTime.utc_now() |> DateTime.to_iso8601()
 
-      expect_types(bypass)
-      expect_create(bypass)
-      expect_launch(bypass)
-      track_deletes(bypass)
+      expect_types(server)
+      expect_create(server)
+      expect_launch(server)
+      track_deletes(server)
 
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{"id" => "rs-unused", "name" => "atlas-old-a-0a0a0a0a", "created" => @old}),
         ruleset(%{"id" => "rs-unused-2", "name" => "atlas-old-b-0a0a0a0a", "created" => @old}),
         ruleset(%{
@@ -1117,15 +1120,15 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a ruleset that lists no instance_ids or no created time is kept", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_create(bypass)
-      expect_launch(bypass)
-      track_deletes(bypass)
+      expect_types(server)
+      expect_create(server)
+      expect_launch(server)
+      track_deletes(server)
 
-      expect_list(bypass, [
+      expect_list(server, [
         Map.delete(
           ruleset(%{"id" => "rs-a", "name" => "atlas-a-0a0a0a0a", "created" => @old}),
           "instance_ids"
@@ -1141,14 +1144,14 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert deleted() == []
     end
 
-    test "deletes at most ten per spawn", %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
-      expect_create(bypass)
-      expect_launch(bypass)
-      track_deletes(bypass)
+    test "deletes at most ten per spawn", %{server: server, opts: opts} do
+      expect_types(server)
+      expect_create(server)
+      expect_launch(server)
+      track_deletes(server)
 
       expect_list(
-        bypass,
+        server,
         for(
           n <- 1..12,
           do: ruleset(%{"id" => "rs-#{n}", "name" => "atlas-#{n}-0a0a0a0a", "created" => @old})
@@ -1160,15 +1163,15 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a refused delete does not fail the spawn or stop the next delete", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_create(bypass)
-      expect_launch(bypass)
-      track_deletes(bypass, 400)
+      expect_types(server)
+      expect_create(server)
+      expect_launch(server)
+      track_deletes(server, 400)
 
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{"id" => "rs-1", "name" => "atlas-1-0a0a0a0a", "created" => @old}),
         ruleset(%{"id" => "rs-2", "name" => "atlas-2-0a0a0a0a", "created" => @old})
       ])
@@ -1177,22 +1180,22 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
       assert Enum.sort(deleted()) == ["rs-1", "rs-2"]
     end
 
-    test "a failed list does not fail the spawn", %{bypass: bypass, opts: opts} do
-      expect_types(bypass)
-      expect_create(bypass)
-      expect_launch(bypass)
+    test "a failed list does not fail the spawn", %{server: server, opts: opts} do
+      expect_types(server)
+      expect_create(server)
+      expect_launch(server)
 
-      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+      Api.expect_once(server, "GET", "/firewall-rulesets", fn conn ->
         json(conn, 403, %{"error" => %{"code" => "global/account-inactive"}})
       end)
 
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: [{80, :http}]])
     end
 
-    test "a spawn with no ports sweeps nothing", %{bypass: bypass, opts: opts} do
+    test "a spawn with no ports sweeps nothing", %{server: server, opts: opts} do
       # No GET route: a list request fails the test.
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
       assert {:ok, _} = ExAtlas.spawn_compute(opts ++ [ports: []])
     end
   end
@@ -1215,13 +1218,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
   describe "spawn_compute/1 launch retries" do
     test "a launch answered 503 is sent once and returns :provider", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
 
       # expect_once fails the test if a retry reaches the server.
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         json(conn, 503, %{"error" => %{"code" => "global/internal-error", "message" => "busy"}})
       end)
 
@@ -1229,13 +1232,13 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "a launch answered 429 then 200 launches once and returns the instance", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
       calls = :counters.new(1, [])
 
-      Bypass.expect(bypass, "POST", @launch, fn conn ->
+      Api.expect(server, "POST", @launch, fn conn ->
         :counters.add(calls, 1, 1)
 
         if :counters.get(calls, 1) == 1 do
@@ -1255,16 +1258,15 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
   describe "spawn_compute/1 launch redirect" do
     # A 307 or 308 re-sends the body, `user_data` included, to its Location.
     test "a redirect is not followed: user_data goes to no other host", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      elsewhere = Bypass.open()
-      Bypass.down(elsewhere)
-      expect_types(bypass)
+      elsewhere = Api.open()
+      expect_types(server)
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         conn
-        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.put_resp_header("location", elsewhere.base_url <> "/steal")
         |> Plug.Conn.resp(307, "")
       end)
 
@@ -1275,12 +1277,12 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
 
   describe "spawn_compute/1 secrets" do
     test "a launch error that echoes an env value withholds the message and the body", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
+      expect_types(server)
 
-      Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+      Api.expect_once(server, "POST", @launch, fn conn ->
         json(conn, 400, %{
           "error" => %{
             "code" => "global/invalid-parameters",
@@ -1302,7 +1304,7 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     # An echo need not hold the value as given: the script holds it shell-quoted,
     # JSON escapes it, and Lambda may cut it short.
     test "a launch error that echoes a quoted, escaped or cut value withholds it too", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       value = "p'ss\nw0rd-#{@hf_token}"
@@ -1312,9 +1314,9 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
             Jason.encode!(value),
             "value starting #{String.slice(value, 0, 6)} is invalid"
           ] do
-        expect_types(bypass)
+        expect_types(server)
 
-        Bypass.expect_once(bypass, "POST", @launch, fn conn ->
+        Api.expect_once(server, "POST", @launch, fn conn ->
           json(conn, 400, %{
             "error" => %{"code" => "global/invalid-parameters", "message" => echo}
           })
@@ -1329,11 +1331,11 @@ defmodule ExAtlas.Providers.LambdaLabsSpawnTest do
     end
 
     test "the returned Compute prints no auth token and no env value", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_types(bypass)
-      expect_launch(bypass)
+      expect_types(server)
+      expect_launch(server)
 
       assert {:ok, compute} =
                ExAtlas.spawn_compute(opts ++ [env: %{"HF_TOKEN" => @hf_token}, auth: :bearer])

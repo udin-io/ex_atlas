@@ -1,6 +1,8 @@
 defmodule ExAtlas.Orchestrator.ComputeServerTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   import Plug.Conn, only: [put_req_header: 3]
 
   alias ExAtlas.Callback
@@ -908,23 +910,23 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
 
   describe "upstream status polling when the provider API is failing" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
 
-      Bypass.expect(bypass, "POST", "/pods", fn conn ->
+      Api.expect(server, "POST", "/pods", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(201, ~s({"id": "pod_1", "desiredStatus": "RUNNING"}))
       end)
 
-      Bypass.stub(bypass, "DELETE", "/pods/pod_1", fn conn ->
+      Api.stub(server, "DELETE", "/pods/pod_1", fn conn ->
         Plug.Conn.resp(conn, 200, "{}")
       end)
 
       opts = [
         provider: :runpod,
         api_key: "test-key",
-        base_url: "http://localhost:#{bypass.port}",
-        req_options: [retry: false],
+        base_url: server.base_url,
+        req_options: [plug: Api.plug(), retry: false],
         gpu: :h100,
         image: "x",
         idle_ttl_ms: 60_000,
@@ -932,14 +934,14 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
         status_poll_ms: 30
       ]
 
-      {:ok, bypass: bypass, opts: opts}
+      {:ok, server: server, opts: opts}
     end
 
     test "a failing provider is reported but never ends the session", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.stub(bypass, "GET", "/pods/pod_1", fn conn ->
+      Api.stub(server, "GET", "/pods/pod_1", fn conn ->
         Plug.Conn.resp(conn, 500, ~s({"error": "boom"}))
       end)
 
@@ -954,10 +956,10 @@ defmodule ExAtlas.Orchestrator.ComputeServerTest do
       refute_receive {:DOWN, ^ref, :process, ^pid, _}, 200
     end
 
-    test "polls back off while the provider keeps failing", %{bypass: bypass, opts: opts} do
+    test "polls back off while the provider keeps failing", %{server: server, opts: opts} do
       test_pid = self()
 
-      Bypass.stub(bypass, "GET", "/pods/pod_1", fn conn ->
+      Api.stub(server, "GET", "/pods/pod_1", fn conn ->
         send(test_pid, {:polled, System.monotonic_time(:millisecond)})
         Plug.Conn.resp(conn, 500, ~s({"error": "boom"}))
       end)

@@ -1,32 +1,35 @@
 defmodule ExAtlas.Providers.VastTest do
-  # Bypass stands in for Vast's API: get, list, terminate and the GPU catalog.
+  # ExAtlas.Test.Api stands in for Vast's API: get, list, terminate and the GPU catalog.
   use ExUnit.Case, async: false
+
+  alias ExAtlas.Test.Api
 
   import ExAtlas.Test.FakeVast
 
   alias ExAtlas.Spec
 
   setup do
-    bypass = Bypass.open()
+    server = Api.open()
 
     opts = [
       provider: :vast,
       api_key: "vast-test-key",
-      base_url: "http://localhost:#{bypass.port}"
+      base_url: server.base_url,
+      req_options: [plug: Api.plug()]
     ]
 
-    {:ok, bypass: bypass, opts: opts}
+    {:ok, server: server, opts: opts}
   end
 
-  defp expect_instance(bypass, instance) do
-    Bypass.expect_once(bypass, "GET", "/api/v0/instances/28411907", fn conn ->
+  defp expect_instance(server, instance) do
+    Api.expect_once(server, "GET", "/api/v0/instances/28411907", fn conn ->
       json(conn, 200, %{"instances" => instance})
     end)
   end
 
   describe "get_compute/2" do
-    test "reads a running instance with its port URLs", %{bypass: bypass, opts: opts} do
-      expect_instance(bypass, instance())
+    test "reads a running instance with its port URLs", %{server: server, opts: opts} do
+      expect_instance(server, instance())
 
       assert {:ok, %Spec.Compute{} = compute} = ExAtlas.get_compute("28411907", opts)
 
@@ -53,7 +56,7 @@ defmodule ExAtlas.Providers.VastTest do
              ]
     end
 
-    test "maps each actual_status", %{bypass: bypass, opts: opts} do
+    test "maps each actual_status", %{server: server, opts: opts} do
       for {vast, ours} <- [
             {"running", :running},
             {"exited", :stopped},
@@ -64,15 +67,15 @@ defmodule ExAtlas.Providers.VastTest do
             {nil, :provisioning},
             {"something new", :provisioning}
           ] do
-        expect_instance(bypass, instance(%{"actual_status" => vast}))
+        expect_instance(server, instance(%{"actual_status" => vast}))
 
         assert {:ok, %{status: ^ours}} = ExAtlas.get_compute("28411907", opts),
                "expected #{inspect(vast)} to read #{inspect(ours)}"
       end
     end
 
-    test "raw holds no env value, onstart script or jupyter token", %{bypass: bypass, opts: opts} do
-      expect_instance(bypass, instance())
+    test "raw holds no env value, onstart script or jupyter token", %{server: server, opts: opts} do
+      expect_instance(server, instance())
 
       assert {:ok, compute} = ExAtlas.get_compute("28411907", opts)
 
@@ -87,11 +90,11 @@ defmodule ExAtlas.Providers.VastTest do
     # and a field Vast adds later may carry a value too, so raw keeps only
     # fields known to hold none.
     test "raw keeps no field it does not know: image_args, status_msg, a new one", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       expect_instance(
-        bypass,
+        server,
         instance(%{
           "image_args" => ["serve", "--api-key", "args-secret-4e1"],
           "status_msg" => "pulled with token args-secret-4e1",
@@ -105,8 +108,8 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(compute.raw) =~ "args-secret-4e1"
     end
 
-    test "a port Vast has not mapped yet has no URL", %{bypass: bypass, opts: opts} do
-      expect_instance(bypass, instance(%{"ports" => %{}, "actual_status" => "loading"}))
+    test "a port Vast has not mapped yet has no URL", %{server: server, opts: opts} do
+      expect_instance(server, instance(%{"ports" => %{}, "actual_status" => "loading"}))
 
       assert {:ok, %{ports: ports}} = ExAtlas.get_compute("28411907", opts)
 
@@ -117,10 +120,10 @@ defmodule ExAtlas.Providers.VastTest do
     end
 
     test "an instance ExAtlas did not start reads each mapped port as tcp", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_instance(bypass, instance(%{"extra_env" => []}))
+      expect_instance(server, instance(%{"extra_env" => []}))
 
       assert {:ok, %{ports: ports}} = ExAtlas.get_compute("28411907", opts)
 
@@ -131,25 +134,25 @@ defmodule ExAtlas.Providers.VastTest do
     end
 
     test "instances: null is :not_found, which UpstreamStatus reads as vanished", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_instance(bypass, nil)
+      expect_instance(server, nil)
 
       assert {:dead, :vanished, nil} =
                ExAtlas.Orchestrator.UpstreamStatus.observe("28411907", opts)
     end
 
-    test "a 404 is :not_found", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/api/v0/instances/28411907", fn conn ->
+    test "a 404 is :not_found", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/api/v0/instances/28411907", fn conn ->
         json(conn, 404, refused("not_found", "Instance not found"))
       end)
 
       assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.get_compute("28411907", opts)
     end
 
-    test "an id is sent path-encoded", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/api/v0/instances/..%2Fx", fn conn ->
+    test "an id is sent path-encoded", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/api/v0/instances/..%2Fx", fn conn ->
         json(conn, 200, %{"instances" => nil})
       end)
 
@@ -158,10 +161,10 @@ defmodule ExAtlas.Providers.VastTest do
   end
 
   describe "list_compute/1" do
-    setup %{bypass: bypass} do
+    setup %{server: server} do
       test_pid = self()
 
-      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+      Api.expect(server, "GET", "/api/v1/instances", fn conn ->
         conn = Plug.Conn.fetch_query_params(conn)
         send(test_pid, {:page, conn.query_params})
 
@@ -209,8 +212,8 @@ defmodule ExAtlas.Providers.VastTest do
 
   describe "list_compute/1 gpu: on the A100" do
     # The 40 GB and 80 GB A100 share Vast's names; gpu_ram tells them apart.
-    test "tells the 40 GB from the 80 GB", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+    test "tells the 40 GB from the 80 GB", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/api/v1/instances", fn conn ->
         json(conn, 200, %{
           "instances" => [
             instance(%{"id" => 40, "gpu_name" => "A100 SXM4", "gpu_ram" => 40_960}),
@@ -226,8 +229,8 @@ defmodule ExAtlas.Providers.VastTest do
   end
 
   describe "list_compute/1 paging errors" do
-    test "a token that does not advance fails the whole call", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+    test "a token that does not advance fails the whole call", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/api/v1/instances", fn conn ->
         json(conn, 200, %{"instances" => [instance()], "next_token" => "same"})
       end)
 
@@ -237,8 +240,8 @@ defmodule ExAtlas.Providers.VastTest do
       assert message =~ "did not advance"
     end
 
-    test "a failed second page fails the whole call", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+    test "a failed second page fails the whole call", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/api/v1/instances", fn conn ->
         conn = Plug.Conn.fetch_query_params(conn)
 
         if conn.query_params["after_token"],
@@ -251,24 +254,24 @@ defmodule ExAtlas.Providers.VastTest do
   end
 
   describe "terminate/2" do
-    test "sends DELETE /api/v0/instances/{id}/", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/28411907", fn conn ->
+    test "sends DELETE /api/v0/instances/{id}/", %{server: server, opts: opts} do
+      Api.expect_once(server, "DELETE", "/api/v0/instances/28411907", fn conn ->
         json(conn, 200, %{"success" => true})
       end)
 
       assert :ok = ExAtlas.terminate("28411907", opts)
     end
 
-    test "a 404 is :not_found", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/28411907", fn conn ->
+    test "a 404 is :not_found", %{server: server, opts: opts} do
+      Api.expect_once(server, "DELETE", "/api/v0/instances/28411907", fn conn ->
         json(conn, 404, refused("not_found", "Instance not found"))
       end)
 
       assert {:error, %ExAtlas.Error{kind: :not_found}} = ExAtlas.terminate("28411907", opts)
     end
 
-    test "a 200 with success: false is an error", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/28411907", fn conn ->
+    test "a 200 with success: false is an error", %{server: server, opts: opts} do
+      Api.expect_once(server, "DELETE", "/api/v0/instances/28411907", fn conn ->
         json(conn, 200, refused("invalid_args", "invalid instance_id"))
       end)
 
@@ -280,39 +283,39 @@ defmodule ExAtlas.Providers.VastTest do
   describe "stop/2 and start/2" do
     @echo "echo-probe-7c1d"
 
-    defp expect_state(bypass, respond) do
+    defp expect_state(server, respond) do
       test_pid = self()
 
-      Bypass.expect_once(bypass, "PUT", "/api/v0/instances/28411907", fn conn ->
+      Api.expect_once(server, "PUT", "/api/v0/instances/28411907", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:state_body, body})
         respond.(conn)
       end)
     end
 
-    test "stop sends state: stopped to PUT /api/v0/instances/{id}/", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 200, %{"success" => true}))
+    test "stop sends state: stopped to PUT /api/v0/instances/{id}/", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 200, %{"success" => true}))
 
       assert :ok = ExAtlas.stop("28411907", opts)
       assert_received {:state_body, %{"state" => "stopped"} = body}
       assert map_size(body) == 1
     end
 
-    test "start sends state: running", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 200, %{"success" => true}))
+    test "start sends state: running", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 200, %{"success" => true}))
 
       assert :ok = ExAtlas.start("28411907", opts)
       assert_received {:state_body, %{"state" => "running"}}
     end
 
-    test "a 2xx body without success: false is :ok", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 200, %{}))
+    test "a 2xx body without success: false is :ok", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 200, %{}))
 
       assert :ok = ExAtlas.stop("28411907", opts)
     end
 
-    test "an id is sent path-encoded", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "PUT", "/api/v0/instances/a%2Fb", fn conn ->
+    test "an id is sent path-encoded", %{server: server, opts: opts} do
+      Api.expect_once(server, "PUT", "/api/v0/instances/a%2Fb", fn conn ->
         json(conn, 200, %{"success" => true})
       end)
 
@@ -320,10 +323,10 @@ defmodule ExAtlas.Providers.VastTest do
     end
 
     test "a start the host cannot honor is :provider with Vast's code and no msg", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_state(bypass, fn conn ->
+      expect_state(server, fn conn ->
         json(conn, 200, refused("resources_unavailable", "GPU rented out #{@echo}"))
       end)
 
@@ -335,8 +338,8 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(error) =~ @echo
     end
 
-    test "a 4xx start refusal keeps its status and withholds msg", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 400, refused("invalid_args", "bad #{@echo}")))
+    test "a 4xx start refusal keeps its status and withholds msg", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 400, refused("invalid_args", "bad #{@echo}")))
 
       assert {:error, %ExAtlas.Error{kind: :provider, status: 400} = error} =
                ExAtlas.start("28411907", opts)
@@ -345,22 +348,22 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(error, structs: false) =~ @echo
     end
 
-    test "a stop refusal says stop, not start", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 400, refused("invalid_args", "x")))
+    test "a stop refusal says stop, not start", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 400, refused("invalid_args", "x")))
 
       assert {:error, %ExAtlas.Error{message: message}} = ExAtlas.stop("28411907", opts)
       assert message =~ "Vast refused the stop"
     end
 
-    test "a 404 is :not_found, with msg withheld", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 404, refused("not_found", "no #{@echo}")))
+    test "a 404 is :not_found, with msg withheld", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 404, refused("not_found", "no #{@echo}")))
 
       assert {:error, %ExAtlas.Error{kind: :not_found} = error} = ExAtlas.stop("28411907", opts)
       refute inspect(error, structs: false) =~ @echo
     end
 
-    test "a 401 keeps its kind", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 401, refused("auth_error", "key #{@echo}")))
+    test "a 401 keeps its kind", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 401, refused("auth_error", "key #{@echo}")))
 
       assert {:error, %ExAtlas.Error{kind: :unauthorized} = error} =
                ExAtlas.start("28411907", opts)
@@ -368,10 +371,10 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(error, structs: false) =~ @echo
     end
 
-    test "a 429 is retried, and the second answer counts", %{bypass: bypass, opts: opts} do
+    test "a 429 is retried, and the second answer counts", %{server: server, opts: opts} do
       {:ok, calls} = Agent.start_link(fn -> 0 end)
 
-      Bypass.expect(bypass, "PUT", "/api/v0/instances/28411907", fn conn ->
+      Api.expect(server, "PUT", "/api/v0/instances/28411907", fn conn ->
         conn = Plug.Conn.put_resp_header(conn, "retry-after", "0")
 
         case Agent.get_and_update(calls, &{&1 + 1, &1 + 1}) do
@@ -384,8 +387,8 @@ defmodule ExAtlas.Providers.VastTest do
       assert Agent.get(calls, & &1) == 2
     end
 
-    test "a 5xx withholds msg and is sent once", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, &json(&1, 500, refused(@echo, "boom #{@echo}")))
+    test "a 5xx withholds msg and is sent once", %{server: server, opts: opts} do
+      expect_state(server, &json(&1, 500, refused(@echo, "boom #{@echo}")))
 
       assert {:error, %ExAtlas.Error{kind: :provider, status: 500} = error} =
                ExAtlas.stop("28411907", opts)
@@ -393,8 +396,8 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(error, structs: false) =~ @echo
     end
 
-    test "a body that is not JSON prints no echo", %{bypass: bypass, opts: opts} do
-      expect_state(bypass, fn conn ->
+    test "a body that is not JSON prints no echo", %{server: server, opts: opts} do
+      expect_state(server, fn conn ->
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(200, ~s({"msg":"#{@echo}))
@@ -404,13 +407,12 @@ defmodule ExAtlas.Providers.VastTest do
       refute inspect(error, structs: false) =~ @echo
     end
 
-    test "a redirect is not followed", %{bypass: bypass, opts: opts} do
-      elsewhere = Bypass.open()
-      Bypass.down(elsewhere)
+    test "a redirect is not followed", %{server: server, opts: opts} do
+      elsewhere = Api.open()
 
-      expect_state(bypass, fn conn ->
+      expect_state(server, fn conn ->
         conn
-        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.put_resp_header("location", elsewhere.base_url <> "/steal")
         |> Plug.Conn.resp(307, "")
       end)
 
@@ -420,12 +422,12 @@ defmodule ExAtlas.Providers.VastTest do
 
   describe "list_gpu_types/1" do
     test "returns one GpuType per Vast name at its lowest on-demand and bid prices", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       test_pid = self()
 
-      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+      Api.expect(server, "POST", "/api/v0/bundles", fn conn ->
         {query, conn} = read_json(conn)
         send(test_pid, {:query, query})
 
@@ -515,10 +517,10 @@ defmodule ExAtlas.Providers.VastTest do
     end
 
     test "a failed bid search leaves the on-demand prices and no spot prices", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+      Api.expect(server, "POST", "/api/v0/bundles", fn conn ->
         {query, conn} = read_json(conn)
 
         if query["type"] == "bid" do
@@ -534,10 +536,10 @@ defmodule ExAtlas.Providers.VastTest do
     end
 
     test "a GPU offered only as a bid is listed with a spot price and no on-demand price", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+      Api.expect(server, "POST", "/api/v0/bundles", fn conn ->
         {query, conn} = read_json(conn)
 
         offers =
@@ -557,10 +559,10 @@ defmodule ExAtlas.Providers.VastTest do
       assert type.memory_gb == 24
     end
 
-    test "searches run in parallel, at most 4 at once", %{bypass: bypass, opts: opts} do
+    test "searches run in parallel, at most 4 at once", %{server: server, opts: opts} do
       {:ok, counter} = Agent.start_link(fn -> {0, 0} end)
 
-      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+      Api.expect(server, "POST", "/api/v0/bundles", fn conn ->
         Agent.update(counter, fn {now, peak} -> {now + 1, max(peak, now + 1)} end)
         Process.sleep(30)
         Agent.update(counter, fn {now, peak} -> {now - 1, peak} end)
@@ -572,8 +574,8 @@ defmodule ExAtlas.Providers.VastTest do
       assert peak in 2..4
     end
 
-    test "a failed on-demand search fails the call", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "POST", "/api/v0/bundles", fn conn ->
+    test "a failed on-demand search fails the call", %{server: server, opts: opts} do
+      Api.expect(server, "POST", "/api/v0/bundles", fn conn ->
         json(conn, 401, %{
           "success" => false,
           "error" => "auth_error",
@@ -587,7 +589,7 @@ defmodule ExAtlas.Providers.VastTest do
 
   describe "the client" do
     test "every request emits [:ex_atlas, :vast, :request] without the key", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       test_pid = self()
@@ -602,7 +604,7 @@ defmodule ExAtlas.Providers.VastTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      Bypass.expect_once(bypass, "GET", "/api/v0/instances/28411907", fn conn ->
+      Api.expect_once(server, "GET", "/api/v0/instances/28411907", fn conn ->
         assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer vast-test-key"]
         json(conn, 200, %{"instances" => instance()})
       end)

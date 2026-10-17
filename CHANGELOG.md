@@ -14,6 +14,20 @@ Nothing changes unless you call `ExAtlas.S3`. Bump the version and go on.
 by hand adds it. Read [the upgrading guide](guides/upgrading.md).
 
 
+### Changed: `mix hex.audit` passes, because the test suite no longer uses `bypass` (#175)
+
+- `bypass` is gone from the lock, and cowboy and cowlib 2.21.0
+  (EEF-CVE-2026-43966, no fixed release) went with it. `bin/ci` passes
+  `hex.audit` with no ignore and reaches sobelow and `mix test`.
+- The provider tests stub HTTP through Req's `:plug` option. No runtime code
+  changes. The `ProviderConformance` and testing guides show `Req.Test`
+  instead of Bypass.
+- Fixed: `ExAtlas.Fly.Tokens.get/1` crashed its token server when the `fly`
+  executable is not on the PATH. It now falls back to a stored manual token,
+  or returns `{:error, :no_token_available}`.
+- Fixed: `ExAtlas.Fly.Logs.Streamer.subscribe/2` ignored `:retry_fetch_fn`
+  when it started the streamer.
+
 ### Added: presigned links to private objects, and a setup guide (#166)
 
 - `ExAtlas.S3.presign/4` signs a GET or PUT URL that works for

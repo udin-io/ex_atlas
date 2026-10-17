@@ -1,7 +1,9 @@
 defmodule ExAtlas.Providers.VastSpendTest do
-  # Bypass stands in for Vast's `GET /api/v0/charges/`, shaped by its OpenAPI
+  # ExAtlas.Test.Api stands in for Vast's `GET /api/v0/charges/`, shaped by its OpenAPI
   # reference. The real bodies are read by the :vast_live test.
   use ExUnit.Case, async: false
+
+  alias ExAtlas.Test.Api
 
   import ExAtlas.Test.FakeVast
 
@@ -13,26 +15,27 @@ defmodule ExAtlas.Providers.VastSpendTest do
   @marker "label-probe-5e2b"
 
   setup do
-    bypass = Bypass.open()
+    server = Api.open()
 
     opts = [
       provider: :vast,
       api_key: "vast-test-key",
-      base_url: "http://localhost:#{bypass.port}",
+      base_url: server.base_url,
+      req_options: [plug: Api.plug()],
       from: @from,
       to: @to
     ]
 
-    {:ok, bypass: bypass, opts: opts}
+    {:ok, server: server, opts: opts}
   end
 
   # Answers each charges request with the next page, after sending the
   # request's query to the test.
-  defp charges(bypass, pages) do
+  defp charges(server, pages) do
     test_pid = self()
     {:ok, remaining} = Agent.start_link(fn -> pages end)
 
-    Bypass.stub(bypass, "GET", "/api/v0/charges", fn conn ->
+    Api.stub(server, "GET", "/api/v0/charges", fn conn ->
       conn = Plug.Conn.fetch_query_params(conn)
       send(test_pid, {:charges_query, conn.query_params})
 
@@ -56,8 +59,8 @@ defmodule ExAtlas.Providers.VastSpendTest do
   end
 
   describe "compute_spend/3" do
-    test "sums the instance's rows into total, gpu and disk", %{bypass: bypass, opts: opts} do
-      charges(bypass, [
+    test "sums the instance's rows into total, gpu and disk", %{server: server, opts: opts} do
+      charges(server, [
         page([
           charge_row(@id, gpu: 0.6, disk: 0.2, bwd: 0.04, bwu: 0.01),
           charge_row("999", gpu: 50.0, disk: 5.0)
@@ -75,11 +78,11 @@ defmodule ExAtlas.Providers.VastSpendTest do
     end
 
     test "the total is the rows' amount, which can exceed their items", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       row = charge_row(@id, [gpu: 0.6, disk: 0.2], %{"amount" => 1.0})
-      charges(bypass, [page([row])])
+      charges(server, [page([row])])
 
       assert {:ok, %{total_usd: 1.0, gpu_usd: gpu, disk_usd: disk}} =
                ExAtlas.compute_spend(@id, opts)
@@ -89,10 +92,10 @@ defmodule ExAtlas.Providers.VastSpendTest do
     end
 
     test "sums every row of the instance across pages and stops at a null token", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      charges(bypass, [
+      charges(server, [
         page([charge_row(@id, gpu: 0.5, disk: 0.1)], "page-2"),
         page([charge_row(@id, gpu: 0.25, disk: 0.05)])
       ])
@@ -107,10 +110,10 @@ defmodule ExAtlas.Providers.VastSpendTest do
     end
 
     test "a row of another instance is not counted, even one whose id starts the same", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      charges(bypass, [
+      charges(server, [
         page([
           charge_row(@id, gpu: 0.3),
           charge_row("#{@id}0", gpu: 40.0),
@@ -122,18 +125,18 @@ defmodule ExAtlas.Providers.VastSpendTest do
       assert {:ok, %{total_usd: 0.3}} = ExAtlas.compute_spend(@id, opts)
     end
 
-    test "an instance with no row has a bill of zero", %{bypass: bypass, opts: opts} do
-      charges(bypass, [page([charge_row("999", gpu: 7.0)])])
+    test "an instance with no row has a bill of zero", %{server: server, opts: opts} do
+      charges(server, [page([charge_row("999", gpu: 7.0)])])
 
       assert {:ok, %{total_usd: +0.0, gpu_usd: +0.0, disk_usd: +0.0}} =
                ExAtlas.compute_spend(@id, opts)
     end
 
     test "asks for the instance charges of the UTC days from `from` to `to`", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      charges(bypass, [page([])])
+      charges(server, [page([])])
 
       assert {:ok, %{from: from, to: to}} = ExAtlas.compute_spend(@id, opts)
 
@@ -150,8 +153,8 @@ defmodule ExAtlas.Providers.VastSpendTest do
       assert to == @to
     end
 
-    test "with no `to`, the window ends now", %{bypass: bypass, opts: opts} do
-      charges(bypass, [page([])])
+    test "with no `to`, the window ends now", %{server: server, opts: opts} do
+      charges(server, [page([])])
       before = unix(DateTime.utc_now())
 
       assert {:ok, %{to: to}} = ExAtlas.compute_spend(@id, Keyword.delete(opts, :to))
@@ -163,24 +166,24 @@ defmodule ExAtlas.Providers.VastSpendTest do
     end
 
     test "with no `from`, the window starts at the instance's start_date", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/api/v0/instances/#{@id}", fn conn ->
+      Api.expect_once(server, "GET", "/api/v0/instances/#{@id}", fn conn ->
         json(conn, 200, %{"instances" => instance(%{"start_date" => unix(@from) + 0.5})})
       end)
 
-      charges(bypass, [page([charge_row(@id, gpu: 0.1)])])
+      charges(server, [page([charge_row(@id, gpu: 0.1)])])
 
       assert {:ok, %{total_usd: 0.1, from: ~U[2026-09-21 00:00:00Z]}} =
                ExAtlas.compute_spend(@id, Keyword.delete(opts, :from))
     end
 
     test "with no `from` and no such instance, the call is :not_found and reads no charges", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/api/v0/instances/#{@id}", fn conn ->
+      Api.expect_once(server, "GET", "/api/v0/instances/#{@id}", fn conn ->
         json(conn, 200, %{"instances" => nil})
       end)
 
@@ -189,10 +192,10 @@ defmodule ExAtlas.Providers.VastSpendTest do
     end
 
     test "with no `from` and an instance that lists no start_date, the call says to pass one", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/api/v0/instances/#{@id}", fn conn ->
+      Api.expect_once(server, "GET", "/api/v0/instances/#{@id}", fn conn ->
         json(conn, 200, %{"instances" => instance(%{"start_date" => nil})})
       end)
 
@@ -202,17 +205,15 @@ defmodule ExAtlas.Providers.VastSpendTest do
       assert message =~ "start_date"
     end
 
-    test "a `from` after `to` is :validation, with no request", %{bypass: bypass, opts: opts} do
-      Bypass.down(bypass)
-
+    test "a `from` after `to` is :validation, with no request", %{opts: opts} do
       assert {:error, %ExAtlas.Error{kind: :validation}} =
                ExAtlas.compute_spend(@id, Keyword.merge(opts, from: @to, to: @from))
     end
   end
 
   describe "compute_spend/3 failures" do
-    test "a non-advancing token fails the call", %{bypass: bypass, opts: opts} do
-      charges(bypass, [
+    test "a non-advancing token fails the call", %{server: server, opts: opts} do
+      charges(server, [
         page([charge_row(@id, gpu: 0.5)], "same"),
         page([charge_row(@id, gpu: 0.5)], "same")
       ])
@@ -224,10 +225,10 @@ defmodule ExAtlas.Providers.VastSpendTest do
     end
 
     test "a failed second page fails the call, with no partial total", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      charges(bypass, [
+      charges(server, [
         page([charge_row(@id, gpu: 0.5)], "page-2"),
         {400, %{"success" => false, "error" => "invalid_token", "msg" => "boom"}}
       ])
@@ -236,45 +237,45 @@ defmodule ExAtlas.Providers.VastSpendTest do
                ExAtlas.compute_spend(@id, opts)
     end
 
-    test "the error kinds follow the status", %{bypass: bypass, opts: opts} do
+    test "the error kinds follow the status", %{server: server, opts: opts} do
       for {status, kind} <- [{403, :forbidden}, {401, :unauthorized}, {404, :not_found}] do
-        charges(bypass, [{status, %{"success" => false, "error" => "auth_error", "msg" => "x"}}])
+        charges(server, [{status, %{"success" => false, "error" => "auth_error", "msg" => "x"}}])
         assert {:error, %ExAtlas.Error{kind: ^kind}} = ExAtlas.compute_spend(@id, opts)
       end
     end
 
     test "a body without a results list is :provider and prints none of it", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      charges(bypass, [{200, %{"results" => %{"label" => @marker}}}])
+      charges(server, [{200, %{"results" => %{"label" => @marker}}}])
 
       assert {:error, %ExAtlas.Error{kind: :provider} = error} = ExAtlas.compute_spend(@id, opts)
       refute inspect(error, structs: false) =~ @marker
     end
 
-    test "a results entry that is not an object fails the call", %{bypass: bypass, opts: opts} do
-      charges(bypass, [page([@marker])])
+    test "a results entry that is not an object fails the call", %{server: server, opts: opts} do
+      charges(server, [page([@marker])])
 
       assert {:error, %ExAtlas.Error{kind: :provider} = error} = ExAtlas.compute_spend(@id, opts)
       refute inspect(error, structs: false) =~ @marker
     end
 
     test "a row of the instance with no numeric amount fails the call and prints no row", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       row =
         charge_row(@id, [gpu: 0.5], %{"amount" => nil, "items" => [], "description" => @marker})
 
-      charges(bypass, [page([row])])
+      charges(server, [page([row])])
 
       assert {:error, %ExAtlas.Error{kind: :provider} = error} = ExAtlas.compute_spend(@id, opts)
       refute inspect(error, structs: false) =~ @marker
     end
 
-    test "a body that is not JSON prints no echo", %{bypass: bypass, opts: opts} do
-      Bypass.stub(bypass, "GET", "/api/v0/charges", fn conn ->
+    test "a body that is not JSON prints no echo", %{server: server, opts: opts} do
+      Api.stub(server, "GET", "/api/v0/charges", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(200, ~s({"results":"#{@marker}))
@@ -287,7 +288,7 @@ defmodule ExAtlas.Providers.VastSpendTest do
 
   describe "compute_spend/3 raw" do
     test "keeps the amounts and window of the instance's rows, not description or metadata", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       row =
@@ -302,7 +303,7 @@ defmodule ExAtlas.Providers.VastSpendTest do
           )
         end)
 
-      charges(bypass, [page([row, charge_row("999", gpu: 9.0)])])
+      charges(server, [page([row, charge_row("999", gpu: 9.0)])])
 
       assert {:ok, spend} = ExAtlas.compute_spend(@id, opts)
 

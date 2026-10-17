@@ -1,6 +1,8 @@
 defmodule AtlasTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   alias ExAtlas.Providers.Mock
   alias ExAtlas.Spec
   alias ExAtlas.Test.FaultyProvider
@@ -254,11 +256,16 @@ defmodule AtlasTest do
 
   describe "network volumes" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
 
       {:ok,
-       bypass: bypass,
-       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+       server: server,
+       opts: [
+         provider: :runpod,
+         api_key: "k",
+         base_url: server.base_url,
+         req_options: [plug: Api.plug()]
+       ]}
     end
 
     defp respond(conn, status, body) do
@@ -276,10 +283,10 @@ defmodule AtlasTest do
     }
 
     test "create_network_volume/1 takes plain options, and provider config keys reach the ctx", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+      Api.expect_once(server, "POST", "/network-volumes", fn conn ->
         assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
 
@@ -296,10 +303,10 @@ defmodule AtlasTest do
     end
 
     test "create_network_volume/1 passes tier and provider_opts to the request", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "POST", "/network-volumes", fn conn ->
+      Api.expect_once(server, "POST", "/network-volumes", fn conn ->
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         assert %{"type" => "STANDARD", "extra" => 1} = Jason.decode!(raw)
         respond(conn, 201, %{@volume | "type" => "STANDARD"})
@@ -326,16 +333,16 @@ defmodule AtlasTest do
       end
     end
 
-    test "list, get and delete go to the provider", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/network-volumes", fn conn ->
+    test "list, get and delete go to the provider", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/network-volumes", fn conn ->
         respond(conn, 200, %{"networkVolumes" => [@volume]})
       end)
 
-      Bypass.expect_once(bypass, "GET", "/network-volumes/vol_1", fn conn ->
+      Api.expect_once(server, "GET", "/network-volumes/vol_1", fn conn ->
         respond(conn, 200, @volume)
       end)
 
-      Bypass.expect_once(bypass, "DELETE", "/network-volumes/vol_1", fn conn ->
+      Api.expect_once(server, "DELETE", "/network-volumes/vol_1", fn conn ->
         Plug.Conn.resp(conn, 204, "")
       end)
 
@@ -374,11 +381,16 @@ defmodule AtlasTest do
 
   describe "templates" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
 
       {:ok,
-       bypass: bypass,
-       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+       server: server,
+       opts: [
+         provider: :runpod,
+         api_key: "k",
+         base_url: server.base_url,
+         req_options: [plug: Api.plug()]
+       ]}
     end
 
     @template %{
@@ -397,10 +409,10 @@ defmodule AtlasTest do
     end
 
     test "create_template/1 takes plain options, and provider config keys reach the ctx", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "POST", "/templates", fn conn ->
+      Api.expect_once(server, "POST", "/templates", fn conn ->
         assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
 
@@ -433,19 +445,19 @@ defmodule AtlasTest do
       end
     end
 
-    test "list, get and delete go to the provider", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/templates", fn conn ->
+    test "list, get and delete go to the provider", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/templates", fn conn ->
         template_respond(conn, 200, %{
           "templates" => [@template],
           "pagination" => %{"nextCursor" => nil, "hasNextPage" => false}
         })
       end)
 
-      Bypass.expect_once(bypass, "GET", "/templates/tpl_7", fn conn ->
+      Api.expect_once(server, "GET", "/templates/tpl_7", fn conn ->
         template_respond(conn, 200, @template)
       end)
 
-      Bypass.expect_once(bypass, "DELETE", "/templates/tpl_7", fn conn ->
+      Api.expect_once(server, "DELETE", "/templates/tpl_7", fn conn ->
         Plug.Conn.resp(conn, 204, "")
       end)
 
@@ -477,11 +489,16 @@ defmodule AtlasTest do
 
   describe "serverless endpoints" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
 
       {:ok,
-       bypass: bypass,
-       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+       server: server,
+       opts: [
+         provider: :runpod,
+         api_key: "k",
+         base_url: server.base_url,
+         req_options: [plug: Api.plug()]
+       ]}
     end
 
     @endpoint %{
@@ -497,8 +514,8 @@ defmodule AtlasTest do
       |> Plug.Conn.resp(status, Jason.encode!(body))
     end
 
-    test "list, get and delete go to the provider", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/serverless", fn conn ->
+    test "list, get and delete go to the provider", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/serverless", fn conn ->
         assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
 
         endpoint_respond(conn, 200, %{
@@ -507,11 +524,11 @@ defmodule AtlasTest do
         })
       end)
 
-      Bypass.expect_once(bypass, "GET", "/serverless/ep_1", fn conn ->
+      Api.expect_once(server, "GET", "/serverless/ep_1", fn conn ->
         endpoint_respond(conn, 200, @endpoint)
       end)
 
-      Bypass.expect_once(bypass, "DELETE", "/serverless/ep_1", fn conn ->
+      Api.expect_once(server, "DELETE", "/serverless/ep_1", fn conn ->
         Plug.Conn.resp(conn, 204, "")
       end)
 
@@ -545,11 +562,16 @@ defmodule AtlasTest do
 
   describe "compute_spend/2" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
 
       {:ok,
-       bypass: bypass,
-       opts: [provider: :runpod, api_key: "k", base_url: "http://localhost:#{bypass.port}"]}
+       server: server,
+       opts: [
+         provider: :runpod,
+         api_key: "k",
+         base_url: server.base_url,
+         req_options: [plug: Api.plug()]
+       ]}
     end
 
     defp spend_respond(conn, status, body) do
@@ -577,10 +599,10 @@ defmodule AtlasTest do
     }
 
     test "returns one pod's spend, and provider config keys reach the ctx", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+      Api.expect_once(server, "GET", "/billing/pods", fn conn ->
         assert ["Bearer k"] = Plug.Conn.get_req_header(conn, "authorization")
         assert conn.query_string == "podId=pod_9"
         spend_respond(conn, 200, @spend_body)
@@ -600,10 +622,10 @@ defmodule AtlasTest do
     end
 
     test "from: and to: reach RunPod as startTime and endTime, not as ctx keys", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+      Api.expect_once(server, "GET", "/billing/pods", fn conn ->
         assert %{"startTime" => "2026-09-30T00:00:00Z", "endTime" => "2026-10-01T00:00:00Z"} =
                  URI.decode_query(conn.query_string)
 
@@ -618,11 +640,8 @@ defmodule AtlasTest do
     end
 
     test "a from: or to: that is not a DateTime is a :validation error and sends no request", %{
-      bypass: bypass,
       opts: opts
     } do
-      Bypass.down(bypass)
-
       for bad <- [[from: "2026-09-30"], [to: 1_759_000_000], [from: ~D[2026-09-30]]] do
         assert {:error, %ExAtlas.Error{kind: :validation, message: message}} =
                  ExAtlas.compute_spend("pod_9", bad ++ opts)

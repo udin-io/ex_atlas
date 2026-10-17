@@ -1,6 +1,8 @@
 defmodule ExAtlas.Test.FakeLambda do
   @moduledoc false
-  # Lambda Cloud API v1 bodies for Bypass, shaped by its OpenAPI spec 1.10.0
+
+  alias ExAtlas.Test.Api
+  # Lambda Cloud API v1 bodies for ExAtlas.Test.Api, shaped by its OpenAPI spec 1.10.0
   # (`https://cloud.lambda.ai/api/v1/openapi.json`), and a stateful fake
   # server for `ExAtlas.Test.ProviderConformance`.
 
@@ -100,27 +102,26 @@ defmodule ExAtlas.Test.FakeLambda do
   end
 
   @doc """
-  Start a fake Lambda on Bypass that keeps launched instances and firewall
+  Start a fake Lambda on ExAtlas.Test.Api that keeps launched instances and firewall
   rulesets in Agents. Returns the opts every conformance call needs.
   """
   def start do
-    bypass = Bypass.open()
+    server = Api.open()
     {:ok, store} = Agent.start_link(fn -> %{} end)
     {:ok, rulesets} = Agent.start_link(fn -> %{} end)
 
-    Bypass.stub(bypass, "GET", "/instance-types", &json(&1, 200, %{"data" => instance_types()}))
-    stub_instances(bypass, store, rulesets)
-    stub_rulesets(bypass, store, rulesets)
+    Api.stub(server, "GET", "/instance-types", &json(&1, 200, %{"data" => instance_types()}))
+    stub_instances(server, store, rulesets)
+    stub_rulesets(server, store, rulesets)
 
     [
-      base_url: "http://localhost:#{bypass.port}",
       api_key: "lambda-test-key",
       provider_opts: %{ssh_key_name: "deploy"}
-    ]
+    ] ++ Api.opts(server)
   end
 
-  defp stub_instances(bypass, store, rulesets) do
-    Bypass.stub(bypass, "POST", "/instance-operations/launch", fn conn ->
+  defp stub_instances(server, store, rulesets) do
+    Api.stub(server, "POST", "/instance-operations/launch", fn conn ->
       {body, conn} = read_json(conn)
       attached = Enum.map(body["firewall_rulesets"] || [], & &1["id"])
 
@@ -143,18 +144,18 @@ defmodule ExAtlas.Test.FakeLambda do
       end
     end)
 
-    Bypass.stub(bypass, "GET", "/instances/:id", fn conn ->
+    Api.stub(server, "GET", "/instances/:id", fn conn ->
       case Agent.get(store, &Map.get(&1, List.last(conn.path_info))) do
         nil -> json(conn, 404, not_found())
         found -> json(conn, 200, %{"data" => found})
       end
     end)
 
-    Bypass.stub(bypass, "GET", "/instances", fn conn ->
+    Api.stub(server, "GET", "/instances", fn conn ->
       json(conn, 200, %{"data" => Agent.get(store, &Map.values/1), "page_token" => nil})
     end)
 
-    Bypass.stub(bypass, "POST", "/instance-operations/terminate", fn conn ->
+    Api.stub(server, "POST", "/instance-operations/terminate", fn conn ->
       {%{"instance_ids" => ids}, conn} = read_json(conn)
       Agent.update(store, &Map.drop(&1, ids))
       json(conn, 200, %{"data" => %{"terminated_instances" => []}})
@@ -162,8 +163,8 @@ defmodule ExAtlas.Test.FakeLambda do
   end
 
   # Lambda refuses to delete a ruleset an instance still uses.
-  defp stub_rulesets(bypass, store, rulesets) do
-    Bypass.stub(bypass, "POST", "/firewall-rulesets", fn conn ->
+  defp stub_rulesets(server, store, rulesets) do
+    Api.stub(server, "POST", "/firewall-rulesets", fn conn ->
       {body, conn} = read_json(conn)
       id = "rs#{System.unique_integer([:positive])}"
 
@@ -180,7 +181,7 @@ defmodule ExAtlas.Test.FakeLambda do
       json(conn, 200, %{"data" => created})
     end)
 
-    Bypass.stub(bypass, "GET", "/firewall-rulesets", fn conn ->
+    Api.stub(server, "GET", "/firewall-rulesets", fn conn ->
       listed =
         rulesets
         |> Agent.get(&Map.values/1)
@@ -189,7 +190,7 @@ defmodule ExAtlas.Test.FakeLambda do
       json(conn, 200, %{"data" => listed})
     end)
 
-    Bypass.stub(bypass, "DELETE", "/firewall-rulesets/:id", fn conn ->
+    Api.stub(server, "DELETE", "/firewall-rulesets/:id", fn conn ->
       id = List.last(conn.path_info)
 
       cond do
@@ -216,7 +217,10 @@ defmodule ExAtlas.Test.FakeLambda do
   @doc "The rulesets the fake server holds, read through its API like a caller would."
   def rulesets(opts) do
     %{status: 200, body: %{"data" => data}} =
-      Req.get!(opts[:base_url] <> "/firewall-rulesets", auth: {:bearer, opts[:api_key]})
+      Req.get!(opts[:base_url] <> "/firewall-rulesets",
+        auth: {:bearer, opts[:api_key]},
+        plug: Api.plug()
+      )
 
     data
   end

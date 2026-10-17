@@ -6,7 +6,7 @@ defmodule ExAtlas.Fly.Logs.Client do
   parses the NDJSON body into `ExAtlas.Fly.Logs.LogEntry` structs.
 
   The base URL is overridable via `config :ex_atlas, :fly, log_endpoint: "..."`
-  or the `:base_url` option (useful for Bypass in tests).
+  or the `:base_url` option.
   """
 
   require Logger

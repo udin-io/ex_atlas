@@ -4,3 +4,5 @@
 # --only lambda_live`. `:vast_live` rents a Vast.ai instance:
 # `VAST_API_KEY=... mix test --only vast_live`.
 ExUnit.start(exclude: [:runpod_live, :lambda_live, :vast_live, :s3_live])
+
+ExAtlas.Test.Api.init()

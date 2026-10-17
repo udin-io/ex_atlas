@@ -56,13 +56,13 @@ defmodule MyCloud.ProviderTest do
 
   use ExAtlas.Test.ProviderConformance,
     provider: MyCloud.Provider,
-    reset: {MyCloud.TestHelpers, :reset_bypass, []}
+    reset: {MyCloud.TestHelpers, :reset_stubs, []}
 end
 ```
 
 The `:reset` MFA is called before every test. Use it to:
 
-- Reset Bypass expectations (for HTTP-based providers).
+- Reset your HTTP stubs (for HTTP-based providers).
 - Clear ETS or Mnesia fixtures.
 - Rotate in-memory state.
 
@@ -104,35 +104,38 @@ Run live tests explicitly:
 RUNPOD_API_KEY=sk_... mix test --only live
 ```
 
-## HTTP-level tests with Bypass
+## HTTP-level tests with Req.Test
 
-Mimic a provider's response without hitting the network:
+Every provider calls its API through Req, so `Req.Test` answers a request
+without opening a socket. Pass the stub as the `:plug` in `req_options`:
 
 ```elixir
 setup do
-  bypass = Bypass.open()
-
   opts = [
     provider: :runpod,
     api_key: "test-key",
-    base_url: "http://localhost:#{bypass.port}"
+    req_options: [plug: {Req.Test, ExAtlas.RunPodStub}, retry: false]
   ]
 
-  {:ok, bypass: bypass, opts: opts}
+  {:ok, opts: opts}
 end
 
-test "spawn_compute POSTs /pods", %{bypass: bypass, opts: opts} do
-  Bypass.expect_once(bypass, "POST", "/pods", fn conn ->
+test "spawn_compute POSTs /pods", %{opts: opts} do
+  Req.Test.expect(ExAtlas.RunPodStub, fn conn ->
+    assert {conn.method, conn.request_path} == {"POST", "/v2/pods"}
     {:ok, raw, conn} = Plug.Conn.read_body(conn)
     body = Jason.decode!(raw)
     assert body["gpu"] == %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1}
 
     conn
-    |> Plug.Conn.put_resp_header("content-type", "application/json")
-    |> Plug.Conn.resp(
-      201,
-      Jason.encode!(%{"id" => "pod_abc", "status" => "RUNNING"})
-    )
+    |> Plug.Conn.put_status(201)
+    |> Req.Test.json(%{
+      "id" => "pod_abc",
+      "status" => "RUNNING",
+      "ports" => ["8000/http"],
+      "gpu" => %{"id" => "NVIDIA H100 80GB HBM3", "count" => 1},
+      "image" => body["image"]
+    })
   end)
 
   {:ok, compute} =
@@ -141,6 +144,15 @@ test "spawn_compute POSTs /pods", %{bypass: bypass, opts: opts} do
   assert compute.id == "pod_abc"
 end
 ```
+
+- `Req.Test.expect/2` fails the test if the request never arrives;
+  `Req.Test.stub/2` does not.
+- `Req.Test.transport_error(conn, :timeout)` stands in for a closed
+  connection or a timeout. `retry: false` stops Req from sending the request
+  again.
+- A stub belongs to the test process. A request from another process, such
+  as an orchestrator tracker, needs `Req.Test.allow/3`, or
+  `Req.Test.set_req_test_to_shared/1` in a test that is not `async`.
 
 ## Orchestrator tests
 

@@ -1,7 +1,9 @@
 defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
-  # The orchestrator on Lambda through Bypass: run_task/1 ended by the host's
+  # The orchestrator on Lambda through ExAtlas.Test.Api: run_task/1 ended by the host's
   # finish report, the Reaper, and max_cost.
   use ExUnit.Case, async: false
+
+  alias ExAtlas.Test.Api
 
   @moduletag :capture_log
 
@@ -80,21 +82,21 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
     end
 
     test "without a callback, the default self_terminate is :validation and nothing launches" do
-      bypass = Bypass.open()
+      server = Api.open()
 
       assert {:error, %ExAtlas.Error{kind: :validation}} =
                ExAtlas.Orchestrator.run_task(
                  provider: :lambda_labs,
                  api_key: "lambda-test-key",
-                 base_url: "http://localhost:#{bypass.port}",
+                 base_url: server.base_url,
+                 req_options: [plug: Api.plug()],
                  provider_opts: %{ssh_key_name: "deploy"},
                  gpu: :h100,
                  image: "x",
                  command: ["python", "train.py"]
                )
 
-      # Bypass fails the test on any request: none reached Lambda.
-      Bypass.down(bypass)
+      # The server has no route, so a request fails the test: none reached Lambda.
     end
   end
 
@@ -133,12 +135,13 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
 
   describe "Reaper" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
       previous = Application.get_env(:ex_atlas, :lambda_labs)
 
       Application.put_env(:ex_atlas, :lambda_labs,
         api_key: "lambda-test-key",
-        base_url: "http://localhost:#{bypass.port}"
+        base_url: server.base_url,
+        req_options: [plug: Api.plug()]
       )
 
       on_exit(fn ->
@@ -147,11 +150,11 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
           else: Application.delete_env(:ex_atlas, :lambda_labs)
       end)
 
-      {:ok, bypass: bypass}
+      {:ok, server: server}
     end
 
     test "deletes an untracked atlas- instance past the grace window, leaves a younger one", %{
-      bypass: bypass
+      server: server
     } do
       TestOrchestrator.put_env(reap_grace_ms: 60 * 60 * 1_000)
       now = DateTime.utc_now()
@@ -163,14 +166,14 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
         instance(%{"id" => "young1", "name" => "atlas-young", "tags" => created_at(young)})
       ]
 
-      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+      Api.expect(server, "GET", "/instances", fn conn ->
         json(conn, 200, %{"data" => instances, "page_token" => nil})
       end)
 
       test_pid = self()
-      no_rulesets(bypass)
+      no_rulesets(server)
 
-      Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
+      Api.expect_once(server, "POST", "/instance-operations/terminate", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:terminated, body["instance_ids"]})
         json(conn, 200, %{"data" => %{"terminated_instances" => []}})
@@ -185,12 +188,13 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
 
   describe "Reaper and a created-at tag in the future" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
       previous = Application.get_env(:ex_atlas, :lambda_labs)
 
       Application.put_env(:ex_atlas, :lambda_labs,
         api_key: "lambda-test-key",
-        base_url: "http://localhost:#{bypass.port}"
+        base_url: server.base_url,
+        req_options: [plug: Api.plug()]
       )
 
       on_exit(fn ->
@@ -199,12 +203,12 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
           else: Application.delete_env(:ex_atlas, :lambda_labs)
       end)
 
-      {:ok, bypass: bypass}
+      {:ok, server: server}
     end
 
     # Anyone on the Lambda account can edit a tag. A far-future one must not
     # keep an orphan "young", and so billing, for ever.
-    test "reaps an instance tagged a year ahead, leaves one a minute ahead", %{bypass: bypass} do
+    test "reaps an instance tagged a year ahead, leaves one a minute ahead", %{server: server} do
       TestOrchestrator.put_env(reap_grace_ms: 60 * 60 * 1_000)
       now = DateTime.utc_now()
       year = now |> DateTime.add(365, :day) |> DateTime.to_iso8601()
@@ -216,14 +220,14 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
         instance(%{"id" => "skewed1", "name" => "atlas-skewed", "tags" => created_at(skewed)})
       ]
 
-      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+      Api.expect(server, "GET", "/instances", fn conn ->
         json(conn, 200, %{"data" => instances, "page_token" => nil})
       end)
 
       test_pid = self()
-      no_rulesets(bypass)
+      no_rulesets(server)
 
-      Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
+      Api.expect_once(server, "POST", "/instance-operations/terminate", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:terminated, body["instance_ids"]})
         json(conn, 200, %{"data" => %{"terminated_instances" => []}})
@@ -238,26 +242,26 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
 
   describe "max_cost" do
     test "a $36/hour type and a 1-cent cap terminates the instance, with no billing read" do
-      bypass = Bypass.open()
+      server = Api.open()
       test_pid = self()
-      no_rulesets(bypass)
+      no_rulesets(server)
 
       types = %{
         "gpu_8x_h100_sxm5" =>
           type_entry("gpu_8x_h100_sxm5", 3600, 8, "H100 (80 GB SXM5)", ["us-east-1"])
       }
 
-      Bypass.stub(bypass, "GET", "/instance-types", &json(&1, 200, %{"data" => types}))
+      Api.stub(server, "GET", "/instance-types", &json(&1, 200, %{"data" => types}))
 
-      Bypass.expect_once(bypass, "POST", "/instance-operations/launch", fn conn ->
+      Api.expect_once(server, "POST", "/instance-operations/launch", fn conn ->
         json(conn, 200, %{"data" => %{"instance_ids" => ["capped1"]}})
       end)
 
-      Bypass.stub(bypass, "GET", "/instances/capped1", fn conn ->
+      Api.stub(server, "GET", "/instances/capped1", fn conn ->
         json(conn, 200, %{"data" => instance(%{"id" => "capped1"})})
       end)
 
-      Bypass.expect_once(bypass, "POST", "/instance-operations/terminate", fn conn ->
+      Api.expect_once(server, "POST", "/instance-operations/terminate", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:terminated, body["instance_ids"]})
         json(conn, 200, %{"data" => %{"terminated_instances" => []}})
@@ -270,7 +274,8 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
                ExAtlas.Orchestrator.spawn(
                  provider: :lambda_labs,
                  api_key: "lambda-test-key",
-                 base_url: "http://localhost:#{bypass.port}",
+                 base_url: server.base_url,
+                 req_options: [plug: Api.plug()],
                  provider_opts: %{ssh_key_name: "deploy"},
                  gpu: :h100_sxm,
                  gpu_count: 8,
@@ -295,6 +300,6 @@ defmodule ExAtlas.Orchestrator.LambdaLabsTaskTest do
   defp created_at(at), do: [%{"key" => "atlas-created-at", "value" => at}]
 
   # `terminate/2` looks up the instance's firewall ruleset first (#86).
-  defp no_rulesets(bypass),
-    do: Bypass.stub(bypass, "GET", "/firewall-rulesets", &json(&1, 200, %{"data" => []}))
+  defp no_rulesets(server),
+    do: Api.stub(server, "GET", "/firewall-rulesets", &json(&1, 200, %{"data" => []}))
 end

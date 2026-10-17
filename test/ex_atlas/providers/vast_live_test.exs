@@ -4,7 +4,7 @@ defmodule ExAtlas.Providers.VastLiveTest do
   #     VAST_API_KEY=... mix test --only vast_live
   #
   # Each test settles one point where Vast's API reference and vast-cli
-  # disagree (issue 98), which the Bypass suite cannot: the GPU name spelling
+  # disagree (issue 98), which the HTTP stub suite cannot: the GPU name spelling
   # the search takes; whether a rent takes `env` as a JSON object; the shape
   # of an instance's `ports` and `extra_env`; what a missing instance and a
   # refused rent answer, and whether the refusal's `msg` echoes the request.

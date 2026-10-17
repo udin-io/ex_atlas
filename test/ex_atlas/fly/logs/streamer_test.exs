@@ -241,7 +241,12 @@ defmodule ExAtlas.Fly.Logs.StreamerTest do
       registry = StreamerSupervisor.registry_name()
       dynamic_sup = StreamerSupervisor.dynamic_supervisor_name()
 
-      retry_fetch_fn = fn _app, _opts -> {:ok, []} end
+      test_pid = self()
+
+      retry_fetch_fn = fn app, _opts ->
+        send(test_pid, {:fetched, app})
+        {:ok, []}
+      end
 
       # No project_dir argument — used to be required; now optional.
       assert :ok =
@@ -250,6 +255,9 @@ defmodule ExAtlas.Fly.Logs.StreamerTest do
                  dynamic_sup: dynamic_sup,
                  retry_fetch_fn: retry_fetch_fn
                )
+
+      # The streamer polls through the function the caller passed.
+      assert_receive {:fetched, ^app_name}, 1_000
 
       StreamerSupervisor.stop_streamer(app_name)
     end

@@ -334,6 +334,28 @@ defmodule ExAtlas.Fly.TokensTest do
       assert :ok = Tokens.set_manual(@app_name, manual_token)
       assert {:ok, ^manual_token} = Tokens.get(@app_name)
     end
+
+    # `System.cmd/3` raises `:enoent` when `fly` is not on the PATH; it does not
+    # return a non-zero exit.
+    test "manual token is used when the fly executable is not installed", context do
+      manual_token = "FlyV1 fm2_user_provided"
+      cmd_fn = fn "fly", _args, _opts -> :erlang.error(:enoent) end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn)
+
+      assert :ok = Tokens.set_manual(@app_name, manual_token)
+      assert {:ok, ^manual_token} = Tokens.get(@app_name)
+    end
+
+    test "with no fly executable and no manual token, get/1 says no token is available",
+         context do
+      cmd_fn = fn "fly", _args, _opts -> :erlang.error(:enoent) end
+
+      start_tokens_trio(context, cmd_fn: cmd_fn)
+
+      assert {:error, :no_token_available} = Tokens.get(@app_name)
+      assert {:error, :no_token_available} = Tokens.get(@app_name)
+    end
   end
 
   describe "telemetry (N6a)" do

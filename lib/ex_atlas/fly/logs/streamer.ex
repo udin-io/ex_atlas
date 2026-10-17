@@ -73,7 +73,7 @@ defmodule ExAtlas.Fly.Logs.Streamer do
     registry = Keyword.get(opts, :registry)
     dynamic_sup = Keyword.get(opts, :dynamic_sup)
 
-    case resolve_streamer_pid(app_name, project_dir, registry, dynamic_sup) do
+    case resolve_streamer_pid(app_name, project_dir, registry, dynamic_sup, opts) do
       {:ok, pid} ->
         subscribe_pid(pid, self())
         :ok
@@ -88,9 +88,9 @@ defmodule ExAtlas.Fly.Logs.Streamer do
     subscribe(app_name, Keyword.put(opts, :project_dir, project_dir))
   end
 
-  defp resolve_streamer_pid(_app_name, _project_dir, nil, _dynamic_sup), do: :none
+  defp resolve_streamer_pid(_app_name, _project_dir, nil, _dynamic_sup, _opts), do: :none
 
-  defp resolve_streamer_pid(app_name, project_dir, registry, dynamic_sup) do
+  defp resolve_streamer_pid(app_name, project_dir, registry, dynamic_sup, opts) do
     case Registry.lookup(registry, app_name) do
       [{pid, _}] ->
         {:ok, pid}
@@ -105,7 +105,7 @@ defmodule ExAtlas.Fly.Logs.Streamer do
                project_dir: project_dir,
                registry: registry,
                dynamic_sup: dynamic_sup
-             ]}
+             ] ++ Keyword.take(opts, [:retry_fetch_fn])}
           )
 
         {:ok, pid}

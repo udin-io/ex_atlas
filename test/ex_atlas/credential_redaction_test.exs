@@ -4,6 +4,8 @@ defmodule ExAtlas.CredentialRedactionTest do
   # provider call takes the ctx, so the ctx must print no credential.
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   @key "sk-redaction-probe-5d1c"
 
   # Delegates to the Mock, except `get_compute/2`, which crashes with a
@@ -277,15 +279,15 @@ defmodule ExAtlas.CredentialRedactionTest do
 
   describe "the RunPod client" do
     setup do
-      bypass = Bypass.open()
-      {:ok, bypass: bypass, base_url: "http://localhost:#{bypass.port}"}
+      server = Api.open()
+      {:ok, server: server, base_url: server.base_url}
     end
 
     test "control: sends req_options :headers and :auth as given", %{
-      bypass: bypass,
+      server: server,
       base_url: base_url
     } do
-      Bypass.expect_once(bypass, "GET", "/pods/pod-1", fn conn ->
+      Api.expect_once(server, "GET", "/pods/pod-1", fn conn ->
         assert ["Bearer from-req-options"] = Plug.Conn.get_req_header(conn, "authorization")
         assert ["probe-value"] = Plug.Conn.get_req_header(conn, "x-probe")
         Plug.Conn.resp(conn, 404, "")
@@ -296,6 +298,7 @@ defmodule ExAtlas.CredentialRedactionTest do
         api_key: @key,
         base_url: base_url,
         req_options: [
+          plug: Api.plug(),
           retry: false,
           auth: {:bearer, "from-req-options"},
           headers: [{"x-probe", "probe-value"}]
@@ -310,7 +313,7 @@ defmodule ExAtlas.CredentialRedactionTest do
     @env_value "hf-vast-redaction-probe-81b2"
 
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
       test_pid = self()
       handler = "vast-redaction-#{System.unique_integer([:positive])}"
 
@@ -323,30 +326,31 @@ defmodule ExAtlas.CredentialRedactionTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      Bypass.stub(bypass, "POST", "/api/v0/bundles", fn conn ->
+      Api.stub(server, "POST", "/api/v0/bundles", fn conn ->
         ExAtlas.Test.FakeVast.json(conn, 200, %{"offers" => [ExAtlas.Test.FakeVast.offer()]})
       end)
 
       opts = [
         provider: :vast,
         api_key: @key,
-        base_url: "http://localhost:#{bypass.port}",
+        base_url: server.base_url,
+        req_options: [plug: Api.plug()],
         gpu: :rtx_4090,
         image: "nginx",
         env: %{"HF_TOKEN" => @env_value}
       ]
 
-      {:ok, bypass: bypass, opts: opts}
+      {:ok, server: server, opts: opts}
     end
 
     def forward_event(event, measurements, meta, pid), do: send(pid, {event, measurements, meta})
 
     # The server answers with Vast's error shape, echoing the env value and
     # the key, and tells the test what it received.
-    defp answer_rent(bypass, status) do
+    defp answer_rent(server, status) do
       test_pid = self()
 
-      Bypass.expect(bypass, "PUT", "/api/v0/asks/:id", fn conn ->
+      Api.expect(server, "PUT", "/api/v0/asks/:id", fn conn ->
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         send(test_pid, {:rent_body, raw, Plug.Conn.get_req_header(conn, "authorization")})
 
@@ -362,8 +366,8 @@ defmodule ExAtlas.CredentialRedactionTest do
 
     for status <- [400, 429, 500] do
       test "a rent answered #{status} prints no env value or key in the error, telemetry or log",
-           %{bypass: bypass, opts: opts} do
-        answer_rent(bypass, unquote(status))
+           %{server: server, opts: opts} do
+        answer_rent(server, unquote(status))
 
         log =
           ExUnit.CaptureLog.capture_log(fn ->
@@ -397,10 +401,10 @@ defmodule ExAtlas.CredentialRedactionTest do
     end
 
     test "control: a 429 logs Req's retry line, so the log refute reads a real log", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      answer_rent(bypass, 429)
+      answer_rent(server, 429)
 
       log = ExUnit.CaptureLog.capture_log(fn -> ExAtlas.spawn_compute(opts) end)
 

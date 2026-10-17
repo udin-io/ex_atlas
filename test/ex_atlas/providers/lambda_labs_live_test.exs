@@ -4,7 +4,7 @@ defmodule ExAtlas.Providers.LambdaLabsLiveTest do
   #
   #     LAMBDA_LABS_API_KEY=... LAMBDA_SSH_KEY_NAME=... mix test --only lambda_live
   #
-  # Each test records one point the Bypass suite cannot settle: Lambda's real
+  # Each test records one point the HTTP stub suite cannot settle: Lambda's real
   # instance type names, whether cloud-init runs the bash `user_data` on the
   # default image, and what an `invalid-parameters` error echoes (#84);
   # whether a per-instance firewall ruleset opens port 80 while SSH on port 22

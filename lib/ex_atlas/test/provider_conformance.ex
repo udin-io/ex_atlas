@@ -11,13 +11,14 @@ defmodule ExAtlas.Test.ProviderConformance do
 
         use ExAtlas.Test.ProviderConformance,
           provider: MyCloud.Provider,
-          reset: {MyCloud.TestHelpers, :reset_bypass, []}
+          reset: {MyCloud.TestHelpers, :reset_stubs, []}
       end
 
   The `:reset` option names a `{mod, fun, args}` tuple the suite calls in its
-  `setup` block: a no-op, or a helper that resets a Bypass server. When the
+  `setup` block: a no-op, or a helper that resets a stub server. When the
   call returns a keyword list, the suite adds it to every call, so a
-  Bypass-backed provider can return `base_url:` and `api_key:`.
+  stub-backed provider can return `base_url:`, `api_key:` and
+  `req_options: [plug: ...]`.
   """
 
   @doc false

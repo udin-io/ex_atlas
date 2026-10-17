@@ -1,7 +1,9 @@
 defmodule ExAtlas.Providers.VastSpawnTest do
-  # Bypass stands in for Vast's API. A refusal test registers no route for
+  # ExAtlas.Test.Api stands in for Vast's API. A refusal test registers no route for
   # PUT /api/v0/asks/:id, so a rent fails the test.
   use ExUnit.Case, async: false
+
+  alias ExAtlas.Test.Api
 
   import ExAtlas.Test.FakeVast
 
@@ -14,24 +16,25 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   @container_key "vast-instance-key-4b8e2a"
 
   setup do
-    bypass = Bypass.open()
+    server = Api.open()
 
     opts = [
       provider: :vast,
       api_key: "vast-test-key",
-      base_url: "http://localhost:#{bypass.port}",
+      base_url: server.base_url,
+      req_options: [plug: Api.plug()],
       gpu: :rtx_4090,
       image: "vllm/vllm-openai:latest"
     ]
 
-    {:ok, bypass: bypass, opts: opts}
+    {:ok, server: server, opts: opts}
   end
 
   # Answers the offer search with `offers` and sends its body to the test.
-  defp expect_search(bypass, offers) do
+  defp expect_search(server, offers) do
     test_pid = self()
 
-    Bypass.expect_once(bypass, "POST", @bundles, fn conn ->
+    Api.expect_once(server, "POST", @bundles, fn conn ->
       {query, conn} = read_json(conn)
       send(test_pid, {:search, query})
       json(conn, 200, %{"offers" => offers})
@@ -39,10 +42,10 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   end
 
   # Answers each rent with `answer.(offer_id)` and sends the body to the test.
-  defp expect_rents(bypass, answer) do
+  defp expect_rents(server, answer) do
     test_pid = self()
 
-    Bypass.expect(bypass, "PUT", "/api/v0/asks/:id", fn conn ->
+    Api.expect(server, "PUT", "/api/v0/asks/:id", fn conn ->
       {body, conn} = read_json(conn)
       id = List.last(conn.path_info)
       send(test_pid, {:rent, id, body})
@@ -65,11 +68,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
   describe "spawn_compute/1 offer search" do
     test "searches Vast's spaced names, count, disk and ports, on-demand, cheapest first", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, _} =
                rent_spawn(
@@ -95,12 +98,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "cloud_type: :secure asks for datacenter hosts; :community does not", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       for {cloud, datacenter} <- [secure: %{"eq" => true}, community: nil] do
-        expect_search(bypass, [offer()])
-        expect_rents(bypass, fn _ -> rented(1) end)
+        expect_search(server, [offer()])
+        expect_rents(server, fn _ -> rented(1) end)
 
         assert {:ok, _} = rent_spawn(opts, cloud_type: cloud)
         assert_received {:search, query}
@@ -109,12 +112,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "the A100 80 GB and 40 GB share names and split on gpu_ram", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       for {gpu, ram} <- [a100_80g: %{"gte" => 70_000}, a100_40g: %{"lt" => 70_000}] do
-        expect_search(bypass, [offer()])
-        expect_rents(bypass, fn _ -> rented(1) end)
+        expect_search(server, [offer()])
+        expect_rents(server, fn _ -> rented(1) end)
 
         assert {:ok, _} = rent_spawn(opts, gpu: gpu)
         assert_received {:search, query}
@@ -123,9 +126,9 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       end
     end
 
-    test "container_disk_gb sets the disk searched for and rented", %{bypass: bypass, opts: opts} do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(1) end)
+    test "container_disk_gb sets the disk searched for and rented", %{server: server, opts: opts} do
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, _} = rent_spawn(opts, container_disk_gb: 80)
 
@@ -133,8 +136,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert_received {:rent, _, %{"disk" => 80}}
     end
 
-    test "no matching offer is a :provider error, and no rent", %{bypass: bypass, opts: opts} do
-      expect_search(bypass, [])
+    test "no matching offer is a :provider error, and no rent", %{server: server, opts: opts} do
+      expect_search(server, [])
 
       assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
                rent_spawn(opts)
@@ -152,17 +155,17 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
   describe "spawn_compute/1 picks the offer" do
     test "rents the cheapest offer in the first hinted country that has one", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [
+      expect_search(server, [
         offer(%{"id" => 1, "dph_total" => 0.30, "geolocation" => "Hungary, HU"}),
         offer(%{"id" => 2, "dph_total" => 0.55, "geolocation" => "Texas, US"}),
         offer(%{"id" => 3, "dph_total" => 0.41, "geolocation" => "Quebec, CA"}),
         offer(%{"id" => 4, "dph_total" => 0.45, "geolocation" => "California, US"})
       ])
 
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, compute} = rent_spawn(opts, region_hints: ["GB", "us", "CA"])
 
@@ -172,26 +175,26 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "with no hinted country offered, rents the cheapest anywhere", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [
+      expect_search(server, [
         offer(%{"id" => 2, "dph_total" => 0.55, "geolocation" => "Texas, US"}),
         offer(%{"id" => 1, "dph_total" => 0.30, "geolocation" => "Hungary, HU"})
       ])
 
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, _} = rent_spawn(opts, region_hints: ["JP"])
       assert rent_ids() == ["1"]
     end
 
     test "returns a provisioning Compute from the offer, with no read after the rent", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, compute} =
                rent_spawn(opts, name: "atlas-x", ports: [{8000, :http}])
@@ -210,11 +213,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
   describe "spawn_compute/1 rent body" do
     test "carries image, label, disk, runtype args, cancel_unavail and the env object", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       s3 = [
         endpoint: "https://s3.example.com",
@@ -254,9 +257,9 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert env["ATLAS_PRESHARED_KEY"] == compute.auth.token
     end
 
-    test "an unnamed spawn sends no label and no ports flags", %{bypass: bypass, opts: opts} do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(1) end)
+    test "an unnamed spawn sends no label and no ports flags", %{server: server, opts: opts} do
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, _} = rent_spawn(opts)
       assert_received {:rent, _, body}
@@ -286,9 +289,9 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     # Rents with `extra` and returns the rent body Vast received.
-    defp rent_body(bypass, opts, extra) do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+    defp rent_body(server, opts, extra) do
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, _} = rent_spawn(opts, extra)
       assert_received {:rent, _, body}
@@ -309,10 +312,10 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "self_terminate: true sends args that run the command under sh -c", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      body = rent_body(bypass, opts, command: ["python", "train.py"])
+      body = rent_body(server, opts, command: ["python", "train.py"])
 
       assert body["runtype"] == "args"
       assert ["sh", "-c", script] = body["args"]
@@ -322,11 +325,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     @tag :tmp_dir
     test "the wrapper deletes the instance by its CONTAINER_ID on exit 0", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp
     } do
-      body = rent_body(bypass, opts, command: ["sh", "-c", "echo ran > #{tmp}/ran"])
+      body = rent_body(server, opts, command: ["sh", "-c", "echo ran > #{tmp}/ran"])
 
       assert {0, log, config} = CurlShim.run(body["args"], tmp, vast_env())
 
@@ -340,11 +343,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     @tag :tmp_dir
     test "the wrapper deletes the instance when the command exits 1", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp
     } do
-      body = rent_body(bypass, opts, command: ["sh", "-c", "exit 1"])
+      body = rent_body(server, opts, command: ["sh", "-c", "exit 1"])
 
       assert {1, log, _config} = CurlShim.run(body["args"], tmp, vast_env())
       assert log =~ "-X DELETE https://console.vast.ai/api/v0/instances/28411907/"
@@ -354,11 +357,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     # TERM sent to the shell alone (`docker stop`) waits for the command.
     @tag :tmp_dir
     test "the wrapper deletes the instance when SIGTERM kills the command", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp
     } do
-      body = rent_body(bypass, opts, command: ["sh", "-c", "kill -TERM $$; sleep 5"])
+      body = rent_body(server, opts, command: ["sh", "-c", "kill -TERM $$; sleep 5"])
 
       assert {143, log, _config} = CurlShim.run(body["args"], tmp, vast_env())
       assert log =~ "-X DELETE https://console.vast.ai/api/v0/instances/28411907/"
@@ -366,12 +369,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     @tag :tmp_dir
     test "no argv carries the instance key or the callback token", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp,
       callback: callback
     } do
-      body = rent_body(bypass, opts, command: ["true"], callback: callback)
+      body = rent_body(server, opts, command: ["true"], callback: callback)
       token = body["env"]["ATLAS_CALLBACK_TOKEN"]
       env = vast_env() ++ [{"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"}]
 
@@ -388,12 +391,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     @tag :tmp_dir
     test "with a callback the finish report goes first, then the delete", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp,
       callback: callback
     } do
-      body = rent_body(bypass, opts, command: ["sh", "-c", "exit 3"], callback: callback)
+      body = rent_body(server, opts, command: ["sh", "-c", "exit 3"], callback: callback)
       env = callback_env(body)
 
       assert {3, log, _config} = CurlShim.run(body["args"], tmp, env)
@@ -406,12 +409,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     @tag :tmp_dir
     test "a callback host that is down cannot stop the delete", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp,
       callback: callback
     } do
-      body = rent_body(bypass, opts, command: ["true"], callback: callback)
+      body = rent_body(server, opts, command: ["true"], callback: callback)
       CurlShim.install(tmp, 7)
       env = callback_env(body)
 
@@ -421,24 +424,24 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "self_terminate: false sends the command as args, unwrapped", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       body =
-        rent_body(bypass, opts, command: ["python", "train.py", "it's"], self_terminate: false)
+        rent_body(server, opts, command: ["python", "train.py", "it's"], self_terminate: false)
 
       assert body["args"] == ["python", "train.py", "it's"]
     end
 
     @tag :tmp_dir
     test "self_terminate: false with a callback reports and does not delete", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp,
       callback: callback
     } do
       body =
-        rent_body(bypass, opts, command: ["true"], self_terminate: false, callback: callback)
+        rent_body(server, opts, command: ["true"], self_terminate: false, callback: callback)
 
       env = callback_env(body)
 
@@ -448,23 +451,23 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "an empty command sends no args, so the image's own command runs", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      body = rent_body(bypass, opts, command: [])
+      body = rent_body(server, opts, command: [])
       refute Map.has_key?(body, "args")
     end
 
     @tag :tmp_dir
     test "command arguments survive the wrapper intact", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp
     } do
       arg = "it's a $PATH; rm -rf / `id`"
 
       body =
-        rent_body(bypass, opts,
+        rent_body(server, opts,
           command: ["sh", "-c", "printf '%s' \"$1\" > #{tmp}/arg", "sh", arg]
         )
 
@@ -476,11 +479,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     # rest of the value is read as curl options (`url =`, `variable =`).
     @tag :tmp_dir
     test "a key or id that is not a plain token sends no request", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp
     } do
-      body = rent_body(bypass, opts, command: ["true"])
+      body = rent_body(server, opts, command: ["true"])
 
       for {id, key} <- [
             {"28411907", "abc\nurl = \"http://127.0.0.1:9/stolen\""},
@@ -502,12 +505,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     @tag :tmp_dir
     test "a callback token that is not a plain token posts no report", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       tmp_dir: tmp,
       callback: callback
     } do
-      body = rent_body(bypass, opts, command: ["true"], callback: callback)
+      body = rent_body(server, opts, command: ["true"], callback: callback)
       url = {"ATLAS_CALLBACK_URL", "https://app.example.com/atlas/cb"}
       bad = {"ATLAS_CALLBACK_TOKEN", "t\nurl = \"http://127.0.0.1:9/x\""}
 
@@ -535,9 +538,9 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       offer(Map.merge(%{"id" => id, "min_bid" => min_bid, "dph_total" => total}, attrs))
     end
 
-    test "searches type bid and rents at the offer's min_bid", %{bypass: bypass, opts: opts} do
-      expect_search(bypass, [bid_offer(7, 0.18)])
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+    test "searches type bid and rents at the offer's min_bid", %{server: server, opts: opts} do
+      expect_search(server, [bid_offer(7, 0.18)])
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, compute} = rent_spawn(opts, spot: true)
 
@@ -550,11 +553,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "control: an on-demand spawn searches ondemand and sends no price", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [bid_offer(7, 0.18)])
-      expect_rents(bypass, fn _ -> rented(1) end)
+      expect_search(server, [bid_offer(7, 0.18)])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, compute} = rent_spawn(opts)
 
@@ -566,64 +569,64 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     # Offer 1 has the lowest bid and the dearest disk: it bills the most.
     test "tries offers by what the bid bills", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [
+      expect_search(server, [
         bid_offer(1, 0.10, %{"dph_total" => 0.30}),
         bid_offer(2, 0.15, %{"dph_total" => 0.16}),
         bid_offer(3, 0.20, %{"dph_total" => 0.21})
       ])
 
-      expect_rents(bypass, fn _ -> {400, refused("bid_too_low", "no")} end)
+      expect_rents(server, fn _ -> {400, refused("bid_too_low", "no")} end)
 
       assert {:error, %ExAtlas.Error{kind: :provider}} = rent_spawn(opts, spot: true)
       assert rent_ids() == ["2", "3", "1"]
     end
 
     test "skips an offer with no usable min_bid, and never rents it at dph_total", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [
+      expect_search(server, [
         bid_offer(1, nil, %{"dph_total" => 0.05}),
         bid_offer(2, "0.10", %{"dph_total" => 0.06}),
         bid_offer(3, 0, %{"dph_total" => 0.07}),
         bid_offer(4, 0.25)
       ])
 
-      expect_rents(bypass, fn _ -> rented(5) end)
+      expect_rents(server, fn _ -> rented(5) end)
 
       assert {:ok, %{cost_per_hour: 0.26}} = rent_spawn(opts, spot: true)
       assert rent_ids() == ["4"]
     end
 
     test "an offer without dph_total still sets cost_per_hour from its min_bid", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [Map.delete(bid_offer(7, 0.18), "dph_total")])
-      expect_rents(bypass, fn _ -> rented(1) end)
+      expect_search(server, [Map.delete(bid_offer(7, 0.18), "dph_total")])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, %{cost_per_hour: 0.18}} = rent_spawn(opts, spot: true)
     end
 
     test "provider_opts.offer_id: nil with spot: true searches, as on-demand does", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [bid_offer(7, 0.18)])
-      expect_rents(bypass, fn _ -> rented(1) end)
+      expect_search(server, [bid_offer(7, 0.18)])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, %{cost_per_hour: 0.19}} =
                rent_spawn(opts, spot: true, provider_opts: %{offer_id: nil})
     end
 
     test "no offer with a min_bid is a :provider error, and no rent", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [bid_offer(1, nil)])
+      expect_search(server, [bid_offer(1, nil)])
 
       assert {:error, %ExAtlas.Error{kind: :provider, message: message}} =
                rent_spawn(opts, spot: true)
@@ -632,12 +635,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "a refused bid tries the next offer at that offer's own min_bid", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [bid_offer(1, 0.10), bid_offer(2, 0.15)])
+      expect_search(server, [bid_offer(1, 0.10), bid_offer(2, 0.15)])
 
-      expect_rents(bypass, fn
+      expect_rents(server, fn
         "1" -> {400, refused("bid_too_low", "no")}
         "2" -> rented(9)
       end)
@@ -660,13 +663,13 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "a refused bid withholds Vast's msg, as an on-demand refusal does", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_rents(bypass, fn _ -> {400, refused("invalid_args", "bad env #{@hf_token}")} end)
+      expect_rents(server, fn _ -> {400, refused("invalid_args", "bad env #{@hf_token}")} end)
 
       for extra <- [[spot: true], []] do
-        expect_search(bypass, [bid_offer(1, 0.10)])
+        expect_search(server, [bid_offer(1, 0.10)])
 
         assert {:error, %ExAtlas.Error{} = error} =
                  rent_spawn(opts, [env: %{"HF_TOKEN" => @hf_token}] ++ extra)
@@ -716,9 +719,9 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       end
     end
 
-    test "control: an identifier env name passes the check", %{bypass: bypass, opts: opts} do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(1) end)
+    test "control: an identifier env name passes the check", %{server: server, opts: opts} do
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, _} = rent_spawn(opts, env: %{"_My_Var2" => "x"})
     end
@@ -784,8 +787,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   end
 
   describe "spawn_compute/1 provider_opts.offer_id" do
-    test "rents that offer with no search", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn _ -> rented(28_411_907) end)
+    test "rents that offer with no search", %{server: server, opts: opts} do
+      expect_rents(server, fn _ -> rented(28_411_907) end)
 
       assert {:ok, compute} = rent_spawn(opts, provider_opts: %{offer_id: 777})
 
@@ -794,8 +797,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert compute.cost_per_hour == nil
     end
 
-    test "a refused rent returns its error and tries nothing else", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn _ -> {404, refused("no_such_ask", "gone")} end)
+    test "a refused rent returns its error and tries nothing else", %{server: server, opts: opts} do
+      expect_rents(server, fn _ -> {404, refused("no_such_ask", "gone")} end)
 
       assert {:error, %ExAtlas.Error{kind: :provider, status: 404}} =
                rent_spawn(opts, provider_opts: %{offer_id: 777})
@@ -805,8 +808,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   end
 
   describe "spawn_compute/1 rent failures" do
-    setup %{bypass: bypass} do
-      expect_search(bypass, [
+    setup %{server: server} do
+      expect_search(server, [
         offer(%{"id" => 1, "dph_total" => 0.30}),
         offer(%{"id" => 2, "dph_total" => 0.31}),
         offer(%{"id" => 3, "dph_total" => 0.32}),
@@ -816,8 +819,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       :ok
     end
 
-    test "a refused rent tries the next offer", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn
+    test "a refused rent tries the next offer", %{server: server, opts: opts} do
+      expect_rents(server, fn
         "1" -> {410, refused("no_such_ask", "Instance type 1 is no longer available.")}
         _ -> rented(28_411_907)
       end)
@@ -827,10 +830,10 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "a third refusal returns the error with Vast's code and no msg; no fourth rent", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_rents(bypass, fn id ->
+      expect_rents(server, fn id ->
         {400, refused("invalid_args", "error 400/3467: offer #{id} bad: HF_TOKEN=#{@hf_token}")}
       end)
 
@@ -844,8 +847,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       refute Exception.message(error) =~ "3467"
     end
 
-    test "a 500 is sent once and returns :provider", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn _ -> {500, refused("server_error", "echo #{@hf_token}")} end)
+    test "a 500 is sent once and returns :provider", %{server: server, opts: opts} do
+      expect_rents(server, fn _ -> {500, refused("server_error", "echo #{@hf_token}")} end)
 
       assert {:error, %ExAtlas.Error{kind: :provider, status: 500} = error} =
                rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token})
@@ -855,12 +858,12 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "control: a 429 then 200 rents once and returns the instance", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       calls = :counters.new(1, [])
 
-      Bypass.expect(bypass, "PUT", "/api/v0/asks/:id", fn conn ->
+      Api.expect(server, "PUT", "/api/v0/asks/:id", fn conn ->
         :counters.add(calls, 1, 1)
 
         if :counters.get(calls, 1) == 1 do
@@ -876,18 +879,18 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       assert :counters.get(calls, 1) == 2
     end
 
-    test "a 401 stops at the first offer and reads :unauthorized", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn _ -> {401, refused("auth_error", "Invalid user key")} end)
+    test "a 401 stops at the first offer and reads :unauthorized", %{server: server, opts: opts} do
+      expect_rents(server, fn _ -> {401, refused("auth_error", "Invalid user key")} end)
 
       assert {:error, %ExAtlas.Error{kind: :unauthorized}} = rent_spawn(opts)
       assert rent_ids() == ["1"]
     end
 
     test "a 200 with no new_contract is an error, and no other rent", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_rents(bypass, fn _ ->
+      expect_rents(server, fn _ ->
         {200, %{"success" => false, "error" => "odd", "msg" => @hf_token}}
       end)
 
@@ -898,18 +901,18 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   end
 
   describe "spawn_compute/1 rent answers that hide what happened" do
-    setup %{bypass: bypass} do
-      expect_search(bypass, [offer(%{"id" => 1}), offer(%{"id" => 2})])
+    setup %{server: server} do
+      expect_search(server, [offer(%{"id" => 1}), offer(%{"id" => 2})])
       :ok
     end
 
     # Req cannot decode the body, and its error keeps the body it read.
     test "a body that is not JSON prints no echoed value, and tries no other offer", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       for status <- [200, 400, 500] do
-        Bypass.expect_once(bypass, "PUT", "/api/v0/asks/1", fn conn ->
+        Api.expect_once(server, "PUT", "/api/v0/asks/1", fn conn ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "application/json")
           |> Plug.Conn.resp(status, ~s({"error":"invalid_args","msg":"bad HF_TOKEN=#{@hf_token}"))
@@ -925,15 +928,15 @@ defmodule ExAtlas.Providers.VastSpawnTest do
         if status == 500 do
           :ok
         else
-          expect_search(bypass, [offer(%{"id" => 1}), offer(%{"id" => 2})])
+          expect_search(server, [offer(%{"id" => 1}), offer(%{"id" => 2})])
         end
       end
     end
 
     # The `error` field is documented as a code (`invalid_args`), but Vast
     # writes it; free text there is withheld like `msg`.
-    test "an error field that is not a code is withheld", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn _ -> {500, refused("bad env HF_TOKEN=#{@hf_token}", "x")} end)
+    test "an error field that is not a code is withheld", %{server: server, opts: opts} do
+      expect_rents(server, fn _ -> {500, refused("bad env HF_TOKEN=#{@hf_token}", "x")} end)
 
       assert {:error, %ExAtlas.Error{} = error} =
                rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token})
@@ -945,15 +948,14 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
     # A 307 or 308 re-sends the body, env values included, to its Location.
     test "a redirect is not followed: the env goes to no other host", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      elsewhere = Bypass.open()
-      Bypass.down(elsewhere)
+      elsewhere = Api.open()
 
-      Bypass.expect_once(bypass, "PUT", "/api/v0/asks/1", fn conn ->
+      Api.expect_once(server, "PUT", "/api/v0/asks/1", fn conn ->
         conn
-        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.put_resp_header("location", elsewhere.base_url <> "/steal")
         |> Plug.Conn.resp(307, "")
       end)
 
@@ -962,8 +964,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     # A proxy in front of Vast can answer 408 after Vast took the rent.
-    test "a 408 stops at the first offer", %{bypass: bypass, opts: opts} do
-      expect_rents(bypass, fn _ -> {408, refused("timeout", "slow")} end)
+    test "a 408 stops at the first offer", %{server: server, opts: opts} do
+      expect_rents(server, fn _ -> {408, refused("timeout", "slow")} end)
 
       assert {:error, %ExAtlas.Error{status: 408}} = rent_spawn(opts)
       assert rent_ids() == ["1"]
@@ -976,16 +978,16 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   describe "spawn_compute/1 rent failures with a command" do
     @command_marker "cmd-probe-91f3aa"
 
-    setup %{bypass: bypass} do
-      expect_search(bypass, [offer(%{"id" => 1})])
+    setup %{server: server} do
+      expect_search(server, [offer(%{"id" => 1})])
       {:ok, command: ["python", "train.py", "--token", @command_marker]}
     end
 
     # Answers the rent with `respond`, after sending the args it got to the test.
-    defp echo_rent(bypass, respond) do
+    defp echo_rent(server, respond) do
       test_pid = self()
 
-      Bypass.expect_once(bypass, "PUT", "/api/v0/asks/1", fn conn ->
+      Api.expect_once(server, "PUT", "/api/v0/asks/1", fn conn ->
         {body, conn} = read_json(conn)
         send(test_pid, {:args, body["args"]})
         respond.(conn, Jason.encode!(body))
@@ -1002,33 +1004,33 @@ defmodule ExAtlas.Providers.VastSpawnTest do
       refute Exception.message(error) =~ @command_marker
     end
 
-    test "a refusal whose msg echoes the request", %{bypass: bypass, opts: opts, command: cmd} do
-      echo_rent(bypass, fn conn, echo -> json(conn, 400, refused("invalid_args", echo)) end)
+    test "a refusal whose msg echoes the request", %{server: server, opts: opts, command: cmd} do
+      echo_rent(server, fn conn, echo -> json(conn, 400, refused("invalid_args", echo)) end)
 
       assert {:error, %ExAtlas.Error{status: 400} = error} = rent_spawn(opts, command: cmd)
       assert_withheld(error)
     end
 
-    test "a 500 whose error field is the request", %{bypass: bypass, opts: opts, command: cmd} do
-      echo_rent(bypass, fn conn, echo -> json(conn, 500, refused(echo, "x")) end)
+    test "a 500 whose error field is the request", %{server: server, opts: opts, command: cmd} do
+      echo_rent(server, fn conn, echo -> json(conn, 500, refused(echo, "x")) end)
 
       assert {:error, %ExAtlas.Error{status: 500} = error} = rent_spawn(opts, command: cmd)
       assert_withheld(error)
     end
 
     test "a 200 with no new_contract that echoes the request", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       command: cmd
     } do
-      echo_rent(bypass, fn conn, echo -> json(conn, 200, %{"success" => false, "msg" => echo}) end)
+      echo_rent(server, fn conn, echo -> json(conn, 200, %{"success" => false, "msg" => echo}) end)
 
       assert {:error, %ExAtlas.Error{} = error} = rent_spawn(opts, command: cmd)
       assert_withheld(error)
     end
 
-    test "a body that is not JSON", %{bypass: bypass, opts: opts, command: cmd} do
-      echo_rent(bypass, fn conn, echo ->
+    test "a body that is not JSON", %{server: server, opts: opts, command: cmd} do
+      echo_rent(server, fn conn, echo ->
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(400, ~s({"msg":) <> echo)
@@ -1039,16 +1041,15 @@ defmodule ExAtlas.Providers.VastSpawnTest do
     end
 
     test "a redirect is not followed: the command goes to no other host", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       command: cmd
     } do
-      elsewhere = Bypass.open()
-      Bypass.down(elsewhere)
+      elsewhere = Api.open()
 
-      echo_rent(bypass, fn conn, _echo ->
+      echo_rent(server, fn conn, _echo ->
         conn
-        |> Plug.Conn.put_resp_header("location", "http://localhost:#{elsewhere.port}/steal")
+        |> Plug.Conn.put_resp_header("location", elsewhere.base_url <> "/steal")
         |> Plug.Conn.resp(307, "")
       end)
 
@@ -1058,8 +1059,8 @@ defmodule ExAtlas.Providers.VastSpawnTest do
   end
 
   describe "spawn_compute/1 rent timeout" do
-    # Req's plug stands in for the network here: Bypass reports a handler the
-    # client hung up on as a test failure.
+    # Req's plug answers with a transport error, which a route handler
+    # cannot: the client sees the timeout, not an answer.
     test "a timeout is sent once and tries no other offer", %{opts: opts} do
       test_pid = self()
 
@@ -1083,11 +1084,11 @@ defmodule ExAtlas.Providers.VastSpawnTest do
 
   describe "spawn_compute/1 secrets" do
     test "the returned Compute prints no auth token and no env value", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_search(bypass, [offer()])
-      expect_rents(bypass, fn _ -> rented(1) end)
+      expect_search(server, [offer()])
+      expect_rents(server, fn _ -> rented(1) end)
 
       assert {:ok, compute} =
                rent_spawn(opts, env: %{"HF_TOKEN" => @hf_token}, auth: :bearer)
