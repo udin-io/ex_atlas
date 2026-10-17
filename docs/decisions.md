@@ -142,7 +142,7 @@ names the PR or issue that holds the reasoning.
 |---|---|---|
 | Group every public module in the sidebar, `ExAtlas.Application` under Core API | `@moduledoc false` on internals: hiding is an API statement, and a hidden module named in prose is itself a warning | #92 |
 | Reword CHANGELOG lines that name removed functions | `skip_undefined_reference_warnings_on`: it suppresses warnings | #92 |
-| The `docs` step runs before `hex.audit` in `bin/ci` | Last step: CI stops at `hex.audit` on cowlib, so it would never run | #92 |
+| The `docs` step runs before `hex.audit` in `bin/ci` | Last step: until #175 CI stopped at `hex.audit` on cowlib, so it would never run | #92 |
 | Install pins track the current `@version` major.minor, checked by `release_pins_test.exs` | Pin ahead to the next release: it does not resolve before publish | #92 |
 
 ## Lambda Labs provider (feature #83)
@@ -305,7 +305,8 @@ names the PR or issue that holds the reasoning.
 | No Lease on a node with no callback secret | Start it: it verifies no record, and its own records are unsigned | #132 |
 | No `mix ex_atlas.upgrade` notice for migration step 2 | A `"0.9.0"` upgrader: the Ecto store is unreleased, so no Hex host ran step 1 alone; the README and CHANGELOG say what to add | #132 |
 | Optional provider callbacks go through `dispatch_optional/3` | Call the module directly: raises on providers without the callback | #60, `CLAUDE.md` |
-| `hex.audit` stays in CI and suppresses nothing, even though it fails on cowlib | Ignore the advisories | #53, `CLAUDE.md` |
+| `hex.audit` stays in CI and suppresses nothing; #175 dropped `bypass`, the dependency that failed it | Ignore the advisories | #53, #175 |
+| Provider tests stub HTTP with `ExAtlas.Test.Api`, a function plug in Req's `:plug` option | `Bypass`: its cowboy and cowlib failed `hex.audit`. Plain `Req.Test.stub` per test: no method and path routes, so ~280 call sites would each rebuild a router | #175 |
 | `compute_spend/2` with no window covers RunPod's last 30 days | Default to a short window | #58, #62 |
 | A respawn after adoption asks a host resolver, an `{m, f, args}`, for `s3:` and `env:` | A function capture: a record must survive DETS and a restart | #87 |
 | The per-task tuple wins; `config :ex_atlas, :orchestrator, respawn_credentials:` is the fallback | App config only: credentials are often per user or per task | #87 |

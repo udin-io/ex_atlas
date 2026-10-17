@@ -1707,7 +1707,7 @@ excluded from `mix test` by default — set `RUNPOD_API_KEY` and run
   If the pod inside doesn't validate `ATLAS_PRESHARED_KEY` on every request,
   anyone with the URL can hit it.
 - **HTTPS only.** Every provider's base URL is HTTPS. If you override via
-  `:base_url` (for testing with Bypass), use HTTPS for production.
+  `:base_url` (for testing with `Req.Test`), use HTTPS for production.
 
 ## Troubleshooting & FAQ
 

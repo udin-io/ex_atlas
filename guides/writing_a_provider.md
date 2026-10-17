@@ -158,7 +158,7 @@ defmodule MyCloud.ProviderTest do
 
   use ExAtlas.Test.ProviderConformance,
     provider: MyCloud.Provider,
-    reset: {MyCloud.TestHelpers, :reset_bypass, []}
+    reset: {MyCloud.TestHelpers, :reset_stubs, []}
 end
 ```
 
@@ -170,8 +170,8 @@ The suite asserts:
 - `list_compute/0` returns a list.
 
 When the `:reset` call returns a keyword list, the suite adds it to every
-call. A provider tested against Bypass returns `base_url:` and `api_key:`
-from it; `ExAtlas.Test.FakeLambda.start/0` in ExAtlas's own tests does this
+call. A provider tested against a stub server returns `base_url:`, `api_key:` and
+`req_options: [plug: ...]` from it; `ExAtlas.Test.FakeLambda.start/0` in ExAtlas's own tests does this
 for Lambda.
 
 If your provider passes these, it's wired correctly.

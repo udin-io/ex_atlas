@@ -14,9 +14,8 @@ rank 1, risk 4, for an unreadable store; its config faults stay.
 
 The rule, as for milestones 9, 11 and 13: when no roadmap item or open
 milestone is left, we take the open risk with the largest cost that a
-feature can retire. We left out risk 2 and 15 (cowlib, waits on an upstream
-release), every risk only the owner's live tests settle (1, 14, 19, 20, 33,
-44, 52, 56, 58, 61; the Lambda and Vast live runs are deferred by the owner),
+feature can retire. We left out every risk only the owner's live tests
+settle (1, 14, 19, 20, 33, 44, 52, 56, 58, 61; the Lambda and Vast live runs are deferred by the owner),
 and the part of risk 6 the owner accepted (replay and a held row lock, decision
 on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 

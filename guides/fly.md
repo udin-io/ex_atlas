@@ -214,5 +214,5 @@ defmodule MyTest do
 end
 ```
 
-For HTTP-level tests, point `ExAtlas.Fly.Logs.Client` at a Bypass endpoint via
-`base_url:`.
+For HTTP-level tests, give `ExAtlas.Fly.Logs.Client` an `http_client:` function that answers
+`(url, headers)` with `{:ok, status, body}`.

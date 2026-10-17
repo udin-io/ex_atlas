@@ -69,7 +69,7 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Release 0.9.0 (#141) | Merged in #142: `mix ex_atlas.upgrade`'s `"0.9.0"` step edits no file and names a missing callback secret; `guides/upgrading.md` covers the five changes. The owner publishes and tags `v0.9.0` |
 | Release 0.10.0 (#151) | PR #152: version 0.10.0, the CHANGELOG release section, `guides/upgrading.md` "Upgrading to 0.10.0" (migration step 3, dead-owner deletion on by default, `reap_dead_owners: false`, the accepted replay and row-lock risk), README pins. `mix ex_atlas.upgrade`'s `"0.10.0"` step (#148) names the step-3 migration for an Ecto-store host. The owner publishes and tags `v0.10.0` |
 | S3-compatible object storage (milestone 14) | Slice 1 (#164): `ExAtlas.S3` reads, writes, lists and deletes objects, signed by Req's `:aws_sigv4`. Slice 2 (#165): ranged reads, streamed downloads and multipart upload. Slice 3 (#166): presigned URLs and `guides/object_storage.md`. The release Eagle pins is #171 |
-| CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
+| CI | `bin/ci` runs format, compile, credo, docs, `hex.audit`, sobelow and `mix test` on Actions and locally. Provider tests stub HTTP through Req's `:plug` (`ExAtlas.Test.Api`), so the lock holds no cowboy or cowlib |
 
 ## Pages
 

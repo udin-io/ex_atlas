@@ -36,24 +36,27 @@ bin/audit                  # the weekly mix_audit run, not part of bin/ci
 
 ## Project-specific lessons
 
-### CI is red at `hex.audit` on cowlib, and that is accepted
+### A test-only dependency can fail `hex.audit`, so tests stub HTTP through Req's `:plug`
 
-On Actions, `hex.audit` (Hex 2.5) reports OSV advisories as well as retired
-packages. It fails on cowlib 2.21.0, the newest release, for
-EEF-CVE-2026-43966 (medium). 2.21.0 fixed EEF-CVE-2026-43969 (low); no
-release fixes 43966. Cowlib comes in only through the test-only `bypass`. The
-owner's decision on #53 (decision 4) keeps the step and suppresses nothing,
-so `ci` stays red until cowlib ships a fix.
+`hex.audit` (Hex 2.5) reports OSV advisories as well as retired packages, and
+it counts a `only: :test` dependency like any other. `bypass` pulled in
+cowboy and cowlib 2.21.0 (EEF-CVE-2026-43966, no fixed release), and every
+`bin/ci` run, local or on Actions, stopped at `hex.audit` before sobelow and
+`mix test` until #175 removed it.
 
-- **Symptom:** every PR's `ci` check fails at `hex.audit`, and CI never runs
-  sobelow or `mix test`. The local `bin/ci` is then the only full run: report
-  its test count and exit code, and say CI never reached the later steps.
-- **Local `bin/ci` stops there too** with Hex 2.5 (Hex 2.4 printed
-  retirements only, #55). Run every step after `hex.audit` by hand: `mix
-  sobelow --config`, the sobelow callback gate, `mix test`. Report each with
-  its count and exit code.
-- Never add `--ignore-advisory-ids`, an ignore file or a skip to make it
-  green.
+- Provider tests stub HTTP with `ExAtlas.Test.Api`: `Api.open()`, then
+  `Api.expect_once/4`, `expect/4` and `stub/4` by method and path, and
+  `Api.opts/1` for the client options (`base_url:` and
+  `req_options: [plug: ...]`). A request to a route nobody registered, a
+  second request to an `expect_once` route, or an assertion that fails inside
+  a handler fails the test when it exits.
+- A no-request test registers no route. A redirect test points `Location` at
+  a second `Api.open()` host with no route, so a followed redirect fails it.
+  A refused connection is `Api.unreachable/1`, and a timeout is
+  `Req.Test.transport_error(conn, :timeout)` in a plug function.
+- A new test-only dependency runs `mix hex.audit` before the first commit.
+- Never add `--ignore-advisory-ids`, an ignore file or a skip to make the
+  step green (decision 4 on #53).
 
 ### Test floats compare with a delta, and tests run from any checkout path
 
@@ -62,7 +65,7 @@ so `ci` stays red until cowlib ships a fix.
   respawn in the same ms as the last bill sums to 4.999999999999999 (#103).
 - Igniter's test mode skips dot directories, so `ex_atlas_upgrade_test.exs`
   builds its project with `File.cd!/2` in a temp dir. Agent worktrees live
-  under `~/.claude_worktrees`; a new Igniter test uses the same helper (#104).
+  under a dot-directory; a new Igniter test uses the same helper (#104).
 
 ### Optional provider callbacks go through `dispatch_optional/3`
 
