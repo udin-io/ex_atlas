@@ -1,6 +1,8 @@
 defmodule ExAtlas.Orchestrator.ReaperTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   import ExUnit.CaptureLog
 
   @moduletag :capture_log
@@ -614,12 +616,13 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
 
   describe "on Vast" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
       previous = Application.get_env(:ex_atlas, :vast)
 
       Application.put_env(:ex_atlas, :vast,
         api_key: "vast-test-key",
-        base_url: "http://localhost:#{bypass.port}"
+        base_url: server.base_url,
+        req_options: [plug: Api.plug()]
       )
 
       on_exit(fn ->
@@ -628,13 +631,13 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
           else: Application.delete_env(:ex_atlas, :vast)
       end)
 
-      {:ok, bypass: bypass}
+      {:ok, server: server}
     end
 
     # A rent that answered 5xx or timed out may have rented, and nothing
     # tracks what it rented (risk 54).
     test "destroys an untracked atlas- instance past the grace window, leaves a younger one", %{
-      bypass: bypass
+      server: server
     } do
       TestOrchestrator.put_env(reap_grace_ms: 60 * 60 * 1_000)
       now = System.os_time(:second)
@@ -645,13 +648,13 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
         FakeVast.instance(%{"id" => 3, "label" => "other-old", "start_date" => now - 7_200})
       ]
 
-      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+      Api.expect(server, "GET", "/api/v1/instances", fn conn ->
         FakeVast.json(conn, 200, %{"instances" => instances, "next_token" => nil})
       end)
 
       test_pid = self()
 
-      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
+      Api.expect_once(server, "DELETE", "/api/v0/instances/:id", fn conn ->
         send(test_pid, {:destroyed, List.last(conn.path_info)})
         FakeVast.json(conn, 200, %{"success" => true})
       end)
@@ -675,9 +678,9 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     end
 
     test "control: a periodic Reaper with :vast in :reap_providers lists Vast", %{
-      bypass: bypass
+      server: server
     } do
-      reaper = start_vast_reaper(bypass, reap_providers: [:vast])
+      reaper = start_vast_reaper(server, reap_providers: [:vast])
 
       :ok = tick(reaper)
 
@@ -685,7 +688,7 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     end
 
     test "with :vast opted in, an instance a live tracker holds is never destroyed", %{
-      bypass: bypass
+      server: server
     } do
       TestOrchestrator.put_env(reap_grace_ms: 0)
       old = System.os_time(:second) - 7_200
@@ -698,13 +701,13 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
 
       {:ok, _} = Registry.register(ExAtlas.Orchestrator.ComputeRegistry, {:compute, "1"}, nil)
 
-      Bypass.expect(bypass, "GET", "/api/v1/instances", fn conn ->
+      Api.expect(server, "GET", "/api/v1/instances", fn conn ->
         FakeVast.json(conn, 200, %{"instances" => instances, "next_token" => nil})
       end)
 
       test_pid = self()
 
-      Bypass.expect_once(bypass, "DELETE", "/api/v0/instances/:id", fn conn ->
+      Api.expect_once(server, "DELETE", "/api/v0/instances/:id", fn conn ->
         send(test_pid, {:destroyed, List.last(conn.path_info)})
         FakeVast.json(conn, 200, %{"success" => true})
       end)
@@ -717,14 +720,14 @@ defmodule ExAtlas.Orchestrator.ReaperTest do
     end
   end
 
-  defp start_vast_reaper(bypass, env) do
+  defp start_vast_reaper(server, env) do
     TestOrchestrator.put_env(
       [tracking_store: false, reap_grace_ms: 0, reap_interval_ms: 60_000] ++ env
     )
 
     test_pid = self()
 
-    Bypass.stub(bypass, "GET", "/api/v1/instances", fn conn ->
+    Api.stub(server, "GET", "/api/v1/instances", fn conn ->
       send(test_pid, :listed)
       FakeVast.json(conn, 200, %{"instances" => [], "next_token" => nil})
     end)

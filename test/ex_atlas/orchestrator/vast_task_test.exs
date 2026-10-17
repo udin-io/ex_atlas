@@ -25,6 +25,7 @@ defmodule ExAtlas.Orchestrator.VastTaskTest do
     {:ok, %{status: 200}} =
       Req.delete("#{vast[:base_url]}/api/v0/instances/#{id}/",
         auth: {:bearer, "container-api-key"},
+        plug: ExAtlas.Test.Api.plug(),
         retry: false
       )
   end

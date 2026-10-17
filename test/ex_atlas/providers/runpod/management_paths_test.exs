@@ -1,19 +1,21 @@
 defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   alias ExAtlas.Providers.RunPod.{Billing, Endpoints, NetworkVolumes, Pods, Templates}
 
   setup do
-    bypass = Bypass.open()
-    ctx = %{api_key: "test-key", base_url: "http://localhost:#{bypass.port}"}
-    {:ok, bypass: bypass, ctx: ctx}
+    server = Api.open()
+    ctx = %{api_key: "test-key", base_url: server.base_url, req_options: [plug: Api.plug()]}
+    {:ok, server: server, ctx: ctx}
   end
 
-  defp expect_path(bypass, method, path, body \\ "{}") do
+  defp expect_path(server, method, path, body \\ "{}") do
     status = if method == "POST", do: 201, else: 200
     test_pid = self()
 
-    Bypass.expect_once(bypass, method, path, fn conn ->
+    Api.expect_once(server, method, path, fn conn ->
       send(test_pid, {:hit, method, path})
 
       conn
@@ -25,19 +27,19 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   # A pod id can come from a tracking record its writer chose (issue 138), so
   # it never adds a path segment.
   describe "a pod id is sent path-encoded" do
-    test "get, stop, start and delete", %{bypass: bypass, ctx: ctx} do
-      expect_path(bypass, "GET", "/pods/..%2Fx")
+    test "get, stop, start and delete", %{server: server, ctx: ctx} do
+      expect_path(server, "GET", "/pods/..%2Fx")
       assert {:ok, _} = Pods.get(ctx, "../x")
 
-      expect_path(bypass, "POST", "/pods/..%2Fx/action", "{}")
+      expect_path(server, "POST", "/pods/..%2Fx/action", "{}")
       _ = Pods.stop(ctx, "../x")
       assert_received {:hit, "POST", "/pods/..%2Fx/action"}
 
-      expect_path(bypass, "POST", "/pods/..%2Fx/action", "{}")
+      expect_path(server, "POST", "/pods/..%2Fx/action", "{}")
       _ = Pods.start(ctx, "../x")
       assert_received {:hit, "POST", "/pods/..%2Fx/action"}
 
-      expect_path(bypass, "DELETE", "/pods/..%2Fx")
+      expect_path(server, "DELETE", "/pods/..%2Fx")
       assert {:ok, _} = Pods.delete(ctx, "../x")
 
       assert_received {:hit, "GET", "/pods/..%2Fx"}
@@ -46,40 +48,40 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   end
 
   describe "serverless endpoints live under /serverless in REST v2" do
-    test "create, get, list and delete", %{bypass: bypass, ctx: ctx} do
-      expect_path(bypass, "POST", "/serverless")
+    test "create, get, list and delete", %{server: server, ctx: ctx} do
+      expect_path(server, "POST", "/serverless")
       assert {:ok, _} = Endpoints.create(ctx, %{})
       assert_received {:hit, "POST", "/serverless"}
 
-      expect_path(bypass, "GET", "/serverless/ep1")
+      expect_path(server, "GET", "/serverless/ep1")
       assert {:ok, _} = Endpoints.get(ctx, "ep1")
       assert_received {:hit, "GET", "/serverless/ep1"}
 
-      expect_path(bypass, "GET", "/serverless", ~s({"endpoints": []}))
+      expect_path(server, "GET", "/serverless", ~s({"endpoints": []}))
       assert {:ok, []} = Endpoints.list(ctx)
       assert_received {:hit, "GET", "/serverless"}
 
-      expect_path(bypass, "DELETE", "/serverless/ep1")
+      expect_path(server, "DELETE", "/serverless/ep1")
       assert {:ok, _} = Endpoints.delete(ctx, "ep1")
       assert_received {:hit, "DELETE", "/serverless/ep1"}
     end
   end
 
   describe "templates live under /templates in REST v2" do
-    test "create, list, get and delete", %{bypass: bypass, ctx: ctx} do
-      expect_path(bypass, "POST", "/templates")
+    test "create, list, get and delete", %{server: server, ctx: ctx} do
+      expect_path(server, "POST", "/templates")
       assert {:ok, _} = Templates.create(ctx, %{})
       assert_received {:hit, "POST", "/templates"}
 
-      expect_path(bypass, "GET", "/templates", ~s({"templates": []}))
+      expect_path(server, "GET", "/templates", ~s({"templates": []}))
       assert {:ok, []} = Templates.list(ctx)
       assert_received {:hit, "GET", "/templates"}
 
-      expect_path(bypass, "GET", "/templates/t1")
+      expect_path(server, "GET", "/templates/t1")
       assert {:ok, _} = Templates.get(ctx, "t1")
       assert_received {:hit, "GET", "/templates/t1"}
 
-      expect_path(bypass, "DELETE", "/templates/t1")
+      expect_path(server, "DELETE", "/templates/t1")
       assert {:ok, _} = Templates.delete(ctx, "t1")
       assert_received {:hit, "DELETE", "/templates/t1"}
     end
@@ -90,8 +92,8 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
           {Templates, "/templates", "templates"},
           {Endpoints, "/serverless", "endpoints"}
         ] do
-      test "#{path} returns the entries of both pages", %{bypass: bypass, ctx: ctx} do
-        Bypass.expect(bypass, "GET", unquote(path), fn conn ->
+      test "#{path} returns the entries of both pages", %{server: server, ctx: ctx} do
+        Api.expect(server, "GET", unquote(path), fn conn ->
           conn = Plug.Conn.fetch_query_params(conn)
 
           {entries, pagination} =
@@ -114,30 +116,30 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
   end
 
   describe "network volumes live under /network-volumes in REST v2" do
-    test "create, list, get and delete", %{bypass: bypass, ctx: ctx} do
-      expect_path(bypass, "POST", "/network-volumes")
+    test "create, list, get and delete", %{server: server, ctx: ctx} do
+      expect_path(server, "POST", "/network-volumes")
       assert {:ok, _} = NetworkVolumes.create(ctx, %{})
       assert_received {:hit, "POST", "/network-volumes"}
 
-      expect_path(bypass, "GET", "/network-volumes", ~s({"networkVolumes": []}))
+      expect_path(server, "GET", "/network-volumes", ~s({"networkVolumes": []}))
       assert {:ok, _} = NetworkVolumes.list(ctx)
       assert_received {:hit, "GET", "/network-volumes"}
 
-      expect_path(bypass, "GET", "/network-volumes/nv1")
+      expect_path(server, "GET", "/network-volumes/nv1")
       assert {:ok, _} = NetworkVolumes.get(ctx, "nv1")
       assert_received {:hit, "GET", "/network-volumes/nv1"}
 
-      expect_path(bypass, "DELETE", "/network-volumes/nv1")
+      expect_path(server, "DELETE", "/network-volumes/nv1")
       assert {:ok, _} = NetworkVolumes.delete(ctx, "nv1")
       assert_received {:hit, "DELETE", "/network-volumes/nv1"}
     end
   end
 
   describe "billing" do
-    test "pod usage uses the v2 path and passes the query through", %{bypass: bypass, ctx: ctx} do
+    test "pod usage uses the v2 path and passes the query through", %{server: server, ctx: ctx} do
       test_pid = self()
 
-      Bypass.expect_once(bypass, "GET", "/billing/pods", fn conn ->
+      Api.expect_once(server, "GET", "/billing/pods", fn conn ->
         send(test_pid, {:query, conn.query_string})
 
         conn
@@ -149,12 +151,12 @@ defmodule ExAtlas.Providers.RunPod.ManagementPathsTest do
       assert_received {:query, "podId=pod_9"}
     end
 
-    test "serverless and network volume usage use the v2 paths", %{bypass: bypass, ctx: ctx} do
-      expect_path(bypass, "GET", "/billing/serverless")
+    test "serverless and network volume usage use the v2 paths", %{server: server, ctx: ctx} do
+      expect_path(server, "GET", "/billing/serverless")
       assert {:ok, _} = Billing.endpoints(ctx)
       assert_received {:hit, "GET", "/billing/serverless"}
 
-      expect_path(bypass, "GET", "/billing/network-volumes")
+      expect_path(server, "GET", "/billing/network-volumes")
       assert {:ok, _} = Billing.network_volumes(ctx)
       assert_received {:hit, "GET", "/billing/network-volumes"}
     end

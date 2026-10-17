@@ -1,7 +1,9 @@
 defmodule ExAtlas.Providers.LambdaLabsTest do
-  # Bypass stands in for Lambda's Cloud API v1. A refusal test registers no
+  # ExAtlas.Test.Api stands in for Lambda's Cloud API v1. A refusal test registers no
   # route for POST /instance-operations/launch, so a launch fails the test.
   use ExUnit.Case, async: false
+
+  alias ExAtlas.Test.Api
 
   import ExAtlas.Test.FakeLambda
 
@@ -9,23 +11,24 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
   alias ExAtlas.Spec
 
   setup do
-    bypass = Bypass.open()
+    server = Api.open()
 
     opts = [
       provider: :lambda_labs,
       api_key: "lambda-test-key",
-      base_url: "http://localhost:#{bypass.port}"
+      base_url: server.base_url,
+      req_options: [plug: Api.plug()]
     ]
 
-    {:ok, bypass: bypass, opts: opts}
+    {:ok, server: server, opts: opts}
   end
 
   describe "get_compute/2" do
     test "maps an active instance: IP, ports and URLs, created_at, price, region", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/instances/inst-1", fn conn ->
+      Api.expect_once(server, "GET", "/instances/inst-1", fn conn ->
         assert ["Bearer lambda-test-key"] = Plug.Conn.get_req_header(conn, "authorization")
         json(conn, 200, %{"data" => instance(%{"id" => "inst-1"})})
       end)
@@ -57,7 +60,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
              ]
     end
 
-    test "maps each of Lambda's six statuses", %{bypass: bypass, opts: opts} do
+    test "maps each of Lambda's six statuses", %{server: server, opts: opts} do
       expected = %{
         "booting" => :provisioning,
         "active" => :running,
@@ -68,7 +71,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       }
 
       for {lambda_status, status} <- expected do
-        Bypass.expect_once(bypass, "GET", "/instances/#{lambda_status}", fn conn ->
+        Api.expect_once(server, "GET", "/instances/#{lambda_status}", fn conn ->
           json(conn, 200, %{
             "data" => instance(%{"id" => lambda_status, "status" => lambda_status})
           })
@@ -79,8 +82,8 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       end
     end
 
-    test "a booting instance with no IP yet has ports without URLs", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/instances/inst-1", fn conn ->
+    test "a booting instance with no IP yet has ports without URLs", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/instances/inst-1", fn conn ->
         booting = instance(%{"status" => "booting"}) |> Map.delete("ip")
         json(conn, 200, %{"data" => booting})
       end)
@@ -92,10 +95,10 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     end
 
     test "raw holds no jupyter_token, and no jupyter_url that carries it", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/instances/inst-1", fn conn ->
+      Api.expect_once(server, "GET", "/instances/inst-1", fn conn ->
         json(conn, 200, %{"data" => instance()})
       end)
 
@@ -107,10 +110,10 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     end
 
     test "a 404 is :not_found, which UpstreamStatus reads as vanished", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/instances/gone", &json(&1, 404, not_found()))
+      Api.expect_once(server, "GET", "/instances/gone", &json(&1, 404, not_found()))
 
       assert {:error, %ExAtlas.Error{kind: :not_found, provider: :lambda_labs} = error} =
                ExAtlas.get_compute("gone", opts)
@@ -132,8 +135,8 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
   end
 
   describe "get_compute/2 ids" do
-    test "an id is one path segment: a slash in it is escaped", %{bypass: bypass, opts: opts} do
-      Bypass.expect_once(bypass, "GET", "/instances/a%2F..%2Fb", fn conn ->
+    test "an id is one path segment: a slash in it is escaped", %{server: server, opts: opts} do
+      Api.expect_once(server, "GET", "/instances/a%2F..%2Fb", fn conn ->
         json(conn, 404, not_found())
       end)
 
@@ -142,8 +145,8 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
   end
 
   describe "list_compute/1" do
-    test "follows page_token over two pages", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+    test "follows page_token over two pages", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/instances", fn conn ->
         conn = Plug.Conn.fetch_query_params(conn)
 
         case conn.query_params["page_token"] do
@@ -159,8 +162,8 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       assert Enum.map(computes, & &1.id) == ["a", "b"]
     end
 
-    test "a page token that does not advance fails the list", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+    test "a page token that does not advance fails the list", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/instances", fn conn ->
         json(conn, 200, %{"data" => [instance()], "page_token" => "same"})
       end)
 
@@ -170,7 +173,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       assert message =~ "did not advance"
     end
 
-    test "applies the status, name, region and gpu filters", %{bypass: bypass, opts: opts} do
+    test "applies the status, name, region and gpu filters", %{server: server, opts: opts} do
       h100_8x =
         type_entry("gpu_8x_h100_pcie", 1992, 8, "H100 (80 GB PCIe)", [])["instance_type"]
 
@@ -188,7 +191,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         instance(%{"id" => "running-8x", "name" => "a", "instance_type" => h100_8x})
       ]
 
-      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+      Api.expect(server, "GET", "/instances", fn conn ->
         json(conn, 200, %{"data" => instances, "page_token" => nil})
       end)
 
@@ -208,8 +211,8 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
   describe "terminate/2" do
     @terminate "/instance-operations/terminate"
 
-    defp expect_terminate(bypass, log) do
-      Bypass.expect_once(bypass, "POST", @terminate, fn conn ->
+    defp expect_terminate(server, log) do
+      Api.expect_once(server, "POST", @terminate, fn conn ->
         {body, conn} = read_json(conn)
         assert body == %{"instance_ids" => ["inst-1"]}
         Agent.update(log, &[:terminate | &1])
@@ -217,14 +220,14 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       end)
     end
 
-    defp expect_list(bypass, rulesets) do
-      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+    defp expect_list(server, rulesets) do
+      Api.expect_once(server, "GET", "/firewall-rulesets", fn conn ->
         json(conn, 200, %{"data" => rulesets})
       end)
     end
 
-    defp expect_delete(bypass, log, id, status \\ 200, body \\ %{"data" => %{}}) do
-      Bypass.expect_once(bypass, "DELETE", "/firewall-rulesets/#{id}", fn conn ->
+    defp expect_delete(server, log, id, status \\ 200, body \\ %{"data" => %{}}) do
+      Api.expect_once(server, "DELETE", "/firewall-rulesets/#{id}", fn conn ->
         Agent.update(log, &[{:delete, id} | &1])
         json(conn, status, body)
       end)
@@ -234,19 +237,19 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       {:ok, log: start_supervised!({Agent, fn -> [] end})}
     end
 
-    test "posts the instance id and returns :ok", %{bypass: bypass, opts: opts, log: log} do
-      expect_list(bypass, [])
-      expect_terminate(bypass, log)
+    test "posts the instance id and returns :ok", %{server: server, opts: opts, log: log} do
+      expect_list(server, [])
+      expect_terminate(server, log)
 
       assert :ok = ExAtlas.terminate("inst-1", opts)
     end
 
     test "deletes the instance's ruleset after the instance", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{
           "id" => "rs-other",
           "name" => "atlas-other-0a0a0a0a",
@@ -259,20 +262,20 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         })
       ])
 
-      expect_terminate(bypass, log)
-      expect_delete(bypass, log, "rs-mine")
+      expect_terminate(server, log)
+      expect_delete(server, log, "rs-mine")
 
       assert :ok = ExAtlas.terminate("inst-1", opts)
       assert Agent.get(log, &Enum.reverse/1) == [:terminate, {:delete, "rs-mine"}]
     end
 
     test "keeps a ruleset the caller made that names the instance", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
       # No DELETE route: a delete fails the test.
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{"id" => "rs-theirs", "name" => "my-rules", "instance_ids" => ["inst-1"]}),
         # Prefixed like ours but without the 8-hex suffix ExAtlas appends.
         ruleset(%{
@@ -282,16 +285,16 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         })
       ])
 
-      expect_terminate(bypass, log)
+      expect_terminate(server, log)
       assert :ok = ExAtlas.terminate("inst-1", opts)
     end
 
     test "returns :ok when Lambda refuses the delete as in use", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{
           "id" => "rs-mine",
           "name" => "atlas-mine-1a2b3c4d",
@@ -299,8 +302,8 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         })
       ])
 
-      expect_terminate(bypass, log)
-      expect_delete(bypass, log, "rs-mine", 400, ruleset_in_use())
+      expect_terminate(server, log)
+      expect_delete(server, log, "rs-mine", 400, ruleset_in_use())
 
       # The refusal is expected, so it logs nothing.
       assert ExUnit.CaptureLog.capture_log(fn ->
@@ -311,11 +314,11 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     end
 
     test "returns :ok when the delete fails for another reason", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{
           "id" => "rs-mine",
           "name" => "atlas-mine-1a2b3c4d",
@@ -323,9 +326,9 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         })
       ])
 
-      expect_terminate(bypass, log)
+      expect_terminate(server, log)
 
-      expect_delete(bypass, log, "rs-mine", 500, %{
+      expect_delete(server, log, "rs-mine", 500, %{
         "error" => %{"code" => "global/internal-error"}
       })
 
@@ -335,11 +338,11 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     end
 
     test "a ruleset delete answered 429 then 200 deletes the ruleset", %{
-      bypass: bypass,
+      server: server,
       opts: opts,
       log: log
     } do
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{
           "id" => "rs-mine",
           "name" => "atlas-mine-1a2b3c4d",
@@ -347,10 +350,10 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         })
       ])
 
-      expect_terminate(bypass, log)
+      expect_terminate(server, log)
       calls = :counters.new(1, [])
 
-      Bypass.expect(bypass, "DELETE", "/firewall-rulesets/rs-mine", fn conn ->
+      Api.expect(server, "DELETE", "/firewall-rulesets/rs-mine", fn conn ->
         :counters.add(calls, 1, 1)
 
         if :counters.get(calls, 1) == 1 do
@@ -367,21 +370,21 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
       assert {:delete, "rs-mine"} in Agent.get(log, & &1)
     end
 
-    test "still terminates when the ruleset list fails", %{bypass: bypass, opts: opts, log: log} do
-      Bypass.expect_once(bypass, "GET", "/firewall-rulesets", fn conn ->
+    test "still terminates when the ruleset list fails", %{server: server, opts: opts, log: log} do
+      Api.expect_once(server, "GET", "/firewall-rulesets", fn conn ->
         json(conn, 403, %{"error" => %{"code" => "global/account-inactive"}})
       end)
 
-      expect_terminate(bypass, log)
+      expect_terminate(server, log)
 
       assert :ok = ExAtlas.terminate("inst-1", opts)
     end
 
     test "a refused terminate returns its error and deletes no ruleset", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      expect_list(bypass, [
+      expect_list(server, [
         ruleset(%{
           "id" => "rs-mine",
           "name" => "atlas-mine-1a2b3c4d",
@@ -389,7 +392,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
         })
       ])
 
-      Bypass.expect_once(bypass, "POST", @terminate, fn conn ->
+      Api.expect_once(server, "POST", @terminate, fn conn ->
         json(conn, 404, not_found())
       end)
 
@@ -410,10 +413,10 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
 
   describe "list_gpu_types/1" do
     test "maps name, canonical, description, memory, price and stock", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect_once(bypass, "GET", "/instance-types", fn conn ->
+      Api.expect_once(server, "GET", "/instance-types", fn conn ->
         json(conn, 200, %{"data" => instance_types()})
       end)
 
@@ -441,7 +444,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
     def forward(event, measurements, meta, pid), do: send(pid, {event, measurements, meta})
 
     test "every request emits [:ex_atlas, :lambda_labs, :request] without the key", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
       handler = "lambda-telemetry-#{System.unique_integer()}"
@@ -455,7 +458,7 @@ defmodule ExAtlas.Providers.LambdaLabsTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      Bypass.expect(bypass, "GET", "/instances", fn conn ->
+      Api.expect(server, "GET", "/instances", fn conn ->
         json(conn, 200, %{"data" => [], "page_token" => nil})
       end)
 

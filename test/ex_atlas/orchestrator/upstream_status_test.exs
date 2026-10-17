@@ -1,6 +1,8 @@
 defmodule ExAtlas.Orchestrator.UpstreamStatusTest do
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   alias ExAtlas.Orchestrator.UpstreamStatus
   alias ExAtlas.Providers.Mock
 
@@ -73,20 +75,20 @@ defmodule ExAtlas.Orchestrator.UpstreamStatusTest do
 
   describe "observe/2 when the upstream API misbehaves" do
     setup do
-      bypass = Bypass.open()
+      server = Api.open()
 
       opts = [
         provider: :runpod,
         api_key: "test-key",
-        base_url: "http://localhost:#{bypass.port}",
-        req_options: [retry: false]
+        base_url: server.base_url,
+        req_options: [plug: Api.plug(), retry: false]
       ]
 
-      {:ok, bypass: bypass, opts: opts}
+      {:ok, server: server, opts: opts}
     end
 
-    test "a 404 is a vanished resource", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/pods/pod_1", fn conn ->
+    test "a 404 is a vanished resource", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/pods/pod_1", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(404, ~s({"error": "pod not found"}))
@@ -95,16 +97,16 @@ defmodule ExAtlas.Orchestrator.UpstreamStatusTest do
       assert {:dead, :vanished, nil} = UpstreamStatus.observe("pod_1", opts)
     end
 
-    test "a 500 leaves the resource's fate unknown", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/pods/pod_1", fn conn ->
+    test "a 500 leaves the resource's fate unknown", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/pods/pod_1", fn conn ->
         Plug.Conn.resp(conn, 500, ~s({"error": "boom"}))
       end)
 
       assert {:poll_failed, %ExAtlas.Error{status: 500}} = UpstreamStatus.observe("pod_1", opts)
     end
 
-    test "a 429 leaves the resource's fate unknown", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/pods/pod_1", fn conn ->
+    test "a 429 leaves the resource's fate unknown", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/pods/pod_1", fn conn ->
         Plug.Conn.resp(conn, 429, ~s({"error": "slow down"}))
       end)
 
@@ -112,15 +114,15 @@ defmodule ExAtlas.Orchestrator.UpstreamStatusTest do
                UpstreamStatus.observe("pod_1", opts)
     end
 
-    test "an unreachable API leaves the resource's fate unknown", %{bypass: bypass, opts: opts} do
-      Bypass.down(bypass)
+    test "an unreachable API leaves the resource's fate unknown", %{server: server, opts: opts} do
+      Api.unreachable(server)
 
       assert {:poll_failed, %ExAtlas.Error{kind: :transport}} =
                UpstreamStatus.observe("pod_1", opts)
     end
 
-    test "a malformed body leaves the resource's fate unknown", %{bypass: bypass, opts: opts} do
-      Bypass.expect(bypass, "GET", "/pods/pod_1", fn conn ->
+    test "a malformed body leaves the resource's fate unknown", %{server: server, opts: opts} do
+      Api.expect(server, "GET", "/pods/pod_1", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
         |> Plug.Conn.resp(200, "null")
@@ -131,10 +133,10 @@ defmodule ExAtlas.Orchestrator.UpstreamStatusTest do
     end
 
     test "a bad API key leaves the resource alone rather than declaring it dead", %{
-      bypass: bypass,
+      server: server,
       opts: opts
     } do
-      Bypass.expect(bypass, "GET", "/pods/pod_1", fn conn ->
+      Api.expect(server, "GET", "/pods/pod_1", fn conn ->
         Plug.Conn.resp(conn, 401, ~s({"error": "bad key"}))
       end)
 

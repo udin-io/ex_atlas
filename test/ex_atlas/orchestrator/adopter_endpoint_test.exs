@@ -10,6 +10,8 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
 
   use ExUnit.Case, async: false
 
+  alias ExAtlas.Test.Api
+
   import ExUnit.CaptureLog
 
   alias ExAtlas.Orchestrator
@@ -40,11 +42,16 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
 
   setup do
     Process.register(self(), :adopter_endpoint_test)
-    configured = Bypass.open()
-    forged = Bypass.open()
+    configured = Api.open()
+    forged = Api.open()
 
     previous = Application.get_env(:ex_atlas, :runpod)
-    Application.put_env(:ex_atlas, :runpod, api_key: @node_key, base_url: url(configured))
+
+    Application.put_env(:ex_atlas, :runpod,
+      api_key: @node_key,
+      base_url: url(configured),
+      req_options: [plug: Api.plug()]
+    )
 
     on_exit(fn ->
       if previous,
@@ -58,15 +65,15 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
     {:ok, configured: configured, forged: forged}
   end
 
-  defp url(bypass), do: "http://localhost:#{bypass.port}"
+  defp url(server), do: server.base_url
 
   # Answers RunPod's status read and delete for the pod, and reports each
   # request, with the key it carried, to the test.
-  defp serve(bypass, label) do
+  defp serve(server, label) do
     test_pid = self()
 
     for method <- ["GET", "DELETE"] do
-      Bypass.stub(bypass, method, "/pods/#{@pod_id}", fn conn ->
+      Api.stub(server, method, "/pods/#{@pod_id}", fn conn ->
         auth = conn |> Plug.Conn.get_req_header("authorization") |> List.first()
         send(test_pid, {label, conn.method, auth})
 
@@ -270,10 +277,10 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
   describe "a fresh spawn (control)" do
     test "uses its per-call base_url, not the configured one", %{tmp_dir: dir} do
       start_dets!(dir)
-      per_call = Bypass.open()
+      per_call = Api.open()
       test_pid = self()
 
-      Bypass.expect_once(per_call, "POST", "/pods", fn conn ->
+      Api.expect_once(per_call, "POST", "/pods", fn conn ->
         send(test_pid, {:per_call, "POST"})
 
         conn
@@ -281,7 +288,7 @@ defmodule ExAtlas.Orchestrator.AdopterEndpointTest do
         |> Plug.Conn.resp(201, ~s({"id": "pod-fresh", "desiredStatus": "RUNNING"}))
       end)
 
-      Bypass.stub(per_call, "DELETE", "/pods/pod-fresh", fn conn ->
+      Api.stub(per_call, "DELETE", "/pods/pod-fresh", fn conn ->
         Plug.Conn.resp(conn, 200, "{}")
       end)
 

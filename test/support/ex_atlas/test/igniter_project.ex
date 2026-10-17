@@ -3,8 +3,8 @@ defmodule ExAtlas.Test.IgniterProject do
   Runs an Igniter task against `Igniter.Test.test_project/1` from a temp dir.
 
   Igniter's test mode matches `lib/**/*.{ex,exs}` against each test file's
-  absolute path, and GlobEx's `**` skips a dot directory. A checkout under
-  `~/.claude_worktrees` finds no module, so the project runs from a temp
+  absolute path, and GlobEx's `**` skips a dot directory. A checkout under a
+  dot-directory finds no module, so the project runs from a temp
   directory with no dot segment in its path (#104).
 
   `File.cd!/2` changes the working directory of the whole VM, so a test
