@@ -34,7 +34,7 @@ on PR #149). Ranking, read from `docs/risks.md` at PR #152:
 | Feature | Ticket | State |
 |---|---|---|
 | Release 0.10.0 (milestone 12) | #151 | Merged in #152: version bump, CHANGELOG release section, `guides/upgrading.md` and README pins. The owner publishes and tags `v0.10.0` |
-| S3-compatible object storage (milestone 14), for Eagle's event pictures and clips (udin-io/eagle#1071) | #164, #165, #166 | Slice 1 (#164) merged: `ExAtlas.S3` reads, writes, lists and deletes objects in Tigris, AWS S3 or MinIO. Slice 2 (#165) in review: ranged reads, streamed downloads, multipart upload. Slice 3 (#166) in review: presigned URLs and a setup guide. Release 0.11.0 (#171), the one Eagle pins, follows both |
+| S3-compatible object storage (milestone 14), for Eagle's event pictures and clips (udin-io/eagle#1071) | #164, #165, #166 | Slice 1 (#164) merged: `ExAtlas.S3` reads, writes, lists and deletes objects in Tigris, AWS S3 or MinIO. Slice 2 (#165) merged: ranged reads, streamed downloads, multipart upload. Slice 3 (#166) in review: presigned URLs and a setup guide. Release 0.11.0 (#171), the one Eagle pins, follows both |
 
 Fly retired GPU Machines on 2026-07-31, so `:fly` stays a compute stub;
 Lambda Labs takes its place as the second provider, and Vast.ai the third.

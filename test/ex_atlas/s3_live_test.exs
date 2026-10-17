@@ -115,6 +115,43 @@ defmodule ExAtlas.S3LiveTest do
              Req.put(acl_url, body: "x", headers: [{"x-amz-acl", "public-read"}], retry: false)
   end
 
+  @tag :tmp_dir
+  test "a multipart upload, a ranged read and a streamed download round-trip one file",
+       %{s3: s3, folder: folder, tmp_dir: dir} do
+    mib = 1024 * 1024
+    source = Path.join(dir, "clip.bin")
+    # Two full 5 MiB parts and a short last one, each byte set by its offset.
+    File.write!(source, for(i <- 0..(10 * mib + 1233), into: <<>>, do: <<rem(i, 251)>>))
+    content = File.read!(source)
+    total = byte_size(content)
+    key = "#{folder}/clip café.bin"
+
+    assert :ok = S3.upload_file(s3, key, source, part_size: 5 * mib, content_type: "video/mp4")
+    assert {:ok, %{size: ^total, content_type: "video/mp4"}} = S3.head(s3, key)
+
+    assert {:ok, %{body: body, range: range, total: ^total}} =
+             S3.get_range(s3, key, (5 * mib - 10)..(5 * mib + 9))
+
+    assert range == (5 * mib - 10)..(5 * mib + 9)
+    assert body == binary_part(content, 5 * mib - 10, 20)
+
+    assert {:ok, %{body: tail, range: tail_range}} = S3.get_range(s3, key, {:from, total - 5})
+    assert tail == binary_part(content, total - 5, 5)
+    assert tail_range == (total - 5)..(total - 1)
+
+    assert {:error, %Error{kind: :validation, status: 416}} =
+             S3.get_range(s3, key, total..(total + 10))
+
+    target = Path.join(dir, "copy.bin")
+    assert :ok = S3.download(s3, key, target)
+    assert File.read!(target) == content
+
+    small = Path.join(dir, "small.txt")
+    File.write!(small, "small file")
+    assert :ok = S3.upload_file(s3, "#{folder}/small.txt", small)
+    assert {:ok, "small file"} = S3.get(s3, "#{folder}/small.txt")
+  end
+
   test "a wrong secret is :forbidden and the error holds no key", %{s3: s3, folder: folder} do
     bad = %{s3 | secret_access_key: ExAtlas.Secret.wrap("wrong-secret-0000")}
     key_id = ExAtlas.Secret.reveal(s3.access_key_id)

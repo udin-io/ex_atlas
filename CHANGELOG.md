@@ -20,6 +20,21 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   variables, path style for MinIO, a bucket and a scoped key per purpose,
   clearing unfinished multipart uploads, and presigned links.
 
+### Added: read large objects by range, stream them, upload files in parts (#165)
+
+- `ExAtlas.S3.get_range/3` reads `first..last` or `{:from, first}` of an
+  object and returns the bytes, the range that came and the object's total
+  size, so a video player can seek without the app reading the whole clip. A
+  range that starts past the end is `:validation`, from S3's 416.
+- `download/3` streams an object to a file or a 1-arity function. A file
+  path gets the bytes in a hidden file beside it, renamed over the path only
+  once the last byte is in, so a failure partway leaves no file. It makes one
+  attempt whatever `:retry` says, so a function never sees a chunk twice.
+- `upload_file/4` sends a file of up to `part_size` (default 8 MiB, 5 MiB to
+  5 GiB) in one PutObject, and a larger one as a multipart upload read one
+  part at a time. Any failed step aborts the upload, so the store keeps no
+  parts that bill. A file over 10,000 parts is refused before any request.
+
 ### Added: read and write objects in an S3-compatible bucket (#164)
 
 - `ExAtlas.S3` puts, gets, heads, deletes and lists objects in Tigris, AWS S3
