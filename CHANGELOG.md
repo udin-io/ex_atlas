@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.11.0 — 2026-10-17
+
+### Upgrading
+
+Nothing changes unless you call `ExAtlas.S3`. Bump the version and go on.
+`:xmerl` joins `extra_applications`, so a release that lists its applications
+by hand adds it. Read [the upgrading guide](guides/upgrading.md).
+
 
 ### Changed: `mix hex.audit` passes, because the test suite no longer uses `bypass` (#175)
 

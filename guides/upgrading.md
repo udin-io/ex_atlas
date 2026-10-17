@@ -1,5 +1,18 @@
 # Upgrading
 
+## Upgrading to 0.11.0
+
+0.11.0 adds `ExAtlas.S3` (milestone 14): reads, writes, ranged reads, streamed
+downloads, multipart uploads and presigned links on any S3-compatible bucket.
+An app that does not call `ExAtlas.S3` changes nothing: no config key, no
+migration and no `mix ex_atlas.upgrade` step.
+
+One change can need action. `:xmerl` (part of OTP) joins `extra_applications`.
+A release that lists its applications by hand adds `:xmerl`; one built from
+`mix release` defaults picks it up.
+
+To use object storage, read [the object storage guide](object_storage.md).
+
 ## Upgrading to 0.10.0
 
 0.10.0 signs owner lease rows on the Ecto store, and a live node now deletes a
