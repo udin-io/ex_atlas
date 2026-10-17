@@ -83,7 +83,7 @@ Or add manually to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_atlas, "~> 0.10"}
+    {:ex_atlas, "~> 0.11"}
   ]
 end
 ```
@@ -1767,6 +1767,11 @@ mandate Req — it's an implementation choice of the bundled providers.
   without a tracking record (`:reap_dead_owner_after_ms`, default 15 minutes;
   `reap_dead_owners: false` turns it off). Owner lease rows are signed
   (migration step 3). See [Upgrading](guides/upgrading.md).
+- **v0.11** — `ExAtlas.S3` reads, writes, lists and deletes objects in an
+  S3-compatible bucket (Tigris, AWS S3, MinIO), reads byte ranges, streams
+  downloads, uploads large files in parts and signs presigned links. Nothing
+  changes for an app that does not use it. See
+  [Object storage](guides/object_storage.md).
 
 All future providers will be additive; adding a provider never breaks
 existing call sites.
