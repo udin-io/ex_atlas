@@ -73,6 +73,9 @@ defmodule ExAtlas.S3 do
   @delete_batch 1000
   # 1,000 pages of 1,000 keys: a million objects under one folder.
   @max_list_pages 1000
+  # SigV4's signing key lasts seven days, so a presigned URL can too.
+  @max_presign_seconds 604_800
+  @max_clock_lead_seconds 15 * 60
   # S3's multipart limits: parts of 5 MiB to 5 GiB, the last one smaller, and
   # at most 10,000 parts.
   @min_part_size 5 * 1024 * 1024
@@ -207,6 +210,42 @@ defmodule ExAtlas.S3 do
   end
 
   def delete_prefix(_s3, _prefix), do: not_config!()
+
+  @doc """
+  A URL that lets whoever holds it GET or PUT the object at `key` until it
+  expires, with no key of their own.
+
+  The URL carries a SigV4 signature, the access key id and the expiry, never
+  the secret key. ExAtlas signs it in memory and sends no request, so a key
+  that does not exist still signs. A PUT URL takes any body, of any size the
+  store allows, with the content type its holder picks; S3 refuses an
+  `x-amz-*` header such as an ACL, since the URL does not sign one. Never
+  hand out a PUT link to a bucket a website serves: the holder can upload
+  HTML.
+
+      ExAtlas.S3.presign(s3, :get, "models/abc123", expires_in: 3600)
+      # => {:ok, "https://media.t3.storage.dev/models/abc123?X-Amz-Algorithm=AWS4-HMAC-SHA256&...&X-Amz-Signature=..."}
+
+  Options:
+
+    * `:expires_in` (required): seconds the URL works, from 1 to 604,800
+      (seven days, the most SigV4 allows).
+    * `:now`: the `DateTime` the URL is signed at, for tests. Defaults to
+      now; at most 15 minutes ahead of the clock.
+  """
+  @spec presign(t(), :get | :put, String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, Error.t()}
+  def presign(%Config{region: region} = s3, method, key, opts) when is_binary(region) do
+    with :ok <- check_method(method),
+         :ok <- check_key(key),
+         :ok <- check_options(opts, [:expires_in, :now], "presign"),
+         {:ok, expires_in} <- check_expires_in(Keyword.get(opts, :expires_in)),
+         {:ok, now} <- check_now(Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)) do
+      {:ok, presigned_url(s3, method, key, expires_in, now)}
+    end
+  end
+
+  def presign(_s3, _method, _key, _opts), do: not_config!()
 
   @doc """
   The bytes of `range` in the object, without reading the rest.
@@ -713,6 +752,94 @@ defmodule ExAtlas.S3 do
         body_error("a delete body ExAtlas cannot read")
     end
   end
+
+  # --- presign ---
+
+  defp check_method(method) when method in [:get, :put], do: :ok
+  defp check_method(_method), do: invalid("a presigned URL's method must be :get or :put")
+
+  defp check_expires_in(seconds) when is_integer(seconds) and seconds in 1..@max_presign_seconds,
+    do: {:ok, seconds}
+
+  defp check_expires_in(_seconds),
+    do: invalid("expires_in must be 1..#{@max_presign_seconds} seconds")
+
+  # `now:` lets a test pin the signing time. A time ahead of the clock would
+  # stretch the link's life past `expires_in`, so it may lead by clock skew
+  # only.
+  defp check_now(%DateTime{year: year} = now) when year in 1970..9999 do
+    now = DateTime.shift_zone!(now, "Etc/UTC")
+
+    if DateTime.diff(now, DateTime.utc_now()) <= @max_clock_lead_seconds,
+      do: {:ok, now},
+      else: invalid(":now must not be more than 15 minutes ahead of the clock")
+  end
+
+  defp check_now(_now), do: invalid(":now must be a DateTime in the years 1970 to 9999")
+
+  # SigV4 with the signature in the query, as "Authenticating Requests: Using
+  # Query Parameters (AWS Signature Version 4)" in the S3 API reference sets
+  # out: the payload hash is UNSIGNED-PAYLOAD and only `host` is signed.
+  defp presigned_url(s3, method, key, expires_in, now) do
+    url = key_url(s3, key)
+    uri = URI.parse(url)
+    date = Calendar.strftime(now, "%Y%m%d")
+    scope = "#{date}/#{s3.region}/s3/aws4_request"
+
+    query =
+      query_string([
+        {"X-Amz-Algorithm", "AWS4-HMAC-SHA256"},
+        {"X-Amz-Credential", "#{ExAtlas.Secret.reveal(s3.access_key_id)}/#{scope}"},
+        {"X-Amz-Date", Calendar.strftime(now, "%Y%m%dT%H%M%SZ")},
+        {"X-Amz-Expires", Integer.to_string(expires_in)},
+        {"X-Amz-SignedHeaders", "host"}
+      ])
+
+    canonical_request =
+      Enum.join(
+        [
+          method |> Atom.to_string() |> String.upcase(),
+          uri.path,
+          String.trim_leading(query, "?"),
+          "host:#{host_header(uri)}\n",
+          "host",
+          "UNSIGNED-PAYLOAD"
+        ],
+        "\n"
+      )
+
+    string_to_sign =
+      Enum.join(
+        [
+          "AWS4-HMAC-SHA256",
+          Calendar.strftime(now, "%Y%m%dT%H%M%SZ"),
+          scope,
+          hex_sha256(canonical_request)
+        ],
+        "\n"
+      )
+
+    signature =
+      [
+        "AWS4" <> ExAtlas.Secret.reveal(s3.secret_access_key),
+        date,
+        s3.region,
+        "s3",
+        "aws4_request"
+      ]
+      |> Enum.reduce(fn data, key -> hmac(key, data) end)
+      |> hmac(string_to_sign)
+      |> Base.encode16(case: :lower)
+
+    url <> query <> "&X-Amz-Signature=" <> signature
+  end
+
+  # The Host header a client sends: the port only when it is not the scheme's.
+  defp host_header(%URI{host: host, port: port, scheme: scheme}),
+    do: if(port == URI.default_port(scheme), do: host, else: "#{host}:#{port}")
+
+  defp hmac(key, data), do: :crypto.mac(:hmac, :sha256, key, data)
+  defp hex_sha256(data), do: :sha256 |> :crypto.hash(data) |> Base.encode16(case: :lower)
 
   # --- get_range ---
 

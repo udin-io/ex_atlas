@@ -84,6 +84,7 @@ defmodule ExAtlas.MixProject do
         "guides/fly.md",
         "guides/transient_pods.md",
         "guides/data_staging.md",
+        "guides/object_storage.md",
         "guides/pod_callbacks.md",
         "guides/writing_a_provider.md",
         "guides/telemetry.md",

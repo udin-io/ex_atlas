@@ -28,7 +28,7 @@ streaming, tokens) that are independent of the compute path.
 | Pod callbacks | `ExAtlas.Callback`, `ExAtlas.Callback.Plug` | A pod reports progress, logs and its exit code to the host |
 | Auth | `ExAtlas.Auth.Token`, `ExAtlas.Auth.SignedUrl` | Bearer tokens and signed URLs for browser-to-pod traffic |
 | Fly ops | `ExAtlas.Fly.*` | Deploys, log streaming, token lifecycle |
-| Object storage | `ExAtlas.S3` | `config!/1`, `put/4`, `get/2`, `get_range/3`, `download/3`, `upload_file/4`, `head/2`, `delete/2`, `list/2`, `delete_prefix/2` on any S3-compatible bucket: Tigris, AWS S3, MinIO |
+| Object storage | `ExAtlas.S3` | `config!/1`, `put/4`, `get/2`, `get_range/3`, `download/3`, `upload_file/4`, `head/2`, `delete/2`, `list/2`, `delete_prefix/2`, `presign/4` on any S3-compatible bucket: Tigris, AWS S3, MinIO |
 
 Every public function takes keyword options and returns `{:ok, struct}` or
 `{:error, %ExAtlas.Error{}}`. Structs live in `ExAtlas.Spec.*`.
@@ -68,7 +68,7 @@ See [architecture.md](architecture.md) for the modules and processes.
 | Release 0.8.0 (#94) | `mix ex_atlas.upgrade` has a `"0.8.0"` step that edits no file: it warns about each module with `@behaviour ExAtlas.Provider` and about `start_orchestrator: true` with no `:reap_owner`. `guides/upgrading.md` covers the six breaking changes. Published to Hex on 2026-10-02, from tag `v0.8.0` on `939cf2e` |
 | Release 0.9.0 (#141) | Merged in #142: `mix ex_atlas.upgrade`'s `"0.9.0"` step edits no file and names a missing callback secret; `guides/upgrading.md` covers the five changes. The owner publishes and tags `v0.9.0` |
 | Release 0.10.0 (#151) | PR #152: version 0.10.0, the CHANGELOG release section, `guides/upgrading.md` "Upgrading to 0.10.0" (migration step 3, dead-owner deletion on by default, `reap_dead_owners: false`, the accepted replay and row-lock risk), README pins. `mix ex_atlas.upgrade`'s `"0.10.0"` step (#148) names the step-3 migration for an Ecto-store host. The owner publishes and tags `v0.10.0` |
-| S3-compatible object storage (milestone 14) | Slice 1 (#164): `ExAtlas.S3` reads, writes, lists and deletes objects, signed by Req's `:aws_sigv4`. Slice 2 (#165): ranged reads, streamed downloads and multipart upload. Presigned URLs with a setup guide (#166) come next |
+| S3-compatible object storage (milestone 14) | Slice 1 (#164): `ExAtlas.S3` reads, writes, lists and deletes objects, signed by Req's `:aws_sigv4`. Slice 2 (#165): ranged reads, streamed downloads and multipart upload. Slice 3 (#166): presigned URLs and `guides/object_storage.md`. The release Eagle pins is #171 |
 | CI | Red at `hex.audit` by decision; see [risks.md](risks.md) |
 
 ## Pages

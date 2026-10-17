@@ -607,6 +607,204 @@ defmodule ExAtlas.S3Test do
     end
   end
 
+  describe "presign/4" do
+    # AWS's worked example in "Authenticating Requests: Using Query Parameters
+    # (AWS Signature Version 4)", S3 API reference.
+    @aws_url "https://examplebucket.s3.amazonaws.com/test.txt" <>
+               "?X-Amz-Algorithm=AWS4-HMAC-SHA256" <>
+               "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request" <>
+               "&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host" <>
+               "&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+    defp aws_example do
+      S3.config!(
+        bucket: "examplebucket",
+        endpoint: "https://s3.amazonaws.com",
+        region: "us-east-1",
+        access_key_id: "AKIAIOSFODNN7EXAMPLE",
+        secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      )
+    end
+
+    test "signs AWS's documented example to its published URL, byte for byte" do
+      assert {:ok, @aws_url} =
+               S3.presign(aws_example(), :get, "test.txt",
+                 expires_in: 86_400,
+                 now: ~U[2013-05-24 00:00:00Z]
+               )
+    end
+
+    test "a time with microseconds signs as its whole second" do
+      assert {:ok, @aws_url} =
+               S3.presign(aws_example(), :get, "test.txt",
+                 expires_in: 86_400,
+                 now: ~U[2013-05-24 00:00:00.999999Z]
+               )
+    end
+
+    test "PUT differs from GET only in the signature" do
+      opts = [expires_in: 3600, now: ~U[2026-10-17 10:00:00Z]]
+      {:ok, get} = S3.presign(aws_example(), :get, "a.jpg", opts)
+      {:ok, put} = S3.presign(aws_example(), :put, "a.jpg", opts)
+
+      [get_base, get_sig] = String.split(get, "&X-Amz-Signature=")
+      [put_base, put_sig] = String.split(put, "&X-Amz-Signature=")
+      assert get_base == put_base
+      assert get_sig != put_sig
+      assert put_sig =~ ~r/\A[0-9a-f]{64}\z/
+    end
+
+    test "the URL carries the expiry, the key id and the time, never the secret" do
+      {:ok, url} = S3.presign(s3(&reply(&1, 200)), :get, "events/1/a.jpg", expires_in: 900)
+      uri = URI.parse(url)
+
+      assert uri.host == "media.t3.storage.dev"
+      assert uri.path == "/events/1/a.jpg"
+
+      params = URI.decode_query(uri.query)
+
+      assert Map.keys(params) ==
+               ~w(X-Amz-Algorithm X-Amz-Credential X-Amz-Date X-Amz-Expires X-Amz-Signature X-Amz-SignedHeaders)
+
+      assert params["X-Amz-Expires"] == "900"
+      assert params["X-Amz-Credential"] =~ ~r"\A#{@key_id}/\d{8}/auto/s3/aws4_request\z"
+      refute url =~ @secret
+      refute url =~ URI.encode_www_form(@secret)
+    end
+
+    test "path style puts the bucket in the path and keeps the port in the host" do
+      s3 = s3(&reply(&1, 200), endpoint: "http://minio.local:9000", path_style: true)
+      {:ok, url} = S3.presign(s3, :put, "a b.jpg", expires_in: 60)
+      uri = URI.parse(url)
+
+      assert {uri.scheme, uri.host, uri.port, uri.path} ==
+               {"http", "minio.local", 9000, "/media/a%20b.jpg"}
+    end
+
+    test "an endpoint on its own port signs the port into the host, as Req's own signer does" do
+      s3 = s3(&reply(&1, 200), endpoint: "http://minio.local:9000", path_style: true)
+      now = ~U[2026-10-17 10:00:00Z]
+
+      # Req's internal signer stands in as a second, independent implementation.
+      expected =
+        Req.Utils.aws_sigv4_url(
+          access_key_id: @key_id,
+          secret_access_key: @secret,
+          region: "auto",
+          service: "s3",
+          datetime: now,
+          method: :put,
+          url: "http://minio.local:9000/media/events/a.jpg",
+          expires: 60
+        )
+
+      assert {:ok, url} = S3.presign(s3, :put, "events/a.jpg", expires_in: 60, now: now)
+      assert signature(url) =~ ~r/\A[0-9a-f]{64}\z/
+      assert signature(url) == signature(to_string(expected))
+    end
+
+    test "every character a key can hold reaches the same key, and adds no query parameter" do
+      chars =
+        Enum.map(0x20..0x7E, &<<&1>>) ++ ["é", "ü", "日本", "😀", " ", "​"]
+
+      for char <- chars, key = "dir/a#{char}b.jpg", check_key_ok?(key) do
+        test = self()
+
+        s3 =
+          s3(fn conn ->
+            send(test, {:presigned, conn.request_path, conn.query_string})
+            reply(conn, 200)
+          end)
+
+        assert {:ok, url} = S3.presign(s3, :get, key, expires_in: 60), "refused #{inspect(key)}"
+
+        assert {:ok, %Req.Response{status: 200}} =
+                 Req.get(url, plug: s3.req_options[:plug], retry: false)
+
+        assert_received {:presigned, path, query}
+        assert URI.decode(path) == "/" <> key, "#{inspect(key)} reached #{path}"
+        assert query |> URI.decode_query() |> map_size() == 6, "#{inspect(key)} changed the query"
+      end
+    end
+
+    test "an expiry outside 1..604800 seconds, or none, is refused" do
+      s3 = s3(&reply(&1, 200))
+
+      for opts <- [
+            [],
+            [expires_in: 0],
+            [expires_in: 604_801],
+            [expires_in: -1],
+            [expires_in: 60.0],
+            [expires_in: "60"]
+          ] do
+        assert {:error,
+                %Error{kind: :validation, message: "expires_in must be 1..604800 seconds"}} =
+                 S3.presign(s3, :get, "a.jpg", opts),
+               "accepted #{inspect(opts)}"
+      end
+
+      assert {:ok, _} = S3.presign(s3, :get, "a.jpg", expires_in: 1)
+      assert {:ok, _} = S3.presign(s3, :get, "a.jpg", expires_in: 604_800)
+    end
+
+    test "a bad method, key, time or option is refused" do
+      s3 = s3(&reply(&1, 200))
+
+      for {method, key, opts} <- [
+            {:delete, "a.jpg", [expires_in: 60]},
+            {"GET", "a.jpg", [expires_in: 60]},
+            {:get, "/a.jpg", [expires_in: 60]},
+            {:get, "a/../b", [expires_in: 60]},
+            {:get, "a.jpg", [expires_in: 60, now: "2026-10-17"]},
+            {:get, "a.jpg", [expires_in: 60, content_type: "image/jpeg"]},
+            {:get, "a.jpg", :not_a_list}
+          ] do
+        assert {:error, %Error{kind: :validation}} = S3.presign(s3, method, key, opts),
+               "accepted #{inspect({method, key, opts})}"
+      end
+    end
+
+    test "a presigned pair passes data staging's URL check, special characters included" do
+      s3 = s3(&reply(&1, 200))
+      {:ok, get} = S3.presign(s3, :get, "datasets/a b[1]{x}.tar.gz", expires_in: 3600)
+      {:ok, put} = S3.presign(s3, :put, "artifacts/run 1.tar.gz", expires_in: 3600)
+
+      assert {:ok, %ExAtlas.Spec.Staging{}} =
+               ExAtlas.Spec.Staging.new(%{dataset_url: get, artifact_url: put})
+    end
+
+    test "a time more than 15 minutes ahead, or outside years 1970 to 9999, is refused" do
+      s3 = s3(&reply(&1, 200))
+      soon = DateTime.add(DateTime.utc_now(), 10 * 60)
+
+      for now <- [
+            DateTime.add(DateTime.utc_now(), 30 * 86_400),
+            DateTime.add(DateTime.utc_now(), 20 * 60),
+            ~U[1969-12-31 23:59:59Z],
+            %{~U[2026-01-01 00:00:00Z] | year: 10_000}
+          ] do
+        assert {:error, %Error{kind: :validation}} =
+                 S3.presign(s3, :get, "a.jpg", expires_in: 60, now: now),
+               "accepted now: #{inspect(now)}"
+      end
+
+      assert {:ok, _} = S3.presign(s3, :get, "a.jpg", expires_in: 60, now: soon)
+    end
+
+    test "a hand-built config with a region that is not a string raises without the key" do
+      s3 = %{s3(&reply(&1, 200)) | region: :x}
+
+      error = assert_raise ArgumentError, fn -> S3.presign(s3, :get, "a.jpg", expires_in: 60) end
+      refute Exception.message(error) =~ @secret
+    end
+
+    test "signs in memory, with no request" do
+      assert {:ok, _} = S3.presign(s3(&reply(&1, 200)), :get, "a.jpg", expires_in: 60)
+      refute_received {:request, _}
+    end
+  end
+
   describe "get_range/3" do
     test "sends one Range and answers with the bytes, the range and the total" do
       s3 =
@@ -1160,6 +1358,10 @@ defmodule ExAtlas.S3Test do
     end
   end
 
+  defp signature(url), do: URI.decode_query(URI.parse(url).query)["X-Amz-Signature"]
+
+  defp check_key_ok?(key), do: String.valid?(key) and not String.match?(key, ~r/[[:cntrl:]]/u)
+
   describe "no credential leaves in an error" do
     test "neither key appears in any error return, a SignatureDoesNotMatch body included" do
       leaky =
@@ -1180,6 +1382,8 @@ defmodule ExAtlas.S3Test do
         S3.get(s3(&xml(&1, 403, "<Error><Code>#{@key_id}</Code></Error>")), "a.jpg"),
         S3.get(s3(&xml(&1, 404, s3_error("NoSuchKey"))), "a.jpg"),
         S3.get(s3(&Req.Test.transport_error(&1, :timeout)), "a.jpg"),
+        S3.presign(s3(&reply(&1, 200)), :get, "a.jpg", expires_in: 0),
+        S3.presign(s3(&reply(&1, 200)), :get, "/a.jpg", expires_in: 60),
         S3.get_range(s3(&xml(&1, 403, leaky)), "a.jpg", 0..9),
         S3.get_range(s3(&xml(&1, 416, leaky)), "a.jpg", 0..9),
         S3.download(s3(&xml(&1, 403, leaky)), "a.jpg", fn _chunk -> :ok end),

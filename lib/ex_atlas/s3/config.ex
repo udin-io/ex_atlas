@@ -151,13 +151,20 @@ defmodule ExAtlas.S3.Config do
       %URI{scheme: scheme, host: host, path: path, query: nil, fragment: nil}
       when scheme in ["http", "https"] and is_binary(host) and host != "" and
              path in [nil, "", "/"] ->
+        # A browser lowercases the host before it sends a presigned link, and
+        # SigV4 signs the host as given, so the config keeps it lowercase.
         if host =~ ~r/\A[A-Za-z0-9.\-]+\z/,
-          do: {:ok, String.trim_trailing(url, "/")},
+          do: {:ok, String.trim_trailing(lowercase_host(url), "/")},
           else: endpoint_error()
 
       _other ->
         endpoint_error()
     end
+  end
+
+  defp lowercase_host(url) do
+    uri = URI.parse(url)
+    URI.to_string(%{uri | scheme: String.downcase(uri.scheme), host: String.downcase(uri.host)})
   end
 
   defp endpoint_error,

@@ -7,6 +7,19 @@ and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Added: presigned links to private objects, and a setup guide (#166)
+
+- `ExAtlas.S3.presign/4` signs a GET or PUT URL that works for
+  `expires_in:` seconds (required, 1 to 604,800) with no key of its own. It
+  signs in memory and sends no request. The URL carries the access key id,
+  never the secret key. `now:` pins the signing time for tests, at most
+  15 minutes ahead of the clock.
+- `config!/1` lowercases the endpoint's host. A browser sends the host
+  lowercase, and SigV4 signs it as given.
+- `guides/object_storage.md` sets up Tigris on Fly, AWS S3 and MinIO: the
+  variables, path style for MinIO, a bucket and a scoped key per purpose,
+  clearing unfinished multipart uploads, and presigned links.
+
 ### Added: read large objects by range, stream them, upload files in parts (#165)
 
 - `ExAtlas.S3.get_range/3` reads `first..last` or `{:from, first}` of an
