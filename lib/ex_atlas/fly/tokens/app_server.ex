@@ -286,7 +286,7 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
   defp acquire_from_cli(state) do
     task =
       Task.async(fn ->
-        state.cmd_fn.("fly", ["tokens", "create", "readonly"], stderr_to_stdout: true)
+        run_cli(state.cmd_fn)
       end)
 
     case Task.yield(task, state.cli_timeout_ms) || Task.shutdown(task, :brutal_kill) do
@@ -323,6 +323,17 @@ defmodule ExAtlas.Fly.Tokens.AppServer do
 
         :miss
     end
+  end
+
+  # `System.cmd/3` raises `:enoent` when `fly` is not on the PATH. Any other
+  # raise is a bug and still crashes the task.
+  defp run_cli(cmd_fn) do
+    cmd_fn.("fly", ["tokens", "create", "readonly"], stderr_to_stdout: true)
+  rescue
+    e in ErlangError ->
+      if e.original == :enoent,
+        do: {"fly executable not found on PATH", 127},
+        else: reraise(e, __STACKTRACE__)
   end
 
   defp check_manual_token(state) do
