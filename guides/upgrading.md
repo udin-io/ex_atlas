@@ -1,5 +1,12 @@
 # Upgrading
 
+## Upgrading to 0.11.1
+
+0.11.1 changes no code. It moves the locked dependencies to their latest
+releases, plug_crypto 2.2.1 among them. Your app's own lock decides which
+versions you get, so move plug_crypto to 2.2.1 there. Nothing else to do: no
+config key, no migration and no `mix ex_atlas.upgrade` step.
+
 ## Upgrading to 0.11.0
 
 0.11.0 adds `ExAtlas.S3` (milestone 14): reads, writes, ranged reads, streamed
