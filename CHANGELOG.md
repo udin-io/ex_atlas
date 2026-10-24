@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.11.1 — 2026-10-24
+
+### Changed: every dependency in the lock moves to its latest release (#178, #177)
+
+- plug_crypto 2.2.1 fixes CVE-2026-105963 (a secret key base shown in a
+  stack trace), which stopped `bin/ci` at `mix hex.audit`. phoenix_live_dashboard
+  0.9, phoenix_pubsub 2.4 and req 0.7.5 move too.
+- The version ranges in `mix.exs` do not change, so your own lock decides
+  which versions you get. No code changes.
+
 ## v0.11.0 — 2026-10-17
 
 ### Upgrading
