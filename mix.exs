@@ -1,7 +1,7 @@
 defmodule ExAtlas.MixProject do
   use Mix.Project
 
-  @version "0.11.1"
+  @version "0.11.2"
   @source_url "https://github.com/udin-io/ex_atlas"
 
   def project do

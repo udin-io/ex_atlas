@@ -1,5 +1,12 @@
 # Upgrading
 
+## Upgrading to 0.11.2
+
+0.11.2 changes no code. It moves the locked ecto to 3.14.3 and phoenix_html to
+4.4.0, which fix two advisories. Your app's own lock decides which versions you
+get, so move both there. Nothing else to do: no config key, no migration and no
+`mix ex_atlas.upgrade` step.
+
 ## Upgrading to 0.11.1
 
 0.11.1 changes no code. It moves the locked dependencies to their latest
