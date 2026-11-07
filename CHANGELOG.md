@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and ExAtlas adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.11.2 — 2026-11-07
+
+### Changed: the lock moves ecto and phoenix_html past their advisories (#182)
+
+- ecto 3.14.3 fixes EEF-CVE-2026-118391, a query cache that grew without limit
+  from interpolated JSON paths and splice lists.
+- phoenix_html 4.4.0 fixes EEF-CVE-2026-117645, an attribute injection through
+  unvalidated attribute names. Only the dev and test lock changes; the version
+  ranges ExAtlas publishes are unchanged.
+
 ## v0.11.1 — 2026-10-24
 
 ### Changed: every dependency in the lock moves to its latest release (#178, #177)
